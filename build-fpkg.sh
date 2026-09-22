@@ -56,19 +56,40 @@
 # TARGET_APP_VER (patch-only) is dropped. APP_VER is what the console displays.
 #
 # ----------------------------------------------------------------------------
+# DLC: builds a SEPARATE add-on (ac) pkg for each DLC found, alongside the
+# app/remaster pkg. This is the kstuff-native approach: the DLC installs as its
+# own pkg and is unlocked by a DLC-capable kstuff on the console (no eboot patch,
+# no merging). Each "*-ac" DLC dump dir (content + a populated sce_sys, as
+# produced by a recent ftpdump) becomes one pkg_ps4_ac_data pkg.
+#
+# Building an ac pkg needs a file list, but gengp4_app (the only gp4 generator
+# we have) CRASHES when it parses an ac-category param.sfo, and it also rewrites
+# the scanned tree's param.sfo in place. So we scan a hardlinked STAGE of the
+# DLC tree with a throwaway "app" param.sfo swapped in, capture the file list,
+# restore the real ac param.sfo in the stage, splice the list into an
+# ac_data project (gp4_proj_create), and img_create from the stage. The
+# original dump is never modified.
+#
+# ----------------------------------------------------------------------------
 # USAGE
 #   build-fpkg.sh [options] <base_dump_dir>
 #     --content-id CID   pkg content id (default: read from base param.sfo)
 #     --update DIR       explicit update/patch dump to merge onto the base
 #     --no-update        base-only; do not auto-merge a sibling patch
+#     --dlc DIR          DLC dump dir (holds one or more "*-ac" content dirs) to
+#                        build add-on pkgs from; repeatable. Default: auto-detect
+#                        a sibling "<foo>-dlc" dir.
+#     --no-dlc           do not build any DLC pkgs
 #     --keystone MODE    retail (default) | kscreate
 #     --ps2-tid NNNNN    force the 5-digit PS2 serial for emu auth
 #                        (default: auto-derived from CONTENT_ID for PS2 titles)
 #     --out DIR          output directory (default: cwd)
 #
 #   By default, if the base dump dir is named "<foo>-app", the script looks for
-#   a sibling "<foo>-patch" and merges it automatically. Pass --no-update to
-#   build the base alone, or --update DIR to point at a patch elsewhere.
+#   a sibling "<foo>-patch" and merges it automatically, and a sibling
+#   "<foo>-dlc" whose "*-ac" dirs each become a separate add-on pkg. Pass
+#   --no-update / --no-dlc to skip, or --update DIR / --dlc DIR to point
+#   elsewhere.
 # ============================================================================
 set -euo pipefail
 
@@ -81,6 +102,7 @@ ORBIS_PUB_CMD="${ORBIS_PUB_CMD:-$SDK_DIR/orbis-pub-cmd.exe}"
 MAKE_FSELF="${MAKE_FSELF:-$SELF_DIR/make_fself.py}"
 SFO_TOOL="${SFO_TOOL:-$SELF_DIR/sfo}"
 FAKE_PASSCODE="00000000000000000000000000000000"
+DLC_ENT_KEY="00000000000000000000000000000000"   # zero entitlement key (kstuff fakes the check)
 WINE_OVERRIDES="wineps.drv,localspl.dll,spoolss.dll=d"
 
 # PS2-emu auth-info templates (authinfo_emu.txt, FW=501). The first 2 bytes
@@ -99,12 +121,17 @@ sfo_edit() { "$SFO_TOOL" "$@" >/dev/null 2>&1 || true; }
 # --- args ------------------------------------------------------------------
 # UPDATE: "" = auto-discover sibling "-patch" dir; "none" = base-only;
 #         a path = explicit update dir.
+# DLC_DIRS: explicit --dlc dirs (repeatable). DLC_MODE: "" = auto-discover a
+# sibling "-dlc" dir; "none" = do not build DLC; "explicit" = use DLC_DIRS.
 CONTENT_ID="" UPDATE="" DUMP="" OUT_DIR="$PWD" KEYSTONE_MODE="retail" PS2_TID=""
+DLC_MODE="" ; declare -a DLC_DIRS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --content-id) CONTENT_ID="${2:?}"; shift 2 ;;
     --update)     UPDATE="${2%/}"; shift 2 ;;
     --no-update)  UPDATE="none"; shift ;;
+    --dlc)        DLC_DIRS+=("${2%/}"); DLC_MODE="explicit"; shift 2 ;;
+    --no-dlc)     DLC_MODE="none"; shift ;;
     --keystone)   KEYSTONE_MODE="${2:?}"; shift 2 ;;
     --ps2-tid)    PS2_TID="${2:?}"; shift 2 ;;
     --out)        OUT_DIR="${2:?}"; shift 2 ;;
@@ -142,6 +169,30 @@ else
   esac
 fi
 
+# --- resolve the DLC dir(s) ------------------------------------------------
+if [ "$DLC_MODE" = "none" ]; then
+  DLC_DIRS=()                                 # explicitly no DLC
+elif [ "$DLC_MODE" = "explicit" ]; then
+  for d in "${DLC_DIRS[@]}"; do
+    [ -d "$d" ] || die "dlc dir not found: $d"
+  done
+else
+  # auto-discover: a sibling dir named like the base but with -app -> -dlc.
+  case "$DUMP" in
+    *-app)
+      cand="${DUMP%-app}-dlc"
+      if [ -d "$cand" ]; then
+        DLC_DIRS=("$cand")
+        log "auto-detected dlc: $cand  (use --no-dlc to skip)"
+      fi
+      ;;
+  esac
+fi
+if [ "${#DLC_DIRS[@]}" -gt 0 ]; then
+  _tmp=(); for d in "${DLC_DIRS[@]}"; do _tmp+=("$(cd "$d" && pwd)"); done
+  DLC_DIRS=("${_tmp[@]}"); unset _tmp
+fi
+
 [ -n "$CONTENT_ID" ] || CONTENT_ID="$(sfo_get "$DUMP/sce_sys/param.sfo" CONTENT_ID)"
 [ -n "$CONTENT_ID" ] || die "could not determine CONTENT_ID"
 
@@ -162,6 +213,7 @@ fi
 log "content id : $CONTENT_ID"
 log "type       : $([ "$IS_PS2" -eq 1 ] && echo "PS2 classic (ps2-tid=$PS2_TID)" || echo "normal PS4")"
 log "update     : ${UPDATE:-<none>}"
+log "dlc        : $([ "${#DLC_DIRS[@]}" -gt 0 ] && printf '%s ' "${DLC_DIRS[@]}" || echo "<none>")"
 log "keystone   : $KEYSTONE_MODE"
 
 # --- PS2 auth (computed once; used to pre-sign the emu modules) ------------
@@ -232,6 +284,102 @@ gen_gp4() {
   echo "$gp4"
 }
 
+# ---------------------------------------------------------------------------
+# build_one_dlc <ac_content_dir>
+#   Build a single pkg_ps4_ac_data (add-on) pkg from one "*-ac" DLC dump dir
+#   (content + a populated sce_sys). Emits the pkg into OUT_DIR.
+#
+#   gengp4_app can't scan an ac tree (it crashes on CATEGORY=ac and, worse,
+#   rewrites the tree's param.sfo in place), so we:
+#     1. hardlink the DLC tree into a scratch STAGE (original stays untouched),
+#     2. save the real ac param.sfo, drop a throwaway "app" param.sfo in,
+#     3. gengp4_app the stage -> gives us the <files>/<rootdir> list,
+#     4. restore the real ac param.sfo in the stage,
+#     5. gp4_proj_create an ac_data project (real content_id / zero ent. key),
+#        splice in the scanned file list, drop any stray backup-file entries,
+#     6. img_create from the stage.
+# ---------------------------------------------------------------------------
+build_one_dlc() {
+  local ac="$1"
+  [ -f "$ac/sce_sys/param.sfo" ] || die "dlc: $ac has no sce_sys/param.sfo (re-dump with a recent ftpdump)"
+  local cid cat
+  cid="$(sfo_get "$ac/sce_sys/param.sfo" CONTENT_ID)"
+  cat="$(sfo_get "$ac/sce_sys/param.sfo" CATEGORY)"
+  [ -n "$cid" ] || die "dlc: could not read CONTENT_ID from $ac"
+  [ "$cat" = "ac" ] || log "dlc: warning: $ac CATEGORY is '$cat' (expected 'ac')"
+  log "dlc: building add-on pkg for $cid"
+
+  local tag; tag="$(printf '%s' "$cid" | tr -c 'A-Za-z0-9_-' '_')"
+  local stage="$OUT_DIR/fpkgwork_dlc_$tag"
+  local gp4="$OUT_DIR/dlc_$tag.gp4"
+  rm -rf "$stage"; rm -f "$gp4"
+
+  # 1. hardlinked stage of the DLC tree (never touch the original dump).
+  #    Bulk content is hardlinked (fast, no extra space), but sce_sys is
+  #    re-copied as REAL files: gengp4_app rewrites param.sfo in place, and a
+  #    hardlink would write straight through to the original dump.
+  cp -al "$ac" "$stage" 2>/dev/null || cp -a "$ac" "$stage"
+  rm -rf "$stage/sce_sys"; cp -a "$ac/sce_sys" "$stage/sce_sys"
+
+  # 2. swap in a throwaway app param.sfo so gengp4_app can scan without crashing
+  local real_sfo="$stage/sce_sys/param.sfo"
+  cp "$real_sfo" "$real_sfo.real"
+  cp "$DUMP/sce_sys/param.sfo" "$real_sfo"     # base app sfo = safe decoy
+
+  # 3. scan -> file list (gengp4_app writes <stage>.gp4 and edits the decoy)
+  local scan="$stage.gp4"; rm -f "$scan"
+  ( cd "$(dirname "$stage")" && wine_run "$GENGP4_APP" "$(winpath "$stage")" ) || true
+  [ -f "$scan" ] || die "dlc: gengp4 scan failed for $cid"
+
+  # 4. restore the real ac param.sfo in the stage; remove the decoy backup
+  mv -f "$real_sfo.real" "$real_sfo"
+
+  # 5. ac_data project + splice the scanned file list
+  wine_run "$ORBIS_PUB_CMD" gp4_proj_create \
+    --volume_type pkg_ps4_ac_data --content_id "$cid" \
+    --passcode "$FAKE_PASSCODE" --entitlement_key "$DLC_ENT_KEY" \
+    "$(winpath "$gp4")" >/dev/null 2>&1 || die "dlc: gp4_proj_create failed for $cid"
+
+  # Splice the scanned file list into the ac project: gp4_proj_create emits an
+  # empty '<files img_no="0"/>' + '<rootdir/>' pair; replace them with the scan's
+  # populated <files>..</rootdir>. Drop the transient decoy-backup entry
+  # (param.sfo.real, which existed in sce_sys during the scan).
+  local frag; frag="$(mktemp)"
+  sed -n '/<files/,/<\/rootdir>/p' "$scan" | grep -v 'param\.sfo\.real' > "$frag"
+  grep -q '<files' "$frag" || die "dlc: scan produced no file list for $cid"
+  # read $frag in after the <files.../> placeholder, then delete both placeholders
+  sed -e "/<files img_no=\"0\"\/>/{r $frag" -e "d}" -e "/<rootdir\/>/d" \
+    "$gp4" > "$gp4.tmp" && mv "$gp4.tmp" "$gp4"
+  rm -f "$frag" "$scan"
+
+  # 6. build
+  log "dlc: img_create ($cid)"
+  wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --no_progress_bar \
+    "$(winpath "$gp4")" "$(winpath "$OUT_DIR")" || true
+
+  local pkg; pkg="$(ls -t "$OUT_DIR"/"$cid"-*.pkg 2>/dev/null | head -1)"
+  [ -n "$pkg" ] || die "dlc: no pkg produced for $cid"
+  rm -rf "$stage" "$gp4"
+  log "dlc: done: $pkg"
+  echo "$pkg"
+}
+
+# ---------------------------------------------------------------------------
+# build_dlc_pkgs
+#   Build an add-on pkg for every "*-ac" dir across all DLC_DIRS. No-op if none.
+# ---------------------------------------------------------------------------
+build_dlc_pkgs() {
+  [ "${#DLC_DIRS[@]}" -gt 0 ] || return 0
+  local dd sub any=0
+  for dd in "${DLC_DIRS[@]}"; do
+    while IFS= read -r sub; do
+      build_one_dlc "$sub"
+      any=1
+    done < <(find "$dd" -mindepth 1 -maxdepth 1 -type d -name '*-ac' | sort)
+  done
+  [ "$any" -eq 1 ] || log "dlc: no '*-ac' dirs found under: ${DLC_DIRS[*]}"
+}
+
 # ===========================================================================
 # BASE-ONLY build
 # ===========================================================================
@@ -248,6 +396,7 @@ if [ -z "$UPDATE" ]; then
   log "done: $PKG"
   ls -la "$PKG" >&2
   echo "$PKG"
+  build_dlc_pkgs                     # separate add-on pkg(s), if any DLC
   exit 0
 fi
 
@@ -316,3 +465,5 @@ rm -rf "$STAGE" "$GP4" "$BASE_OUT"
 log "done: $PKG"
 ls -la "$PKG" >&2
 echo "$PKG"
+
+build_dlc_pkgs                       # separate add-on pkg(s), if any DLC
