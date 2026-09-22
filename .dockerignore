@@ -1,0 +1,14 @@
+CUSA*/
+PPSA*/
+PS4_Fake_PKG_Tools_3/
+tools/
+wrk_temp/
+*.pkg
+*.gp4
+*.log
+.git/
+.gitignore
+.gitattributes
+docker-compose.yml
+Dockerfile
+README*
