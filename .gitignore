@@ -1,0 +1,10 @@
+
+/PS4_Fake_PKG_Tools_3
+/CUSA*/
+/PPSA*/
+*.pkg
+*.gp4
+sfo
+/wrk_temp
+/tools
+*.log
