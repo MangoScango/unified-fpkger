@@ -39,6 +39,7 @@ RUN dpkg --add-architecture i386 \
         python3 \
         bash coreutils sed grep findutils \
         xvfb gosu \
+        curl sqlite3 lftp \
     && rm -rf "/opt/wine-${WINE_BRANCH}/lib/wine/i386-unix" \
     && rm -rf /var/lib/apt/lists/*
 
@@ -53,10 +54,16 @@ ENV SDK_DIR=/opt/fpkger/PS4_Fake_PKG_Tools_3 \
 
 COPY --from=deps /out-sfo      /opt/fpkger/sfo
 COPY --from=deps /out-pkgtools /opt/fpkger/PS4_Fake_PKG_Tools_3
-COPY build-fpkg.sh make_fself.py /opt/fpkger/
+# ftpdump takes sfo from its own directory when sfo_path is unset, so they ship
+# side by side.
+COPY build-fpkg.sh dump-build.sh ftpdump.sh make_fself.py /opt/fpkger/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /opt/fpkger/build-fpkg.sh /opt/fpkger/sfo /usr/local/bin/entrypoint.sh \
-    && ln -s /opt/fpkger/build-fpkg.sh /usr/local/bin/build-fpkg.sh
+RUN chmod +x /opt/fpkger/build-fpkg.sh /opt/fpkger/dump-build.sh \
+        /opt/fpkger/ftpdump.sh /opt/fpkger/sfo /usr/local/bin/entrypoint.sh \
+    && for t in build-fpkg dump-build ftpdump; do \
+         ln -s "/opt/fpkger/$t.sh" "/usr/local/bin/$t.sh"; \
+       done \
+    && ln -s /opt/fpkger/sfo /usr/local/bin/sfo
 
 # No PUID/PGID default: unset means "run in place" (see entrypoint), which is
 # what a rootless `docker run` needs.

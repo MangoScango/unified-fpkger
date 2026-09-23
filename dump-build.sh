@@ -47,6 +47,15 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$HOST" ] || die "console address required (IP[:PORT])"
+
+# Our own options have to precede the address; past it everything belongs to
+# build-fpkg.sh, which would reject them with a far less obvious message.
+for a in ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}; do
+  case "$a" in
+    -o|--output-dir|-j|--jobs|--dump-only|--delete-dumps)
+      die "$a must come before the console address" ;;
+  esac
+done
 case "$JOBS" in ''|*[!0-9]*) die "--jobs must be a positive integer" ;; esac
 [ "$JOBS" -ge 1 ] || die "--jobs must be at least 1"
 [ -x "$BUILD_FPKG" ] || die "build-fpkg.sh not found or not executable: $BUILD_FPKG"
