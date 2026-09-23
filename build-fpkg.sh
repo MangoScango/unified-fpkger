@@ -59,8 +59,11 @@
 # DLC: builds a SEPARATE add-on (ac) pkg for each DLC found, alongside the
 # app/remaster pkg. This is the kstuff-native approach: the DLC installs as its
 # own pkg and is unlocked by a DLC-capable kstuff on the console (no eboot patch,
-# no merging). Each "*-ac" DLC dump dir (content + a populated sce_sys, as
-# produced by a recent ftpdump) becomes one pkg_ps4_ac_data pkg.
+# no merging). Two dir kinds are handled, both produced by a recent ftpdump:
+#   *-ac  installed DLC (content + a populated sce_sys) -> pkg_ps4_ac_data
+#   *-al  entitlement-only license, no content          -> pkg_ps4_ac_nodata
+# An "-al" unlocker just grants the license for content already present in the
+# game or its update; it carries no files beyond sce_sys.
 #
 # Building an ac pkg needs a file list, but gengp4_app (the only gp4 generator
 # we have) CRASHES when it parses an ac-category param.sfo, and it also rewrites
@@ -76,9 +79,9 @@
 #     --content-id CID   pkg content id (default: read from base param.sfo)
 #     --update DIR       explicit update/patch dump to merge onto the base
 #     --no-update        base-only; do not auto-merge a sibling patch
-#     --dlc DIR          DLC dump dir (holds one or more "*-ac" content dirs) to
-#                        build add-on pkgs from; repeatable. Default: auto-detect
-#                        a sibling "<foo>-dlc" dir.
+#     --dlc DIR          DLC dump dir (holds one or more "*-ac"/"*-al" content
+#                        dirs) to build add-on pkgs from; repeatable. Default:
+#                        auto-detect a sibling "<foo>-dlc" dir.
 #     --no-dlc           do not build any DLC pkgs
 #     --keystone MODE    retail (default) | kscreate
 #     --ps2-tid NNNNN    force the 5-digit PS2 serial for emu auth
@@ -87,7 +90,7 @@
 #
 #   By default, if the base dump dir is named "<foo>-app", the script looks for
 #   a sibling "<foo>-patch" and merges it automatically, and a sibling
-#   "<foo>-dlc" whose "*-ac" dirs each become a separate add-on pkg. Pass
+#   "<foo>-dlc" whose "*-ac"/"*-al" dirs each become a separate add-on pkg. Pass
 #   --no-update / --no-dlc to skip, or --update DIR / --dlc DIR to point
 #   elsewhere.
 # ============================================================================
@@ -379,8 +382,70 @@ build_one_dlc() {
 }
 
 # ---------------------------------------------------------------------------
+# build_one_al <al_content_dir>
+#   Build a pkg_ps4_ac_nodata (unlocker) pkg from one "*-al" dir. These come
+#   from the entitlement database and carry no content, just sce_sys/param.sfo
+#   plus an optional icon0.png, so there is no tree to scan: the file list is
+#   written directly and gengp4_app is not involved.
+# ---------------------------------------------------------------------------
+build_one_al() {
+  local al="$1"
+  [ -f "$al/sce_sys/param.sfo" ] || die "dlc: $al has no sce_sys/param.sfo"
+  local cid cat
+  cid="$(sfo_get "$al/sce_sys/param.sfo" CONTENT_ID)"
+  cat="$(sfo_get "$al/sce_sys/param.sfo" CATEGORY)"
+  [ -n "$cid" ] || die "dlc: could not read CONTENT_ID from $al"
+  [ "$cat" = "ac" ] || log "dlc: warning: $al CATEGORY is '$cat' (expected 'ac')"
+  log "dlc: building unlocker pkg for $cid"
+
+  local tag; tag="$(printf '%s' "$cid" | tr -c 'A-Za-z0-9_-' '_')"
+  local stage="$WORK_DIR/fpkgwork_al_$tag"
+  rm -rf "$stage"
+  mkdir -p "$stage/sce_sys" || die "dlc: could not stage $cid"
+  cp "$al/sce_sys/param.sfo" "$stage/sce_sys/param.sfo"
+  local have_icon=0
+  if [ -f "$al/sce_sys/icon0.png" ]; then
+    cp "$al/sce_sys/icon0.png" "$stage/sce_sys/icon0.png"
+    have_icon=1
+  fi
+
+  # The project sits beside sce_sys and img_create runs from there, so the
+  # file entries need no orig_path.
+  local gp4="$stage/unlocker.gp4"
+  wine_run "$ORBIS_PUB_CMD" gp4_proj_create \
+    --volume_type pkg_ps4_ac_nodata --content_id "$cid" \
+    --passcode "$FAKE_PASSCODE" --entitlement_key "$DLC_ENT_KEY" \
+    "$(winpath "$gp4")" >/dev/null 2>&1 || die "dlc: gp4_proj_create failed for $cid"
+
+  local frag; frag="$(mktemp)"
+  {
+    echo '  <files img_no="0">'
+    echo '    <file targ_path="sce_sys/param.sfo"/>'
+    [ "$have_icon" -eq 1 ] && echo '    <file targ_path="sce_sys/icon0.png"/>'
+    echo '  </files>'
+    echo '  <rootdir>'
+    echo '    <dir targ_name="sce_sys"/>'
+    echo '  </rootdir>'
+  } > "$frag"
+  sed -e "/<files img_no=\"0\"\/>/{r $frag" -e "d}" -e "/<rootdir\/>/d" \
+    "$gp4" > "$gp4.tmp" && mv "$gp4.tmp" "$gp4"
+  rm -f "$frag"
+
+  log "dlc: img_create ($cid)"
+  ( cd "$stage" && wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg \
+    --no_progress_bar "$(winpath "$gp4")" "$(winpath "$OUT_DIR")" ) || true
+
+  local pkg; pkg="$(ls -t "$OUT_DIR"/"$cid"-*.pkg 2>/dev/null | head -1)"
+  [ -n "$pkg" ] || die "dlc: no pkg produced for $cid"
+  rm -rf "$stage"
+  log "dlc: done: $pkg"
+  echo "$pkg"
+}
+
+# ---------------------------------------------------------------------------
 # build_dlc_pkgs
-#   Build an add-on pkg for every "*-ac" dir across all DLC_DIRS. No-op if none.
+#   Build a pkg for every "*-ac" (data) and "*-al" (unlocker) dir across all
+#   DLC_DIRS. No-op if none.
 # ---------------------------------------------------------------------------
 build_dlc_pkgs() {
   [ "${#DLC_DIRS[@]}" -gt 0 ] || return 0
@@ -390,8 +455,13 @@ build_dlc_pkgs() {
       build_one_dlc "$sub"
       any=1
     done < <(find "$dd" -mindepth 1 -maxdepth 1 -type d -name '*-ac' | sort)
+    while IFS= read -r sub; do
+      build_one_al "$sub"
+      any=1
+    done < <(find "$dd" -mindepth 1 -maxdepth 1 -type d -name '*-al' | sort)
   done
-  [ "$any" -eq 1 ] || log "dlc: no '*-ac' dirs found under: ${DLC_DIRS[*]}"
+  [ "$any" -eq 1 ] || \
+    log "dlc: no '*-ac' or '*-al' dirs found under: ${DLC_DIRS[*]}"
 }
 
 # ===========================================================================

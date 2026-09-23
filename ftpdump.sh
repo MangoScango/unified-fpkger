@@ -20,9 +20,6 @@ beep_time=60
 beep_interval=3
 # Path (directory or file) to C program "sfo" (https://github.com/hippie68/sfo)
 sfo_path=
-# Passcode written into generated DLC unlocker dlc.gp4 files (32 characters).
-# The well-known all-zero passcode keeps packages unpackable by others.
-dlc_passcode=00000000000000000000000000000000
 
 # Functions: ###################################################################
 
@@ -52,8 +49,9 @@ Options:
                        "sfo" are available (see --dlc-entitlements).
       --dlc-entitlements
                        Read the console's entitlement.db and build DLC unlocker
-                       templates (sce_sys/param.sfo) for every additional-content
-                       license, then quit. Requires "sqlite3" and program "sfo".
+                       dirs (sce_sys/param.sfo + icon0.png) for every
+                       additional-content license, then quit. Requires
+                       "sqlite3" and program "sfo".
                        Can be restricted to one game by also passing a Title ID
                        via --download TITLE_ID.
       --debug          Print debug information.
@@ -885,7 +883,7 @@ dump_dlc_entitlements() {
 
       [[ -z $title ]] && title=$content_id
 
-      local dlc_dir="$output_dir/$title_id-dlc/$content_id"
+      local dlc_dir="$output_dir/$title_id-dlc/$content_id-al"
       mkdir -p "$dlc_dir/sce_sys" || abort
 
       "$sfo_bin" "$dlc_dir/sce_sys/param.sfo" --new-file --force \
@@ -899,18 +897,12 @@ dump_dlc_entitlements() {
         || abort "Could not build param.sfo for \"$content_id\"."
 
       # HTTP fetch to Sony's CDN, so the FTP-oriented $curl_options is omitted.
-      local have_icon=
       if [[ $icon_url ]]; then
-        if curl --silent --fail "$icon_url" > "$dlc_dir/sce_sys/icon0.png"; then
-          have_icon=1
-        else
+        curl --silent --fail "$icon_url" > "$dlc_dir/sce_sys/icon0.png" || {
           rm -f "$dlc_dir/sce_sys/icon0.png"
           warning_message "Could not download icon0.png for \"$content_id\"."
-        fi
+        }
       fi
-
-      write_unlocker_project "$dlc_dir" "$content_id" "$title_id" "$title" \
-        "$have_icon"
 
       echo "$content_id  ($title_id)  $title"
       ((count++))
@@ -928,58 +920,6 @@ dump_dlc_entitlements() {
   else
     echo "Created $count DLC unlocker template(s) under \"$output_dir/<title_id>-dlc/\"."
   fi
-}
-
-# Writes the param.sfx source and dlc.gp4 project file that orbis-pub-cmd uses
-# to build the unlocker fPKG.
-# $1: unlocker directory   $2: content ID   $3: Title ID   $4: title
-# $5: non-empty if sce_sys/icon0.png exists (adds it to the package)
-write_unlocker_project() {
-  local dir=$1
-  local content_id=$2
-  local title_id=$3
-  local title=$4
-  local have_icon=$5
-
-  # XML-escape the title. & runs first so its output is not re-escaped; \& is
-  # required because an unescaped & in a ${//} replacement means the match.
-  local esc_title=$title
-  esc_title=${esc_title//&/\&amp;}
-  esc_title=${esc_title//</\&lt;}
-  esc_title=${esc_title//>/\&gt;}
-  esc_title=${esc_title//\"/\&quot;}
-
-  {
-    echo '<?xml version="1.0" encoding="utf-8" standalone="yes"?>'
-    echo '<paramsfo>'
-    echo ' <param key="ATTRIBUTE">0</param>'
-    echo ' <param key="CATEGORY">ac</param>'
-    echo " <param key=\"CONTENT_ID\">$content_id</param>"
-    echo ' <param key="FORMAT">obs</param>'
-    echo " <param key=\"TITLE\">$esc_title</param>"
-    echo " <param key=\"TITLE_ID\">$title_id</param>"
-    echo ' <param key="VERSION">01.00</param>'
-    echo '</paramsfo>'
-  } > "$dir/param.sfx" || abort "Could not write param.sfx for \"$content_id\"."
-
-  {
-    echo '<?xml version="1.0" encoding="utf-8" standalone="yes"?>'
-    echo '<psproject fmt="gp4" version="1000">'
-    echo '  <volume>'
-    echo '    <volume_type>pkg_ps4_ac_nodata</volume_type>'
-    echo '    <volume_id>PS4VOLUME</volume_id>'
-    echo "    <volume_ts>$(date -u '+%Y-%m-%d %H:%M:%S')</volume_ts>"
-    echo "    <package content_id=\"$content_id\" passcode=\"$dlc_passcode\"/>"
-    echo '  </volume>'
-    echo '  <files img_no="0">'
-    echo '    <file targ_path="sce_sys/param.sfo"/>'
-    [[ $have_icon ]] && echo '    <file targ_path="sce_sys/icon0.png"/>'
-    echo '  </files>'
-    echo '  <rootdir>'
-    echo '    <dir targ_name="sce_sys"/>'
-    echo '  </rootdir>'
-    echo '</psproject>'
-  } > "$dir/dlc.gp4" || abort "Could not write dlc.gp4 for \"$content_id\"."
 }
 
 # Downloads all PKGs that have the Title ID(s) $@.
