@@ -60,6 +60,9 @@ RUN chmod +x /opt/fpkger/build-fpkg.sh /opt/fpkger/sfo /usr/local/bin/entrypoint
 
 # No PUID/PGID default: unset means "run in place" (see entrypoint), which is
 # what a rootless `docker run` needs.
+# Interactive docker exec shells need the runtime wine env (prefix, DISPLAY).
+RUN printf '%s\n' '[ -f /tmp/fpkger-env.sh ] && . /tmp/fpkger-env.sh' >> /etc/bash.bashrc
+
 WORKDIR /work
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["--help"]
+CMD ["idle"]

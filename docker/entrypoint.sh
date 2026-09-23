@@ -59,8 +59,31 @@ COMMON_ENV=(HOME="$HOME" WINEPREFIX="$WINEPREFIX" WINEARCH="$WINEARCH"
 if [ "$DO_DROP" = "1" ]; then
   gosu "$PUID:$PGID" env "${COMMON_ENV[@]}" WINEDLLOVERRIDES="mscoree,mshtml=" \
     bash -c '[ -f "$WINEPREFIX/system.reg" ] || { wineboot --init >/dev/null 2>&1 || true; wineserver -w >/dev/null 2>&1 || true; }'
-  exec gosu "$PUID:$PGID" env "${COMMON_ENV[@]}" build-fpkg.sh "$@"
 else
   init_prefix
-  exec env "${COMMON_ENV[@]}" build-fpkg.sh "$@"
+fi
+
+# docker exec starts from the image ENV only; /etc/bash.bashrc sources this.
+{
+  for v in HOME WINEPREFIX WINEARCH WINEDEBUG WINEDLLOVERRIDES DISPLAY; do
+    printf 'export %s=%q\n' "$v" "${!v}"
+  done
+} > /tmp/fpkger-env.sh 2>/dev/null || true
+chmod 0644 /tmp/fpkger-env.sh 2>/dev/null || true
+
+case "${1:-idle}" in
+  idle)
+    echo ">> environment ready (DISPLAY=$DISPLAY, WINEPREFIX=$WINEPREFIX)" >&2
+    echo ">> idling; shell in with: docker exec -it <container> bash" >&2
+    trap 'exit 0' TERM INT
+    sleep infinity & wait $! || true
+    exit 0 ;;
+  bash|sh|shell) shift; set -- bash ${@+"$@"} ;;
+  *)             set -- build-fpkg.sh ${@+"$@"} ;;
+esac
+
+if [ "$DO_DROP" = "1" ]; then
+  exec gosu "$PUID:$PGID" env "${COMMON_ENV[@]}" "$@"
+else
+  exec env "${COMMON_ENV[@]}" "$@"
 fi
