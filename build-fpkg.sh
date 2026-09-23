@@ -354,11 +354,51 @@ stage_tree() {
 # ---------------------------------------------------------------------------
 # gen_gp4 <stage_dir> -> produces <stage_dir>.gp4
 # ---------------------------------------------------------------------------
+# Win32 strips trailing spaces and dots from path components, so gengp4_app
+# cannot open such a file and dies with an unhandled exception. Retail titles do
+# ship them: Dark Souls Remastered has "playgo-chunks.xml ". Stage them under a
+# name it can open and record the mapping.
+stage_fix_names() {
+  local stage="$1" map="$1.namefix" d p rel base reldir safe pad
+  rm -f "$map"
+
+  while IFS= read -r d; do
+    die "directory name ends in a space or dot, which these tools cannot address: ${d#"$stage"/}"
+  done < <(find "$stage" -mindepth 1 -type d \( -name '* ' -o -name '*.' \))
+
+  while IFS= read -r p; do
+    rel="${p#"$stage"/}"; base="${rel##*/}"; reldir="${rel%"$base"}"
+    safe="${base%"${base##*[! .]}"}"
+    pad=""; while [ "${#pad}" -lt $(( ${#base} - ${#safe} )) ]; do pad+="_"; done
+    safe="$safe$pad"                        # same length, so no sibling collision
+    mv -- "$p" "$stage/$reldir$safe" || die "could not rename $rel in the stage"
+    printf '%s\t%s\n' "$reldir$safe" "$rel" >> "$map"
+    log "staged '$rel' as '$safe' (name ends in space/dot)"
+  done < <(find "$stage" -type f \( -name '* ' -o -name '*.' \))
+}
+
+# targ_path is stored verbatim in the pkg and never opened as a Win32 path, so the
+# real name goes back here.
+gp4_restore_names() {
+  local stage="$1" gp4="$1.gp4" map="$1.namefix" safe real
+  [ -s "$map" ] || { rm -f "$map"; return 0; }
+  while IFS=$'\t' read -r safe real; do
+    awk -v s="targ_path=\"$safe\"" -v r="targ_path=\"$real\"" \
+      '{ i = index($0, s); if (i) $0 = substr($0, 1, i-1) r substr($0, i+length(s)) } 1' \
+      "$gp4" > "$gp4.tmp" && mv "$gp4.tmp" "$gp4"
+    grep -qF "targ_path=\"$real\"" "$gp4" || die "could not restore '$real' in $gp4"
+    log "restored '$real' in the gp4"
+  done < "$map"
+  rm -f "$map"
+}
+
 gen_gp4() {
   local stage="$1" gp4="$1.gp4"
   rm -f "$gp4"
+  stage_fix_names "$stage"
   ( cd "$(dirname "$stage")" && wine_run "$GENGP4_APP" "$(winpath "$stage")" ) || true
   [ -f "$gp4" ] || die "gengp4 did not produce $gp4"
+  gp4_restore_names "$stage"
 }
 
 # ---------------------------------------------------------------------------
