@@ -20,6 +20,9 @@ beep_time=60
 beep_interval=3
 # Path (directory or file) to C program "sfo" (https://github.com/hippie68/sfo)
 sfo_path=
+# Passcode written into generated DLC unlocker dlc.gp4 files (32 characters).
+# The well-known all-zero passcode keeps packages unpackable by others.
+dlc_passcode=00000000000000000000000000000000
 
 # Functions: ###################################################################
 
@@ -44,7 +47,15 @@ Options:
       --active         Use an active FTP connection instead of a passive one.
       --appdb          Dump app.db file and quit.
       --beep           Beep when done.
-  -d, --dlc            Dump DLC data.
+  -d, --dlc            Dump DLC data. Also builds DLC unlocker templates from
+                       the console's entitlement.db when "sqlite3" and program
+                       "sfo" are available (see --dlc-entitlements).
+      --dlc-entitlements
+                       Read the console's entitlement.db and build DLC unlocker
+                       templates (sce_sys/param.sfo) for every additional-content
+                       license, then quit. Requires "sqlite3" and program "sfo".
+                       Can be restricted to one game by also passing a Title ID
+                       via --download TITLE_ID.
       --debug          Print debug information.
       --debug-pfs      Print debug information when extracting a PFS image file.
       --download PATH  Download specified FTP file or directory and quit.
@@ -786,6 +797,191 @@ dump_dlc_data() {
   fi
 }
 
+# Builds a DLC unlocker directory for each additional-content license found in
+# the console's entitlement.db.
+# $1: optional Title ID to restrict output to a single game's DLC.
+# $2: "required" aborts on missing prerequisites; otherwise they only warn.
+dump_dlc_entitlements() {
+  local filter_title_id=$1
+  local required=$2
+
+  missing_prereq() {
+    if [[ $required == required ]]; then
+      abort "$1"
+    else
+      warning_message "$1 Skipping DLC entitlement unlockers."
+      return 1
+    fi
+  }
+
+  if ! command -v sqlite3 &> /dev/null; then
+    missing_prereq "DLC entitlement unlockers require the \"sqlite3\" command, which was not found." || return 0
+  fi
+  if [[ ! $sfo_path ]]; then
+    missing_prereq "DLC entitlement unlockers require program \"sfo\" (https://github.com/hippie68/sfo) to build param.sfo files. Place it next to this script or set \"sfo_path\"." || return 0
+  fi
+  # cd below moves off the script dir, so an auto-detected relative sfo path
+  # must be anchored to it first.
+  local sfo_bin=$sfo_path
+  if [[ $sfo_bin != /* ]]; then
+    sfo_bin="$script_dir/${sfo_path##*/}"
+  fi
+  if [[ ! -x "$sfo_bin" ]]; then
+    abort "Could not locate the \"sfo\" program at \"$sfo_bin\"."
+  fi
+
+  cd "$output_dir" || abort
+  local db_file=$(create_temp_file)
+  echo "Downloading entitlement database ..."
+  curl $curl_options --silent \
+    "$root/system_data/priv/license/entitlement.db" > "$db_file" \
+    || curl_error "entitlement.db"
+  if [[ ! -s "$db_file" ]]; then
+    missing_prereq "Downloaded entitlement.db is empty. Is the path correct on this firmware?" || return 0
+  fi
+
+  # Each PSN account has its own "entitlement_<id>" table.
+  local tables
+  tables=$(sqlite3 "$db_file" \
+    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'entitlement_%';") \
+    || { missing_prereq "Could not read tables from entitlement.db (corrupt download?)." || return 0; }
+  if [[ ! $tables ]]; then
+    echo "No entitlement tables found in entitlement.db."
+    return 0
+  fi
+
+  local count=0
+  local table
+  local rows_file=$(create_temp_file)
+
+  for table in $tables; do
+    [[ $debug ]] && debug_message "Reading DLC entitlements from table \"$table\"."
+    # Package_type LIKE 'PS%AL' selects additional-content licenses
+    # (PS4AL, PS5AL, PSAL), excluding games, patches, and subscriptions.
+    # Field separator 0x1f and row separator 0x1e are used because neither
+    # appears in the extracted values (titles may contain any printable text).
+    sqlite3 -noheader -separator $'\x1f' -newline $'\x1e' "$db_file" \
+      "SELECT json_extract(JSON,'\$.id'),
+              coalesce(json_extract(JSON,'\$.game_meta.name'), json_extract(JSON,'\$.name'), ''),
+              coalesce(json_extract(JSON,'\$.game_meta.icon_url'), '')
+       FROM \"$table\" WHERE Package_type LIKE 'PS%AL';" \
+      > "$rows_file" 2> /dev/null
+
+    local content_id title icon_url title_id
+    while IFS=$'\x1f' read -r -d $'\x1e' content_id title icon_url; do
+      [[ -z $content_id ]] && continue
+
+      if [[ ! $content_id =~ ^[A-Z]{2}[0-9]{4}-[A-Z]{4}[0-9]{5}_00-.{16}$ ]]; then
+        [[ $debug ]] && debug_message \
+          "Skipping entitlement with unexpected content ID \"$content_id\"."
+        continue
+      fi
+
+      title_id=${content_id:7:9}
+
+      if [[ $filter_title_id && $title_id != $filter_title_id ]]; then
+        continue
+      fi
+
+      [[ -z $title ]] && title=$content_id
+
+      local dlc_dir="$output_dir/$title_id-dlc/$content_id"
+      mkdir -p "$dlc_dir/sce_sys" || abort
+
+      "$sfo_bin" "$dlc_dir/sce_sys/param.sfo" --new-file --force \
+        --set int ATTRIBUTE 0 \
+        --set str CATEGORY "ac" \
+        --set str CONTENT_ID "$content_id" \
+        --set str FORMAT "obs" \
+        --set str TITLE "$title" \
+        --set str TITLE_ID "$title_id" \
+        --set str VERSION "01.00" \
+        || abort "Could not build param.sfo for \"$content_id\"."
+
+      # HTTP fetch to Sony's CDN, so the FTP-oriented $curl_options is omitted.
+      local have_icon=
+      if [[ $icon_url ]]; then
+        if curl --silent --fail "$icon_url" > "$dlc_dir/sce_sys/icon0.png"; then
+          have_icon=1
+        else
+          rm -f "$dlc_dir/sce_sys/icon0.png"
+          warning_message "Could not download icon0.png for \"$content_id\"."
+        fi
+      fi
+
+      write_unlocker_project "$dlc_dir" "$content_id" "$title_id" "$title" \
+        "$have_icon"
+
+      echo "$content_id  ($title_id)  $title"
+      ((count++))
+    done < "$rows_file"
+  done
+
+  rm "$rows_file" "$db_file" 2> /dev/null
+
+  if [[ $count -eq 0 ]]; then
+    if [[ $filter_title_id ]]; then
+      echo "No DLC entitlements found for $filter_title_id."
+    else
+      echo "No DLC entitlements found in entitlement.db."
+    fi
+  else
+    echo "Created $count DLC unlocker template(s) under \"$output_dir/<title_id>-dlc/\"."
+  fi
+}
+
+# Writes the param.sfx source and dlc.gp4 project file that orbis-pub-cmd uses
+# to build the unlocker fPKG.
+# $1: unlocker directory   $2: content ID   $3: Title ID   $4: title
+# $5: non-empty if sce_sys/icon0.png exists (adds it to the package)
+write_unlocker_project() {
+  local dir=$1
+  local content_id=$2
+  local title_id=$3
+  local title=$4
+  local have_icon=$5
+
+  # XML-escape the title. & runs first so its output is not re-escaped; \& is
+  # required because an unescaped & in a ${//} replacement means the match.
+  local esc_title=$title
+  esc_title=${esc_title//&/\&amp;}
+  esc_title=${esc_title//</\&lt;}
+  esc_title=${esc_title//>/\&gt;}
+  esc_title=${esc_title//\"/\&quot;}
+
+  {
+    echo '<?xml version="1.0" encoding="utf-8" standalone="yes"?>'
+    echo '<paramsfo>'
+    echo ' <param key="ATTRIBUTE">0</param>'
+    echo ' <param key="CATEGORY">ac</param>'
+    echo " <param key=\"CONTENT_ID\">$content_id</param>"
+    echo ' <param key="FORMAT">obs</param>'
+    echo " <param key=\"TITLE\">$esc_title</param>"
+    echo " <param key=\"TITLE_ID\">$title_id</param>"
+    echo ' <param key="VERSION">01.00</param>'
+    echo '</paramsfo>'
+  } > "$dir/param.sfx" || abort "Could not write param.sfx for \"$content_id\"."
+
+  {
+    echo '<?xml version="1.0" encoding="utf-8" standalone="yes"?>'
+    echo '<psproject fmt="gp4" version="1000">'
+    echo '  <volume>'
+    echo '    <volume_type>pkg_ps4_ac_nodata</volume_type>'
+    echo '    <volume_id>PS4VOLUME</volume_id>'
+    echo "    <volume_ts>$(date -u '+%Y-%m-%d %H:%M:%S')</volume_ts>"
+    echo "    <package content_id=\"$content_id\" passcode=\"$dlc_passcode\"/>"
+    echo '  </volume>'
+    echo '  <files img_no="0">'
+    echo '    <file targ_path="sce_sys/param.sfo"/>'
+    [[ $have_icon ]] && echo '    <file targ_path="sce_sys/icon0.png"/>'
+    echo '  </files>'
+    echo '  <rootdir>'
+    echo '    <dir targ_name="sce_sys"/>'
+    echo '  </rootdir>'
+    echo '</psproject>'
+  } > "$dir/dlc.gp4" || abort "Could not write dlc.gp4 for \"$content_id\"."
+}
+
 # Downloads all PKGs that have the Title ID(s) $@.
 dump_pkgs() {
   local ftp_file
@@ -864,6 +1060,8 @@ dump_pkgs() {
       if [[ ! $dlc_dir ]]; then
         echo "No DLC PKGs found for $title_id."
       fi
+
+      dump_dlc_entitlements "$title_id"
     fi
   done
 }
@@ -1437,6 +1635,9 @@ export LC_ALL=C
 # Global variables
 declare download_size
 declare output_dir
+# Absolute path to the directory containing this script, captured before any
+# working-directory changes so helpers can find bundled tools (e.g. sfo).
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 main_pid=$BASHPID
 
 # Get options
@@ -1455,6 +1656,7 @@ for ((i = 0; i < argc; i++)); do
       --appdb) dump_appdb=1 ;;
       --beep) force_beep=1 ;;
       -d|--ac|--dlc|--dlc-only) option_dlc=1 ;;
+      --dlc-entitlements) dump_dlc_entitlements=1 ;;
       --download|--dump)
         if [[ $((++i)) -lt argc ]]; then
           if [[ ${argv[i]^^} =~ ^[A-Z]{4}[0-9]{5}$ ]]; then
@@ -1709,7 +1911,7 @@ if [[ $option_extract_pkg ]]; then
 fi
 
 # Dump everything by default
-if [[ ! $option_app$option_patch$option_dlc$dump_keystone$dump_sflash$dump_appdb$dump_path ]]
+if [[ ! $option_app$option_patch$option_dlc$dump_keystone$dump_sflash$dump_appdb$dump_dlc_entitlements$dump_path ]]
 then
   [[ $debug ]] && debug_message \
     "No dump options specified - enabling app, patch, and DLC dumping."
@@ -1724,6 +1926,7 @@ option_dlc=$option_dlc, \
 dump_keystone=$dump_keystone, \
 dump_sflash=$dump_sflash, \
 dump_appdb=$dump_appdb, \
+dump_dlc_entitlements=$dump_dlc_entitlements, \
 dump_path=$dump_path, \
 dump_title_id=${dump_title_id[*]}, \
 option_no_decrypt=$option_no_decrypt, \
@@ -1863,6 +2066,13 @@ if [[ $dump_appdb ]]; then
   clean_exit 0
 fi
 
+# Dump DLC entitlement unlockers from entitlement.db and quit
+if [[ $dump_dlc_entitlements ]]; then
+  # A Title ID passed via --download restricts output to that game.
+  dump_dlc_entitlements "${dump_title_id[0]}" required
+  clean_exit 0
+fi
+
 # Dump sflash0
 if [[ $dump_sflash ]]; then
   dump_file "$root/dev/sflash0"
@@ -1923,6 +2133,7 @@ fi
 # Dump DLC data
 if [[ $option_dlc ]]; then
   dump_dlc_data "$title_id"
+  dump_dlc_entitlements "$title_id"
 fi
 
 clean_exit 0
