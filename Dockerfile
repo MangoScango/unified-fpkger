@@ -23,7 +23,10 @@ FROM debian:trixie-slim
 
 ARG WINE_BRANCH=stable
 
-# i386 multiarch is required: the CyB1K tools are 32-bit PE binaries (WoW64).
+# i386 multiarch is required: the CyB1K tools are 32-bit PE binaries. Deleting
+# i386-unix below keeps only the 32-bit PE builtins, which leaves wine in new
+# WoW64 mode: a 64-bit CUI loader parents the 32-bit PEs, and GUI-subsystem
+# gengp4_app.exe only gets console output by inheriting that parent's console.
 RUN dpkg --add-architecture i386 \
     && apt-get update && apt-get install -y --no-install-recommends \
         wget gnupg ca-certificates \
@@ -36,6 +39,7 @@ RUN dpkg --add-architecture i386 \
         python3 \
         bash coreutils sed grep findutils \
         xvfb gosu \
+    && rm -rf "/opt/wine-${WINE_BRANCH}/lib/wine/i386-unix" \
     && rm -rf /var/lib/apt/lists/*
 
 # Consumed by build-fpkg.sh's ${VAR:-default} tool-path hooks.

@@ -113,7 +113,19 @@ PRX_AUTH_TMPL="0000C2AC03000035000000000000000000FF00000000000000000000000000000
 
 die() { echo "error: $*" >&2; exit 1; }
 log() { echo ">> $*" >&2; }
-wine_run() { WINEDEBUG=-all WINEDLLOVERRIDES="$WINE_OVERRIDES" wine "$@"; }
+# The CyB1K tools write to a Windows console, which wine only bridges onto unix
+# fds when fd 0/1/2 is a tty, so run them under a pty. /dev/null as the typescript
+# makes script(1) stream to our stdout instead of buffering to a file.
+wine_run() {
+  local cmd="WINEDEBUG=${WINEDEBUG:--all} WINEDLLOVERRIDES=$WINE_OVERRIDES wine"
+  local a; for a in "$@"; do cmd+=" $(printf '%q' "$a")"; done
+  if command -v script >/dev/null 2>&1; then
+    # script -c runs the command through $SHELL, not sh.
+    SHELL=/bin/sh script -qefc "$cmd" /dev/null
+    return $?
+  fi
+  WINEDEBUG="${WINEDEBUG:--all}" WINEDLLOVERRIDES="$WINE_OVERRIDES" wine "$@"
+}
 winpath() { winepath -w "$1"; }
 sfo_get() { "$SFO_TOOL" "$1" -q "$2" 2>/dev/null | tr -d '\r\n'; }
 sfo_edit() { "$SFO_TOOL" "$@" >/dev/null 2>&1 || true; }
@@ -149,6 +161,7 @@ command -v wine >/dev/null || die "wine not found"
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 DUMP="$(cd "$DUMP" && pwd)"
+WORK_DIR="$PWD"
 
 # --- resolve the update dir ------------------------------------------------
 if [ "$UPDATE" = "none" ]; then
@@ -241,7 +254,9 @@ fi
 stage_tree() {
   local stage="$1" overlay="$2"
   rm -rf "$stage"
+  # Bulk content is hardlinked but sce_sys is copied to prevent modifying dump
   cp -al "$DUMP" "$stage" 2>/dev/null || cp -a "$DUMP" "$stage"
+  rm -rf "$stage/sce_sys"; cp -a "$DUMP/sce_sys" "$stage/sce_sys"
   if [ -n "$overlay" ] && [ -n "$UPDATE" ]; then
     log "overlaying update (update wins)"
     cp -a "$UPDATE/." "$stage/"
@@ -274,14 +289,13 @@ stage_tree() {
 }
 
 # ---------------------------------------------------------------------------
-# gen_gp4 <stage_dir> -> echoes gp4 path
+# gen_gp4 <stage_dir> -> produces <stage_dir>.gp4
 # ---------------------------------------------------------------------------
 gen_gp4() {
   local stage="$1" gp4="$1.gp4"
   rm -f "$gp4"
   ( cd "$(dirname "$stage")" && wine_run "$GENGP4_APP" "$(winpath "$stage")" ) || true
   [ -f "$gp4" ] || die "gengp4 did not produce $gp4"
-  echo "$gp4"
 }
 
 # ---------------------------------------------------------------------------
@@ -310,8 +324,8 @@ build_one_dlc() {
   log "dlc: building add-on pkg for $cid"
 
   local tag; tag="$(printf '%s' "$cid" | tr -c 'A-Za-z0-9_-' '_')"
-  local stage="$OUT_DIR/fpkgwork_dlc_$tag"
-  local gp4="$OUT_DIR/dlc_$tag.gp4"
+  local stage="$WORK_DIR/fpkgwork_dlc_$tag"
+  local gp4="$WORK_DIR/dlc_$tag.gp4"
   rm -rf "$stage"; rm -f "$gp4"
 
   # 1. hardlinked stage of the DLC tree (never touch the original dump).
@@ -384,9 +398,9 @@ build_dlc_pkgs() {
 # BASE-ONLY build
 # ===========================================================================
 if [ -z "$UPDATE" ]; then
-  STAGE="$OUT_DIR/fpkgwork_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
+  STAGE="$WORK_DIR/fpkgwork_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
   stage_tree "$STAGE" ""
-  GP4="$(gen_gp4 "$STAGE")"
+  gen_gp4 "$STAGE"; GP4="$STAGE.gp4"
   log "building pkg (orbis-pub-cmd img_create)"
   wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --no_progress_bar \
     "$(winpath "$GP4")" "$(winpath "$OUT_DIR")" || true
@@ -418,12 +432,12 @@ BASE_CAT="$(sfo_get "$DUMP/sce_sys/param.sfo" CATEGORY)"
 log "merge (remaster): base_cat=$BASE_CAT  app_ver=$UPDATE_APPVER"
 
 # 1. base pkg (temp, into a subdir so it isn't confused with the final output)
-BASE_OUT="$OUT_DIR/.basepkg_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
+BASE_OUT="$WORK_DIR/.basepkg_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
 rm -rf "$BASE_OUT"; mkdir -p "$BASE_OUT"
-BASE_STAGE="$OUT_DIR/fpkgwork_base_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
+BASE_STAGE="$WORK_DIR/fpkgwork_base_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
 log "building base pkg (for --app_path reference)"
 stage_tree "$BASE_STAGE" ""              # base only, no overlay
-BASE_GP4="$(gen_gp4 "$BASE_STAGE")"
+gen_gp4 "$BASE_STAGE"; BASE_GP4="$BASE_STAGE.gp4"
 wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --no_progress_bar \
   "$(winpath "$BASE_GP4")" "$(winpath "$BASE_OUT")" || true
 BASE_PKG="$(ls -t "$BASE_OUT"/*.pkg 2>/dev/null | head -1)"
@@ -431,11 +445,11 @@ BASE_PKG="$(ls -t "$BASE_OUT"/*.pkg 2>/dev/null | head -1)"
 rm -rf "$BASE_STAGE" "$BASE_GP4"
 
 # 2. staged merged tree
-STAGE="$OUT_DIR/fpkgwork_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
+STAGE="$WORK_DIR/fpkgwork_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
 stage_tree "$STAGE" overlay
 
 # 3. gengp4 + remaster volume
-GP4="$(gen_gp4 "$STAGE")"
+gen_gp4 "$STAGE"; GP4="$STAGE.gp4"
 sed -i 's|<volume_type>pkg_ps4_app</volume_type>|<volume_type>pkg_ps4_remaster</volume_type>|' "$GP4"
 
 # 4. point the remaster at the base pkg

@@ -26,14 +26,24 @@ export WINEARCH=win64
 export WINEDEBUG="${WINEDEBUG:--all}"
 export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-wineps.drv,localspl.dll,spoolss.dll=d}"
 
-# gengp4_app is a GUI-subsystem binary and aborts without an X display
+# gengp4_app is a GUI-subsystem binary and aborts (wine 0x0eedfade) without an X
+# display, so run a headless Xvfb. The X socket dir may not exist yet in a fresh
+# container; create it world-writable (sticky) like a normal /tmp/.X11-unix.
 DISP=99
+mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 rm -f "/tmp/.X${DISP}-lock" 2>/dev/null || true
 Xvfb ":${DISP}" -screen 0 1280x1024x24 -nolisten tcp >/dev/null 2>&1 &
 XVFB_PID=$!
 export DISPLAY=":${DISP}"
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "/tmp/.X11-unix/X${DISP}" ] && break; sleep 0.3; done
 trap 'kill "$XVFB_PID" 2>/dev/null || true' EXIT
+
+# Wait until Xvfb is actually accepting connections
+for _ in $(seq 1 100); do
+  [ -S "/tmp/.X11-unix/X${DISP}" ] && break
+  kill -0 "$XVFB_PID" 2>/dev/null || { echo "error: Xvfb (:$DISP) failed to start" >&2; exit 1; }
+  sleep 0.1
+done
+[ -S "/tmp/.X11-unix/X${DISP}" ] || { echo "error: Xvfb (:$DISP) not ready after 10s" >&2; exit 1; }
 
 init_prefix() {
   [ -f "$WINEPREFIX/system.reg" ] && return
