@@ -5,7 +5,8 @@
 #
 # USAGE
 #   dump-build.sh [options] IP[:PORT] [build-fpkg options ...]
-#     -o, --output-dir DIR  where ftpdump writes the dump (default: cwd)
+#     -d, --dump-dir DIR    where ftpdump writes the raw dump (default: cwd)
+#     -o, --out DIR         where build-fpkg writes the pkg (default: cwd)
 #     -j, --jobs N          ftpdump parallel downloads (default: 8)
 #         --dump-only       stop after dumping
 #         --delete-dumps    remove the dumped <TITLEID>-{app,patch,dlc,keystone}
@@ -25,7 +26,8 @@ set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_FPKG="${BUILD_FPKG:-$SELF_DIR/build-fpkg.sh}"
 JOBS=8
-OUT_DIR="$PWD"
+DUMP_DIR="$PWD"
+PKG_DIR=""
 DUMP_ONLY=0
 DELETE_DUMPS=0
 HOST=""
@@ -36,12 +38,15 @@ log() { echo ">> $*" >&2; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    -o|--output-dir) OUT_DIR="${2:?}"; shift 2 ;;
+    -d|--dump-dir)   DUMP_DIR="${2:?}"; shift 2 ;;
+    -o|--out)        PKG_DIR="${2:?}"; shift 2 ;;
     -j|--jobs)       JOBS="${2:?}"; shift 2 ;;
     --dump-only)     DUMP_ONLY=1; shift ;;
     --delete-dumps)  DELETE_DUMPS=1; shift ;;
     -h|--help)       awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"
                      exit 0 ;;
+    # Options for build-fpkg.sh go after the address, so a flag here is a typo.
+    -*)              die "unknown option: $1" ;;
     *)               HOST="$1"; shift; BUILD_ARGS=("$@"); break ;;
   esac
 done
@@ -52,10 +57,12 @@ done
 # build-fpkg.sh, which would reject them with a far less obvious message.
 for a in ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}; do
   case "$a" in
-    -o|--output-dir|-j|--jobs|--dump-only|--delete-dumps)
+    -d|--dump-dir|-j|--jobs|--dump-only|--delete-dumps)
       die "$a must come before the console address" ;;
   esac
 done
+
+[ -z "$PKG_DIR" ] || BUILD_ARGS=(--out "$PKG_DIR" ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"})
 case "$JOBS" in ''|*[!0-9]*) die "--jobs must be a positive integer" ;; esac
 [ "$JOBS" -ge 1 ] || die "--jobs must be at least 1"
 [ -x "$BUILD_FPKG" ] || die "build-fpkg.sh not found or not executable: $BUILD_FPKG"
@@ -69,8 +76,17 @@ fi
 [ -n "$FTPDUMP" ] || FTPDUMP="$(command -v ftpdump || true)"
 [ -n "$FTPDUMP" ] && [ -x "$FTPDUMP" ] || die "ftpdump not found (set FTPDUMP=/path/to/ftpdump.sh)"
 
-mkdir -p "$OUT_DIR"
-OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+mkdir -p "$DUMP_DIR"
+DUMP_DIR="$(cd "$DUMP_DIR" && pwd)"
+
+# A partial dump left by a different user fails deep inside wget, so check up front.
+whoami_now="$(id -un):$(id -gn)"
+[ -w "$DUMP_DIR" ] || die "$DUMP_DIR is not writable: owned by $(stat -c %U:%G "$DUMP_DIR"), running as $whoami_now"
+while IFS= read -r d; do
+  [ -w "$d" ] && continue
+  die "$d is not writable: owned by $(stat -c %U:%G "$d"), running as $whoami_now"
+done < <(find "$DUMP_DIR" -mindepth 1 -maxdepth 1 -type d \
+           \( -name '*-app' -o -name '*-patch' -o -name '*-dlc' -o -name '*-keystone' \))
 
 DUMP_LOG="$(mktemp)"
 STARTED="$(date +%s)"
@@ -78,15 +94,15 @@ keep_log=0
 cleanup() { [ "$keep_log" -eq 1 ] || rm -f "$DUMP_LOG"; }
 trap cleanup EXIT
 
-log "dumping $HOST -> $OUT_DIR (jobs=$JOBS)"
+log "dumping $HOST -> $DUMP_DIR (jobs=$JOBS)"
 rc=0
 if command -v script >/dev/null 2>&1; then
   # A pty keeps ftpdump's progress display working while still capturing output.
   SHELL=/bin/sh script -qefc \
-    "$(printf '%q' "$FTPDUMP") $(printf '%q' "$HOST") -a -d -k -p -r -j $JOBS -o $(printf '%q' "$OUT_DIR")" \
+    "$(printf '%q' "$FTPDUMP") $(printf '%q' "$HOST") -a -d -k -p -r -j $JOBS -o $(printf '%q' "$DUMP_DIR")" \
     "$DUMP_LOG" || rc=$?
 else
-  "$FTPDUMP" "$HOST" -a -d -k -p -r -j "$JOBS" -o "$OUT_DIR" 2>&1 | tee "$DUMP_LOG" || true
+  "$FTPDUMP" "$HOST" -a -d -k -p -r -j "$JOBS" -o "$DUMP_DIR" 2>&1 | tee "$DUMP_LOG" || true
   rc="${PIPESTATUS[0]}"
 fi
 
@@ -106,17 +122,17 @@ TITLE_ID="$(tr -d '\r' < "$DUMP_LOG" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
   | grep -oE 'Dumping [A-Z]{4}[0-9]{5} app data' | grep -oE '[A-Z]{4}[0-9]{5}' | head -1 || true)"
 
 APP_DIR=""
-if [ -n "$TITLE_ID" ] && [ -d "$OUT_DIR/$TITLE_ID-app" ]; then
-  APP_DIR="$OUT_DIR/$TITLE_ID-app"
+if [ -n "$TITLE_ID" ] && [ -d "$DUMP_DIR/$TITLE_ID-app" ]; then
+  APP_DIR="$DUMP_DIR/$TITLE_ID-app"
 else
   while IFS= read -r d; do
     [ -n "$(find "$d" -newermt "@$STARTED" -print -quit 2>/dev/null)" ] || continue
     [ -z "$APP_DIR" ] || die "cannot tell which dump to build: $(basename "$APP_DIR") and $(basename "$d")"
     APP_DIR="$d"
-  done < <(find "$OUT_DIR" -mindepth 1 -maxdepth 1 -type d -name '*-app' | sort)
+  done < <(find "$DUMP_DIR" -mindepth 1 -maxdepth 1 -type d -name '*-app' | sort)
 fi
 
-[ -n "$APP_DIR" ] || { keep_log=1; die "no dumped *-app dir found under $OUT_DIR (log: $DUMP_LOG)"; }
+[ -n "$APP_DIR" ] || { keep_log=1; die "no dumped *-app dir found under $DUMP_DIR (log: $DUMP_LOG)"; }
 log "dumped: $APP_DIR"
 
 if [ "$DUMP_ONLY" -eq 1 ]; then
@@ -130,21 +146,21 @@ if [ "$DELETE_DUMPS" -eq 0 ]; then
 fi
 
 "$BUILD_FPKG" ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} "$APP_DIR" \
-  || die "build failed; dumps kept under $OUT_DIR"
+  || die "build failed; dumps kept under $DUMP_DIR"
 
 # build-fpkg.sh aborts unless it produced a pkg.
 TITLE="$(basename "$APP_DIR")"; TITLE="${TITLE%-app}"
-
-PKG_OUT="$PWD"
+PKG_OUT="${PKG_DIR:-$PWD}"
 for ((i = 0; i < ${#BUILD_ARGS[@]}; i++)); do
   if [ "${BUILD_ARGS[i]}" = "--out" ] && [ $((i + 1)) -lt "${#BUILD_ARGS[@]}" ]; then
     PKG_OUT="${BUILD_ARGS[i + 1]}"
   fi
 done
 PKG_OUT="$(cd "$PKG_OUT" 2>/dev/null && pwd || printf '%s' "$PKG_OUT")"
+PKG_OUT="$(cd "$PKG_OUT" 2>/dev/null && pwd || printf '%s' "$PKG_OUT")"
 
 for suffix in app patch dlc keystone; do
-  d="$OUT_DIR/$TITLE-$suffix"
+  d="$DUMP_DIR/$TITLE-$suffix"
   [ -d "$d" ] || continue
   case "$PKG_OUT/" in
     "$d"/*) die "refusing to delete $d: the pkg output dir is inside it" ;;

@@ -95,7 +95,7 @@
 #     --keystone MODE    retail (default) | kscreate
 #     --ps2-tid NNNNN    force the 5-digit PS2 serial for emu auth
 #                        (default: auto-derived from CONTENT_ID for PS2 titles)
-#     --out DIR          output directory (default: cwd)
+#     -o, --out DIR      output directory (default: cwd)
 #
 #   By default, if the base dump dir is named "<foo>-app", the script looks for
 #   a sibling "<foo>-patch" and merges it automatically, and a sibling
@@ -158,7 +158,7 @@ while [ $# -gt 0 ]; do
     --no-dlc)     DLC_MODE="none"; shift ;;
     --keystone)   KEYSTONE_MODE="${2:?}"; shift 2 ;;
     --ps2-tid)    PS2_TID="${2:?}"; shift 2 ;;
-    --out)        OUT_DIR="${2:?}"; shift 2 ;;
+    -o|--out)     OUT_DIR="${2:?}"; shift 2 ;;
     -h|--help)    grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)           die "unknown option: $1" ;;
     *)            ARGS+=("${1%/}"); shift ;;
