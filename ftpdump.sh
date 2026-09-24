@@ -1,6 +1,7 @@
 #!/bin/bash
 # Dumps PS4 games via FTP connection over the network.
 # Requires cURL, GNU Wget, and a PS4 FTP server that supports SELF decryption.
+# Optional: lftp (parallel directory mirroring), readelf (executable checking).
 # Best results with the FTP payload from https://github.com/hippie68/ps4-ftp.
 # For maximum speed, a gigabit cable connection is recommended.
 # Get the latest script version at https://github.com/hippie68/ftpdump.
@@ -486,7 +487,7 @@ dump_file() {
   fi
 }
 
-# Recursively downloads an FTP directory with GNU Wget.
+# Recursively downloads an FTP directory into the current directory.
 # $1: full directory path; must end with "/"
 dump_dir() {
   # Use lftp's mirror (a persistent connection pool that reuses connections
@@ -495,9 +496,16 @@ dump_dir() {
   # slow on directories with many small files.
   if [[ ${jobs:-1} -gt 1 && $have_lftp ]]; then
     dump_dir_lftp "$1"
-    return
+  else
+    dump_dir_wget "$1"
   fi
 
+  verify_executables "$1"
+}
+
+# Recursively downloads an FTP directory with GNU Wget.
+# $1: full directory path; must end with "/"
+dump_dir_wget() {
   local dir_count=0
   local line
   local i
@@ -596,6 +604,153 @@ exit;
     warning_message "Some files failed to download while mirroring \"$rel_root\" (dump continued):"
     echo "$real_errors" >&2
   fi
+
+  verify_sizes "$remote_path"
+}
+
+# Runs lftp commands $1 against the console. The commands must be separated by
+# semicolons; in a script spanning multiple lines, "get" fails with error 550.
+lftp_run() {
+  local settings="set ftp:ssl-allow no;"
+  settings+=" set ftp:passive-mode ${lftp_passive:-on};"
+  settings+=" set net:max-retries 2; set net:timeout 15; set xfer:clobber on;"
+
+  lftp -u anonymous, "ftp://$ip:$port" -e "$settings $1 exit"
+}
+
+# Succeeds if file $1 starts with the ELF magic number.
+is_elf() {
+  [[ $(od -A n -t x1 -N 4 "$1" 2> /dev/null | tr -d ' \n') == 7f454c46 ]]
+}
+
+# Prints the size and relative path of every file under the current directory,
+# tab-separated.
+list_file_sizes() {
+  if find . -maxdepth 0 -printf '' 2> /dev/null; then
+    find . -type f -printf '%s\t%P\n'
+    return
+  fi
+
+  local file
+  while IFS= read -rd '' file; do
+    printf '%s\t%s\n' "$(wc -c < "$file")" "${file#./}"
+  done < <(find . -type f -print0)
+}
+
+# Downloads every file under the current directory whose size does not match the
+# remote listing again, in a single session, and aborts if one of them still does
+# not match afterwards.
+# $1: remote path that was mirrored (absolute path on the FTP server)
+verify_sizes() {
+  local remote_path=${1%/}
+  local remote_list
+  local local_list
+  local targets
+  local get_commands
+  local size
+  local file
+  local dir
+  local incomplete=0
+
+  remote_list=$(create_temp_file)
+  local_list=$(create_temp_file)
+  targets=$(create_temp_file)
+
+  # "find --ls" columns: permissions, owner/group, size, date, time, path. Paths
+  # can contain spaces, so everything past the time column is taken verbatim.
+  lftp_run "find --ls $remote_path;" 2> /dev/null \
+    | awk -v cut=${#remote_path} '$1 ~ /^-/ {
+        i = index($0, $5) + length($5) + 1
+        print $3 "\t" substr($0, i + cut + 1) }' > "$remote_list"
+  list_file_sizes > "$local_list"
+
+  while IFS=$'\t' read -r size file; do
+    # The server decrypts executables while sending them, so their size cannot
+    # match the listing. elf_is_damaged() checks those instead.
+    is_elf "$file" && continue
+
+    warning_message "File \"$file\" is incomplete - downloading it again."
+    dir=$(dirname "$file")
+    mkdir -p "$dir"
+    get_commands+="get -O \"$dir\" \"$remote_path/$file\"; "
+    printf '%s\t%s\n' "$size" "$file" >> "$targets"
+  done < <(awk -F'\t' 'NR == FNR { size[$2] = $1; next } size[$2] != $1' \
+    "$local_list" "$remote_list")
+
+  if [[ $get_commands ]]; then
+    lftp_run "$get_commands" < /dev/null
+    while IFS=$'\t' read -r size file; do
+      [[ -f "$file" && $(wc -c < "$file") -eq $size ]] && continue
+      warning_message "File \"$file\" is still incomplete."
+      ((incomplete++))
+    done < "$targets"
+  fi
+
+  rm "$remote_list" "$local_list" "$targets" 2> /dev/null
+
+  [[ $incomplete -gt 0 ]] && abort \
+    "$incomplete file(s) could not be dumped completely."
+
+  return 0
+}
+
+# Succeeds if file $1 is not an intact executable: readelf cannot read it, or its
+# program headers reach past the end of the file. The server advertises the
+# encrypted size of the SELF/PRX files it decrypts while sending them, so a
+# truncated download cannot be spotted by size alone.
+elf_is_damaged() {
+  local output
+  local offset
+  local length
+  local extent=0
+
+  output=$(readelf --program-headers --wide "$1" 2>&1)
+
+  # readelf exits 0 on some unreadable files, so go by its diagnostics.
+  grep -q '^readelf: ' <<< "$output" && return 0
+
+  # Offset and FileSiz columns.
+  while read -r offset length; do
+    [[ $((offset + length)) -gt $extent ]] && extent=$((offset + length))
+  done < <(awk '$2 ~ /^0x/ && $5 ~ /^0x/ { print $2, $5 }' <<< "$output")
+
+  [[ $extent -gt $(wc -c < "$1") ]]
+}
+
+# Downloads every damaged executable under the current directory again,
+# single-stream, and aborts if one of them cannot be completed.
+# $1: FTP path the current directory was dumped from; must end with "/"
+verify_executables() {
+  local file_path
+  local file_name
+  local dir
+  local incomplete=0
+
+  [[ $have_readelf ]] || return 0
+
+  while IFS= read -rd '' file_path; do
+    elf_is_damaged "$file_path" || continue
+
+    file_name=${file_path#./}
+    warning_message "Executable \"$file_name\" is incomplete - downloading it again."
+    dir=${file_path%/*}
+    cd "$dir" || abort
+    # Without this, option -r would resume onto the bad copy.
+    rm -f "${file_path##*/}"
+    dump_file "$1$file_name"
+    cd - > /dev/null || abort
+
+    if elf_is_damaged "$file_path"; then
+      warning_message "Executable \"$file_name\" is still incomplete."
+      ((incomplete++))
+    fi
+  done < <(find . -type f \( -iname "eboot.bin" -o -iname "*.elf" \
+    -o -iname "*.self" -o -iname "*.prx" -o -iname "*.sprx" \) -print0)
+
+  [[ $incomplete -gt 0 ]] && abort \
+    "$incomplete executable(s) could not be dumped completely; the game would not boot."
+
+  return 0
 }
 
 # Dumps the keystone that belongs to Title ID $1.
@@ -1566,6 +1721,8 @@ replace_encrypted_files() {
       cd - > /dev/null || abort
     fi
   done
+
+  verify_executables "$1"
 }
 
 # Main script: #################################################################
@@ -1921,6 +2078,14 @@ if lftp --version &> /dev/null; then
   [[ $debug ]] && debug_message "lftp detected - available for parallel directory mirroring."
 else
   [[ $debug ]] && debug_message "lftp not found - falling back to wget for directory dumps."
+fi
+
+# Check for readelf (optional), used to verify dumped executables.
+if readelf --version &> /dev/null; then
+  have_readelf=1
+  [[ $debug ]] && debug_message "readelf detected - available for executable verification."
+else
+  warning_message "readelf (GNU binutils) not found - dumped executables will not be checked for completeness."
 fi
 
 # Exit if FTP server is not running or does not reply within 5 seconds

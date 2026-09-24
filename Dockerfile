@@ -39,7 +39,7 @@ RUN dpkg --add-architecture i386 \
         python3 \
         bash coreutils sed grep findutils \
         xvfb gosu \
-        curl sqlite3 lftp \
+        curl sqlite3 lftp binutils \
     && rm -rf "/opt/wine-${WINE_BRANCH}/lib/wine/i386-unix" \
     && rm -rf /var/lib/apt/lists/*
 
