@@ -48,10 +48,14 @@
 #   for.
 #
 #   The stamp lives at offset 0x10 of PT_SCE_PROCPARAM (executables) and
-#   PT_SCE_MODULE_PARAM (libraries), and patching it does not change any file's
-#   size. Nothing else is touched: the per-object records in PT_SCE_VERSION
-#   still name the original SDK, and imports the target firmware does not
-#   export are left alone. Both are reported.
+#   PT_SCE_MODULE_PARAM (libraries). PT_SCE_VERSION holds a second copy per
+#   linked object, and orbis-pub-cmd reads THAT to decide the SYSTEM_VER it
+#   writes into the package's param.sfo, so both are lowered or the package ends
+#   up demanding the firmware the title was originally built for. Neither edit
+#   changes a file's size.
+#
+#   Imports the target firmware does not export are left alone; --sdk auto
+#   refuses a target that would need any.
 # ----------------------------------------------------------------------------
 import csv
 import os
@@ -106,20 +110,34 @@ def segments(data):
         yield struct.unpack_from('<IIQQQQQQ', data, phoff + i * phentsize)
 
 
-def version_records(data, seg):
-    """Names recorded in PT_SCE_VERSION, which this tool leaves untouched. Each
-    record is a length byte, a "name:" string, then a big-endian u32."""
-    out = []
+def version_records(data, seg, sdk=None):
+    """Per-object SDK versions recorded in PT_SCE_VERSION.
+
+    Each record is a length byte, a "name:" string, then a big-endian u32. The
+    length counts the name and the version but not itself.
+
+    Given sdk, lower any record above it in place and return how many moved;
+    otherwise return the (name, version) pairs. orbis-pub-cmd reads these rather
+    than the param segment to decide the SYSTEM_VER it writes into param.sfo, so
+    leaving them behind makes a package demand the firmware the title was built
+    for no matter what the param segment says.
+    """
+    out, lowered = [], 0
     off, end = seg[2], seg[2] + seg[5]
     while off < end:
         length = data[off]
         if length == 0 or off + 1 + length > end:
             break
+        at = off + length - 3
         name = data[off + 1:off + length].split(b':')[0].decode('utf8', 'replace')
-        ver, = struct.unpack_from('>I', data, off + length - 3)
-        out.append((name, ver))
+        ver, = struct.unpack_from('>I', data, at)
+        if sdk is None:
+            out.append((name, ver))
+        elif ver > sdk:
+            struct.pack_into('>I', data, at, sdk)
+            lowered += 1
         off += length + 1
-    return out
+    return lowered if sdk is not None else out
 
 
 def find_content(dump):
@@ -305,7 +323,7 @@ def choose_sdk(dumps):
 def patch(data, sdk, force, label):
     """Rewrite the stamp in place. -> (list of report lines, changed?)"""
     lines, changed = [], False
-    leftovers = []
+    version_seg = None
     for seg in segments(data):
         if seg[0] in PARAM_NAMES and seg[5] >= SDK_OFFSET + 4:
             at = seg[2] + SDK_OFFSET
@@ -321,15 +339,20 @@ def patch(data, sdk, force, label):
                 lines.append('%-20s 0x%08x -> 0x%08x  @0x%x' % (kind, old, sdk, at))
                 changed = True
         elif seg[0] == PT_SCE_VERSION and seg[5]:
-            leftovers = version_records(data, seg)
+            version_seg = seg
 
     if not lines:
         lines.append('no param segment')
-    if leftovers:
-        stale = sorted({v for _, v in leftovers if v != sdk})
-        lines.append('%-20s %d records kept%s'
-                     % ('PT_SCE_VERSION', len(leftovers),
-                        ', naming ' + ', '.join('0x%08x' % v for v in stale) if stale else ''))
+    if version_seg is not None:
+        before = version_records(data, version_seg)
+        lowered = version_records(data, version_seg, sdk)
+        if lowered:
+            changed = True
+        stale = sorted({v for _, v in before if v > sdk})
+        lines.append('%-20s %d of %d records lowered%s'
+                     % ('PT_SCE_VERSION', lowered, len(before),
+                        ' from ' + ', '.join('0x%08x' % v for v in stale)
+                        if stale else ''))
     return lines, changed
 
 

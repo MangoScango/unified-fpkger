@@ -173,35 +173,7 @@ wine_run() {
 winpath() { winepath -w "$1"; }
 sfo_get() { "$SFO_TOOL" "$1" -q "$2" 2>/dev/null | tr -d '\r\n'; }
 sfo_edit() { "$SFO_TOOL" "$@" >/dev/null 2>&1 || true; }
-# ---------------------------------------------------------------------------
-# system_ver_for <sdk stamp> -> the SYSTEM_VER a package carrying executables at
-# that stamp should ask for. Same BCD layout with the build field cleared:
-# 0x08500001 -> 0x08500000.
-#
-# It has to be applied to the finished package, not to the staged param.sfo:
-# img_create derives SYSTEM_VER from the executables' own version records, which
-# a stamp rewrite leaves naming the original SDK, so anything set beforehand is
-# overwritten.
-# ---------------------------------------------------------------------------
-system_ver_for() {
-  [ -n "$1" ] && [ "$1" != 0 ] || return 1
-  printf '0x%08x\n' $(( $1 & 0xFFFFF000 ))
-}
 
-# ---------------------------------------------------------------------------
-# sync_pkg_system_ver <pkg> <app_ver> <sdk stamp>
-#   Point a finished package's SYSTEM_VER at the SDK its executables carry,
-#   repairing the digests the edit invalidates. Only for a package holding
-#   restamped executables; one shipping the originals already asks for the right
-#   thing, since that is what img_create derived it from.
-# ---------------------------------------------------------------------------
-sync_pkg_system_ver() {
-  local pkg="$1" app_ver="$2" stamp="$3" sysver
-  sysver="$(system_ver_for "$stamp")" || return 0
-  log "SFO: SYSTEM_VER -> $sysver (what the backported executables ask for)"
-  python3 "$PKG_SET_APPVER" "$pkg" "$app_ver" "$sysver" >&2 \
-    || die "could not set SYSTEM_VER on $(basename "$pkg")"
-}
 # --- args ------------------------------------------------------------------
 # UPDATE: "" = auto-discover sibling "-patch" dir; "none" = base-only;
 #         a path = explicit update dir.
@@ -699,9 +671,8 @@ build_variant_patch() {
   [ -n "$built" ] || die "backport patch build failed"
 
   [ -f "$PKG_SET_APPVER" ] || die "pkg-set-appver.py not found at $PKG_SET_APPVER"
-  local sysver; sysver="$(system_ver_for "$RESOLVED_SDK" || true)"
-  log "restamping the patch to APP_VER $app_ver${sysver:+, SYSTEM_VER $sysver}"
-  python3 "$PKG_SET_APPVER" "$built" "$app_ver" ${sysver:+"$sysver"} >&2 \
+  log "restamping the patch to APP_VER $app_ver"
+  python3 "$PKG_SET_APPVER" "$built" "$app_ver" >&2 \
     || die "could not restamp the backport patch to $app_ver"
 
   local stem; stem="$(basename "${built%.pkg}")"
@@ -941,15 +912,11 @@ if [ -z "$UPDATE" ]; then
   stage_tree "$STAGE" ""
 
   run_backport "$WORK_DIR" "$DUMP"
-  # Only a package that carries the restamped executables may claim the lower
-  # firmware; one shipping the originals alongside a backport patch must not.
-  STAGE_SDK="$OBSERVED_SDK"
   if [ -n "$BP_DIR" ] && [ "$MODE" = "remaster" ]; then
     save_stock_binaries "$BP_DIR" "$STAGE" "$OUT_DIR/$TITLE_ID-stock"
     log "baking the backported executables into the app pkg"
     cp -a "$BP_DIR/." "$STAGE/"
     rm -rf "$BP_DIR"; BP_DIR=""
-    STAGE_SDK="$RESOLVED_SDK"
   fi
 
   gen_gp4 "$STAGE"; GP4="$STAGE.gp4"
@@ -959,8 +926,6 @@ if [ -z "$UPDATE" ]; then
   PKG="$(ls -t "$OUT_DIR"/*.pkg 2>/dev/null | head -1)"
   [ -n "$PKG" ] || die "no pkg produced"
   rm -rf "$STAGE" "$GP4"
-  [ "$STAGE_SDK" = "$RESOLVED_SDK" ] && [ -n "$RESOLVED_SDK" ] \
-    && sync_pkg_system_ver "$PKG" "$BASE_APPVER" "$RESOLVED_SDK" || true
   log "app pkg: $PKG"
 
   if [ -n "$BP_DIR" ]; then
@@ -1055,13 +1020,11 @@ if [ "$MODE" = "remaster" ]; then
   stage_tree "$STAGE" overlay
 
   run_backport "$WORK_DIR" "$DUMP" "$UPDATE"
-  STAGE_SDK="$OBSERVED_SDK"
   if [ -n "$BP_DIR" ]; then
     save_stock_binaries "$BP_DIR" "$STAGE" "$OUT_DIR/$TITLE_ID-stock"
     log "baking the backported executables into the remaster"
     cp -a "$BP_DIR/." "$STAGE/"
     rm -rf "$BP_DIR"
-    STAGE_SDK="$RESOLVED_SDK"
   fi
 
   gen_gp4 "$STAGE"; GP4="$STAGE.gp4"
@@ -1088,9 +1051,6 @@ if [ "$MODE" = "remaster" ]; then
   [ -n "$PKG" ] || die "no pkg produced"
 
   rm -rf "$STAGE" "$GP4" "$BASE_OUT"
-  if [ "$STAGE_SDK" = "$RESOLVED_SDK" ] && [ -n "$RESOLVED_SDK" ]; then
-    sync_pkg_system_ver "$PKG" "$UPDATE_APPVER" "$RESOLVED_SDK"
-  fi
   log "done: $PKG"
   ls -la "$PKG" >&2
   echo "$PKG"

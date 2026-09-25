@@ -15,12 +15,7 @@ order:
         -> header 0xfe0   SHA256(header[0:0xfe0])
           -> header 0x1000 signature over SHA256(header[0:0x1000])
 
-SYSTEM_VER is an int field of the same fixed width, so it rides the same chain.
-img_create derives it from the executables' version records rather than from the
-param.sfo handed to it, so a package whose stamps were lowered still ships asking
-for the firmware they were built against; setting it here is after the fact.
-
-Usage: pkg-set-appver.py <pkg> <new_app_ver> [system_ver]   e.g. 01.23 0x08500000
+Usage: pkg-set-appver.py <pkg> <new_app_ver>    e.g. 01.23
 """
 import hashlib
 import mmap
@@ -149,15 +144,6 @@ def main() -> int:
         raise SystemExit(f"{new_ver!r} exceeds field width {max_len}")
     pkg.put(sfo_off + rel, encoded.ljust(length, b"\0"))
     print(f"param.sfo APP_VER {old} -> {new_ver}")
-
-    if len(sys.argv) > 3:
-        want = int(sys.argv[3], 0)
-        rel, length, _ = sfo_field(pkg.data(PARAM_SFO), "SYSTEM_VER")
-        if length != 4:
-            raise SystemExit(f"SYSTEM_VER is {length} bytes, expected 4")
-        was, = struct.unpack_from("<I", pkg.blob, sfo_off + rel)
-        pkg.put(sfo_off + rel, struct.pack("<I", want))
-        print(f"param.sfo SYSTEM_VER {was:#010x} -> {want:#010x}")
 
     gen_idx, gen_off, _ = pkg.entries[GENERAL_DIGESTS]
     pkg.put(gen_off + GEN_SLOT_PARAM_DIGEST, pkg.sha_entry(PARAM_SFO))
