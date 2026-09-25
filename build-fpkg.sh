@@ -157,6 +157,51 @@ PRX_AUTH_TMPL="0000C2AC03000035000000000000000000FF00000000000000000000000000000
 
 die() { echo "error: $*" >&2; exit 1; }
 log() { echo ">> $*" >&2; }
+# ---------------------------------------------------------------------------
+# img_progress_start <out_dir> / img_progress_stop
+#   Report the package as it grows, since orbis-pub-cmd prints nothing while
+#   img_create runs. NO_PROGRESS silences it, PROGRESS_EVERY sets the interval.
+# ---------------------------------------------------------------------------
+IMG_PROGRESS_PID=""
+img_progress_start() {
+  local dir="$1" every="${PROGRESS_EVERY:-15}"
+  IMG_PROGRESS_PID=""
+  [ -z "${NO_PROGRESS:-}" ] || return 0
+  [ "$every" -gt 0 ] || return 0
+  (
+    # The package does not exist for the first few seconds; errexit would take
+    # the watcher down with the failing listing.
+    set +e
+    prev=0
+    while sleep "$every"; do
+      f="$(ls -t "$dir"/*.pkg 2>/dev/null | head -1)"
+      [ -n "$f" ] || continue
+      cur="$(stat -c %s "$f" 2>/dev/null || echo 0)"
+      [ "$cur" -gt "$prev" ] || continue
+      log "image: $(numfmt --to=iec "$cur") written" \
+        "($(numfmt --to=iec $(( (cur - prev) / every )))/s)"
+      prev="$cur"
+    done
+  ) &
+  IMG_PROGRESS_PID=$!
+}
+img_progress_stop() {
+  [ -n "$IMG_PROGRESS_PID" ] || return 0
+  kill "$IMG_PROGRESS_PID" 2>/dev/null || true
+  wait "$IMG_PROGRESS_PID" 2>/dev/null || true
+  IMG_PROGRESS_PID=""
+}
+# ---------------------------------------------------------------------------
+# img_create <out_dir> <pub-cmd args ...>
+#   img_create with progress around it. orbis-pub-cmd returns non-zero on
+#   warnings alone, so the status is dropped and callers check for the package.
+# ---------------------------------------------------------------------------
+img_create() {
+  local out="$1"; shift
+  img_progress_start "$out"
+  wine_run "$ORBIS_PUB_CMD" img_create "$@" || true
+  img_progress_stop
+}
 # The CyB1K tools write to a Windows console, which wine only bridges onto unix
 # fds when fd 0/1/2 is a tty, so run them under a pty. /dev/null as the typescript
 # makes script(1) stream to our stdout instead of buffering to a file.
@@ -180,6 +225,13 @@ sfo_edit() { "$SFO_TOOL" "$@" >/dev/null 2>&1 || true; }
 # DLC_DIRS: explicit --dlc dirs (repeatable). DLC_MODE: "" = auto-discover a
 # sibling "-dlc" dir; "none" = do not build DLC; "explicit" = use DLC_DIRS.
 CONTENT_ID="" UPDATE="" DUMP="" OUT_DIR="$PWD" KEYSTONE_MODE="retail" PS2_TID=""
+# sce_sys a backport patch carries; a directory here is taken whole. Anything not
+# listed falls through to the app volume underneath.
+#
+# playgo-chunk.dat carries the chunk count, and img_create rejects a patch that
+# changes it. npbind.dat holds the NP Communication ID the trophy system resolves
+# at startup. Trimming this list needs hardware to check.
+PATCH_SCE_SYS="${PATCH_SCE_SYS:-param.sfo icon0.png playgo-chunk.dat npbind.dat}"
 MODE="app-merge" BACKPORT=1 BACKPORT_TARGET_SDK="auto" BASE_PKG_IN=""
 RESOLVED_SDK="" OBSERVED_SDK=""
 DLC_MODE="" ; declare -a DLC_DIRS=() DLC_ITEMS=() ARGS=()
@@ -540,8 +592,8 @@ build_patch_pkg() {
 
   rm -rf "$out"; mkdir -p "$out"
   log "building patch pkg (orbis-pub-cmd img_create --skip_digest)"
-  wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --skip_digest --no_progress_bar \
-    "$(winpath "$gp4")" "$(winpath "$out")" || true
+  img_create "$out" --oformat pkg --skip_digest --no_progress_bar \
+    "$(winpath "$gp4")" "$(winpath "$out")"
   local built; built="$(ls -t "$out"/*.pkg 2>/dev/null | head -1)"
   [ -n "$built" ] || die "patch pkg build failed"
 
@@ -564,10 +616,28 @@ appver_bump() {
 }
 
 # ---------------------------------------------------------------------------
-# run_backport <dest_parent> <dump_dir>...
+# layered_tree <dir>
+#   A hardlinked view of the image the console mounts: the base with the update
+#   over it. Hardlinks are safe because the backport only reads, writing its
+#   copies elsewhere.
+# ---------------------------------------------------------------------------
+layered_tree() {
+  local out="$1"
+  rm -rf "$out"
+  cp -al "$DUMP" "$out" 2>/dev/null || cp -a "$DUMP" "$out"
+  if [ -n "$UPDATE" ] && [ "$UPDATE" != none ]; then
+    cp -alf "$UPDATE/." "$out/" 2>/dev/null || cp -af "$UPDATE/." "$out/"
+  fi
+}
+# ---------------------------------------------------------------------------
+# run_backport <dest_parent> <tree>...
 #   Collect every executable into <dest_parent>/<TITLEID>-bp, restamping any
-#   whose SDK sits above the target. Later dirs win, so pass the base before the
-#   update. Sets BP_DIR to the tree, or "" when nothing needed lowering.
+#   whose SDK sits above the target. Sets BP_DIR to the tree, or "" when nothing
+#   needed lowering.
+#
+#   Pass the layered image, not the dumps it was built from. A base and its
+#   update each carry an eboot and only one is ever loaded, so resolving against
+#   both lets the unused one raise the floor.
 # ---------------------------------------------------------------------------
 run_backport() {
   local dest="$1"; shift
@@ -591,7 +661,8 @@ run_backport() {
   log "backport: collecting executables at SDK $target"
   for d in "$@"; do
     rc=0
-    python3 "$BACKPORT_SDK" --sdk "$target" --out "$dest" "$d" >&2 || rc=$?
+    python3 "$BACKPORT_SDK" --sdk "$target" ${KEEP_VERSION_RECORDS:+--keep-version-records} \
+      --out "$dest" "$d" >&2 || rc=$?
     case "$rc" in
       0) restamped=1 ;;
       3) ;;
@@ -626,7 +697,7 @@ save_stock_binaries() {
 }
 
 # ---------------------------------------------------------------------------
-# build_variant_patch <bp_dir> <app_pkg> <app_ver>
+# build_variant_patch <bp_dir> <app_pkg> <app_ver> [sce_sys_source_tree]
 #   A patch carrying only the backported executables, declaring the same APP_VER
 #   as the package it sits on so installing it does not change the version the
 #   console shows. img_create requires a patch to out-rank the package named by
@@ -643,10 +714,20 @@ build_variant_patch() {
   rm -rf "$parent" "$out"; mkdir -p "$parent" "$out"
   local stage="$parent/$title-patch"
   cp -al "$bp" "$stage" 2>/dev/null || cp -a "$bp" "$stage"
-  # The collected tree needs the rest of an update's sce_sys around it, but an
-  # executable can live under sce_sys too, so the collected copies go back last.
-  local src_sys="${UPDATE:-$DUMP}/sce_sys"
-  cp -a "$src_sys/." "$stage/sce_sys/"
+  # A patch layer only has to carry what it changes: anything it leaves out falls
+  # through to the app volume underneath. The stage gets the collected
+  # executables plus PATCH_SCE_SYS, taken from the layered image they came from.
+  local src_sys="${4:-${UPDATE:-$DUMP}}/sce_sys" keep
+  for keep in $PATCH_SCE_SYS; do
+    if [ -d "$src_sys/$keep" ]; then
+      mkdir -p "$stage/sce_sys/$keep"
+      cp -a "$src_sys/$keep/." "$stage/sce_sys/$keep/"
+    elif [ -f "$src_sys/$keep" ]; then
+      mkdir -p "$stage/sce_sys/$(dirname "$keep")"
+      cp -a "$src_sys/$keep" "$stage/sce_sys/$keep"
+    fi
+  done
+  # An executable can live under sce_sys too, so the collected copies go last.
   cp -a "$bp/sce_sys/." "$stage/sce_sys/"
   cp -a "$src_sys/param.sfo" "$stage/sce_sys/param.sfo"
   unlink_executables "$stage"
@@ -665,20 +746,29 @@ build_variant_patch() {
     -s str APP_VER "$built_ver" "$p"
 
   log "building backport patch (img_create --skip_digest)"
-  wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --skip_digest --no_progress_bar \
-    "$(winpath "$gp4")" "$(winpath "$out")" || true
+  img_create "$out" --oformat pkg --skip_digest --no_progress_bar \
+    "$(winpath "$gp4")" "$(winpath "$out")"
   local built; built="$(ls -t "$out"/*.pkg 2>/dev/null | head -1)"
   [ -n "$built" ] || die "backport patch build failed"
 
   [ -f "$PKG_SET_APPVER" ] || die "pkg-set-appver.py not found at $PKG_SET_APPVER"
-  log "restamping the patch to APP_VER $app_ver"
-  python3 "$PKG_SET_APPVER" "$built" "$app_ver" >&2 \
+  # A patch inherits SYSTEM_VER from the package --app_path names, so unlike an
+  # app volume it does not pick up the lowered stamps from its own executables.
+  local sysver=""
+  [ -z "$RESOLVED_SDK" ] || sysver="$(printf '0x%08x' \
+    $(( RESOLVED_SDK & 0xFFFFF000 )))"
+  log "restamping the patch to APP_VER $app_ver${sysver:+, SYSTEM_VER $sysver}"
+  python3 "$PKG_SET_APPVER" "$built" "$app_ver" ${sysver:+"$sysver"} >&2 \
     || die "could not restamp the backport patch to $app_ver"
 
   local stem; stem="$(basename "${built%.pkg}")"
   local final="$OUT_DIR/${stem/-A${built_ver//./}-/-A${app_ver//./}-}-bp.pkg"
   mv -f "$built" "$final"
-  rm -rf "$parent" "$out"
+  if [ -n "${KEEP_STAGE:-}" ]; then
+    log "kept the patch stage at $parent"
+  else
+    rm -rf "$parent" "$out"
+  fi
   PATCH_PKG_RESULT="$final"
 }
 
@@ -755,8 +845,8 @@ build_one_dlc() {
 
   # 6. build
   log "dlc: img_create ($cid)"
-  wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --no_progress_bar \
-    "$(winpath "$gp4")" "$(winpath "$OUT_DIR")" || true
+  img_create "$OUT_DIR" --oformat pkg --no_progress_bar \
+    "$(winpath "$gp4")" "$(winpath "$OUT_DIR")"
 
   local pkg; pkg="$(ls -t "$OUT_DIR"/"$cid"-*.pkg 2>/dev/null | head -1)"
   [ -n "$pkg" ] || die "dlc: no pkg produced for $cid"
@@ -816,7 +906,7 @@ build_one_al() {
   rm -f "$frag"
 
   log "dlc: img_create ($cid)"
-  ( cd "$stage" && wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg \
+  ( cd "$stage" && img_create "$OUT_DIR" --oformat pkg \
     --no_progress_bar "$(winpath "$gp4")" "$(winpath "$OUT_DIR")" ) || true
 
   local pkg; pkg="$(ls -t "$OUT_DIR"/"$cid"-*.pkg 2>/dev/null | head -1)"
@@ -890,11 +980,12 @@ if [ -n "$BASE_PKG_IN" ]; then
   log "base pkg   : $(basename "$BASE_PKG_IN")  ($PKG_CID, APP_VER=$PKG_APPVER)"
   [ "$BACKPORT" -eq 1 ] || die "--base-pkg with --no-backport would build nothing"
 
-  declare -a BP_SRC=("$DUMP")
-  if [ -n "$UPDATE" ] && [ "$UPDATE" != none ]; then BP_SRC+=("$UPDATE"); fi
-  run_backport "$WORK_DIR" "${BP_SRC[@]}"
+  LAYERED="$WORK_DIR/fpkglayer_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
+  layered_tree "$LAYERED"
+  run_backport "$WORK_DIR" "$LAYERED"
   [ -n "$BP_DIR" ] || die "no executable needed restamping for $BACKPORT_TARGET_SDK"
-  build_variant_patch "$BP_DIR" "$BASE_PKG_IN" "$PKG_APPVER"
+  build_variant_patch "$BP_DIR" "$BASE_PKG_IN" "$PKG_APPVER" "$LAYERED"
+  rm -rf "$LAYERED"
   BP_PATCH_PKG="$PATCH_PKG_RESULT"
   rm -rf "$BP_DIR"
   log "backport patch: $BP_PATCH_PKG"
@@ -911,7 +1002,7 @@ if [ -z "$UPDATE" ]; then
   STAGE="$WORK_DIR/fpkgwork_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
   stage_tree "$STAGE" ""
 
-  run_backport "$WORK_DIR" "$DUMP"
+  run_backport "$WORK_DIR" "$STAGE"
   if [ -n "$BP_DIR" ] && [ "$MODE" = "remaster" ]; then
     save_stock_binaries "$BP_DIR" "$STAGE" "$OUT_DIR/$TITLE_ID-stock"
     log "baking the backported executables into the app pkg"
@@ -921,19 +1012,20 @@ if [ -z "$UPDATE" ]; then
 
   gen_gp4 "$STAGE"; GP4="$STAGE.gp4"
   log "building pkg (orbis-pub-cmd img_create)"
-  wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --no_progress_bar \
-    "$(winpath "$GP4")" "$(winpath "$OUT_DIR")" || true
+  img_create "$OUT_DIR" --oformat pkg --no_progress_bar \
+    "$(winpath "$GP4")" "$(winpath "$OUT_DIR")"
   PKG="$(ls -t "$OUT_DIR"/*.pkg 2>/dev/null | head -1)"
   [ -n "$PKG" ] || die "no pkg produced"
-  rm -rf "$STAGE" "$GP4"
+  rm -f "$GP4"
   log "app pkg: $PKG"
 
   if [ -n "$BP_DIR" ]; then
-    build_variant_patch "$BP_DIR" "$PKG" "$BASE_APPVER"
+    build_variant_patch "$BP_DIR" "$PKG" "$BASE_APPVER" "$STAGE"
     BP_PATCH_PKG="$PATCH_PKG_RESULT"
     rm -rf "$BP_DIR"
     log "backport patch: $BP_PATCH_PKG"
   fi
+  rm -rf "$STAGE"
 
   ls -la "$PKG" ${BP_PATCH_PKG:+"$BP_PATCH_PKG"} >&2
   echo "$PKG"
@@ -958,8 +1050,8 @@ if [ "$MODE" = "separate" ]; then
   stage_tree "$STAGE" ""
   gen_gp4 "$STAGE"; GP4="$STAGE.gp4"
   log "building app pkg (orbis-pub-cmd img_create)"
-  wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --no_progress_bar \
-    "$(winpath "$GP4")" "$(winpath "$OUT_DIR")" || true
+  img_create "$OUT_DIR" --oformat pkg --no_progress_bar \
+    "$(winpath "$GP4")" "$(winpath "$OUT_DIR")"
   APP_PKG="$(ls -t "$OUT_DIR"/*.pkg 2>/dev/null | head -1)"
   [ -n "$APP_PKG" ] || die "app pkg build failed"
   rm -rf "$STAGE" "$GP4"
@@ -969,8 +1061,11 @@ if [ "$MODE" = "separate" ]; then
   PATCH_PKG="$PATCH_PKG_RESULT"
   log "patch pkg: $PATCH_PKG"
 
-  # 3. backport pass over both dumps; the update runs last so its param.sfo wins
-  run_backport "$WORK_DIR" "$DUMP" "$UPDATE"
+  # 3. backport pass over the layered image, the way the console mounts it
+  LAYERED="$WORK_DIR/fpkglayer_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
+  layered_tree "$LAYERED"
+  run_backport "$WORK_DIR" "$LAYERED"
+  rm -rf "$LAYERED"
 
   # 4. second patch built from the restamped binaries
   if [ -n "$BP_DIR" ]; then
@@ -1011,15 +1106,15 @@ if [ "$MODE" = "remaster" ]; then
   log "building base pkg (for --app_path reference)"
   stage_tree "$BASE_STAGE" ""              # base only, no overlay
   gen_gp4 "$BASE_STAGE"; BASE_GP4="$BASE_STAGE.gp4"
-  wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --no_progress_bar \
-    "$(winpath "$BASE_GP4")" "$(winpath "$BASE_OUT")" || true
+  img_create "$BASE_OUT" --oformat pkg --no_progress_bar \
+    "$(winpath "$BASE_GP4")" "$(winpath "$BASE_OUT")"
   BASE_PKG="$(ls -t "$BASE_OUT"/*.pkg 2>/dev/null | head -1)"
   [ -n "$BASE_PKG" ] || die "base pkg build failed"
   rm -rf "$BASE_STAGE" "$BASE_GP4"
 
   stage_tree "$STAGE" overlay
 
-  run_backport "$WORK_DIR" "$DUMP" "$UPDATE"
+  run_backport "$WORK_DIR" "$STAGE"
   if [ -n "$BP_DIR" ]; then
     save_stock_binaries "$BP_DIR" "$STAGE" "$OUT_DIR/$TITLE_ID-stock"
     log "baking the backported executables into the remaster"
@@ -1044,8 +1139,8 @@ if [ "$MODE" = "remaster" ]; then
   sfo_edit -e VERSION 01.00 "$P"
 
   log "building remaster pkg (orbis-pub-cmd img_create --skip_digest)"
-  wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --skip_digest --no_progress_bar \
-    "$(winpath "$GP4")" "$(winpath "$OUT_DIR")" || true
+  img_create "$OUT_DIR" --oformat pkg --skip_digest --no_progress_bar \
+    "$(winpath "$GP4")" "$(winpath "$OUT_DIR")"
 
   PKG="$(ls -t "$OUT_DIR"/*.pkg 2>/dev/null | head -1)"
   [ -n "$PKG" ] || die "no pkg produced"
@@ -1067,6 +1162,12 @@ fi
 log "merge (app): base_cat=$BASE_CAT  app_ver=$UPDATE_APPVER"
 
 stage_tree "$STAGE" overlay
+
+# Before gen_gp4 and img_create: gengp4 rewrites param.sfo and img_create
+# fake-signs the executables where they lie, and the backport wants the plain
+# ELFs the console would load.
+run_backport "$WORK_DIR" "$STAGE"
+
 gen_gp4 "$STAGE"; GP4="$STAGE.gp4"
 
 P="$STAGE/sce_sys/param.sfo"
@@ -1077,20 +1178,20 @@ sfo_edit -e APP_VER "$UPDATE_APPVER" "$P"
 sfo_edit -e VERSION 01.00 "$P"
 
 log "building merged app pkg (img_create --skip_digest)"
-wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --skip_digest \
-  --no_progress_bar "$(winpath "$GP4")" "$(winpath "$OUT_DIR")" || true
+img_create "$OUT_DIR" --oformat pkg --skip_digest \
+  --no_progress_bar "$(winpath "$GP4")" "$(winpath "$OUT_DIR")"
 PKG="$(ls -t "$OUT_DIR"/*.pkg 2>/dev/null | head -1)"
 [ -n "$PKG" ] || die "no pkg produced"
-rm -rf "$STAGE" "$GP4"
+rm -f "$GP4"
 log "merged app pkg: $PKG"
 
-run_backport "$WORK_DIR" "$DUMP" "$UPDATE"
 if [ -n "$BP_DIR" ]; then
-  build_variant_patch "$BP_DIR" "$PKG" "$UPDATE_APPVER"
+  build_variant_patch "$BP_DIR" "$PKG" "$UPDATE_APPVER" "$STAGE"
   BP_PATCH_PKG="$PATCH_PKG_RESULT"
   rm -rf "$BP_DIR"
   log "backport patch: $BP_PATCH_PKG"
 fi
+rm -rf "$STAGE"
 
 ls -la "$PKG" ${BP_PATCH_PKG:+"$BP_PATCH_PKG"} >&2
 echo "$PKG"

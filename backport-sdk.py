@@ -10,6 +10,11 @@
 #     -o, --out DIR     where to create <TITLEID>-bp (default: cwd)
 #     -n, --dry-run     report what would happen, write nothing
 #     -f, --force       restamp even when that would raise the SDK version
+#         --keep-version-records
+#                       leave PT_SCE_VERSION alone, restamping only the param
+#                       segment. The records drive the SYSTEM_VER img_create
+#                       writes, so a package built this way still asks for the
+#                       firmware the title was built against.
 #     -r, --resolve     print the "auto" target for one or more dumps and exit,
 #                       so a caller restamping several trees resolves once and
 #                       applies the same stamp to each
@@ -320,7 +325,7 @@ def choose_sdk(dumps):
     return stamp, lines
 
 
-def patch(data, sdk, force, label):
+def patch(data, sdk, force, label, keep_versions=False):
     """Rewrite the stamp in place. -> (list of report lines, changed?)"""
     lines, changed = [], False
     version_seg = None
@@ -343,7 +348,14 @@ def patch(data, sdk, force, label):
 
     if not lines:
         lines.append('no param segment')
-    if version_seg is not None:
+    if version_seg is not None and keep_versions:
+        before = version_records(data, version_seg)
+        stale = sorted({v for _, v in before if v > sdk})
+        lines.append('%-20s %d records left alone%s'
+                     % ('PT_SCE_VERSION', len(before),
+                        ', naming ' + ', '.join('0x%08x' % v for v in stale)
+                        if stale else ''))
+    elif version_seg is not None:
         before = version_records(data, version_seg)
         lowered = version_records(data, version_seg, sdk)
         if lowered:
@@ -358,7 +370,7 @@ def patch(data, sdk, force, label):
 
 def main(argv):
     sdk, out_base, dry_run, force = DEFAULT_SDK, '.', False, False
-    resolve_only = observed_only = False
+    resolve_only = observed_only = keep_versions = False
     dumps = []
     i = 0
     while i < len(argv):
@@ -381,6 +393,8 @@ def main(argv):
             resolve_only = True
         elif a == '--observed':
             observed_only = True
+        elif a == '--keep-version-records':
+            keep_versions = True
         elif a in ('-n', '--dry-run'):
             dry_run = True
         elif a in ('-f', '--force'):
@@ -456,7 +470,7 @@ def main(argv):
         if data[:4] != b'\x7fELF':
             print('%-34s not an ELF, skipped' % rel)
             continue
-        lines, changed = patch(data, sdk, force, rel)
+        lines, changed = patch(data, sdk, force, rel, keep_versions)
         print('%-34s %s' % (rel, lines[0]))
         for extra in lines[1:]:
             print('%-34s %s' % ('', extra))

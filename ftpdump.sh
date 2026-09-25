@@ -656,6 +656,9 @@ verify_sizes() {
   local_list=$(create_temp_file)
   targets=$(create_temp_file)
 
+  # A recursive listing of a big game runs for minutes.
+  echo "Verifying sizes: listing \"$remote_path\" ..."
+
   # "find --ls" columns: permissions, owner/group, size, date, time, path. Paths
   # can contain spaces, so everything past the time column is taken verbatim.
   lftp_run "find --ls $remote_path;" 2> /dev/null \
@@ -663,6 +666,9 @@ verify_sizes() {
         i = index($0, $5) + length($5) + 1
         print $3 "\t" substr($0, i + cut + 1) }' > "$remote_list"
   list_file_sizes > "$local_list"
+
+  echo "Verifying sizes: $(wc -l < "$remote_list") remote against" \
+    "$(wc -l < "$local_list") local file(s) ..."
 
   while IFS=$'\t' read -r size file; do
     # The server decrypts executables while sending them, so their size cannot
@@ -678,6 +684,7 @@ verify_sizes() {
     "$local_list" "$remote_list")
 
   if [[ $get_commands ]]; then
+    echo "Re-downloading $(wc -l < "$targets") incomplete file(s) ..."
     lftp_run "$get_commands" < /dev/null
     while IFS=$'\t' read -r size file; do
       [[ -f "$file" && $(wc -c < "$file") -eq $size ]] && continue
@@ -725,8 +732,14 @@ verify_executables() {
   local file_name
   local dir
   local incomplete=0
+  local total
 
   [[ $have_readelf ]] || return 0
+
+  total=$(find . -type f \( -iname "eboot.bin" -o -iname "*.elf" \
+    -o -iname "*.self" -o -iname "*.prx" -o -iname "*.sprx" \) | wc -l)
+  [[ $total -gt 0 ]] || return 0
+  echo "Checking $total executable(s) ..."
 
   while IFS= read -rd '' file_path; do
     elf_is_damaged "$file_path" || continue
