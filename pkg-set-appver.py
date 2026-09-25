@@ -15,9 +15,15 @@ order:
         -> header 0xfe0   SHA256(header[0:0xfe0])
           -> header 0x1000 signature over SHA256(header[0:0x1000])
 
-Usage: pkg-set-appver.py <pkg> <new_app_ver>    e.g. 01.23
+SYSTEM_VER is an int field of the same fixed width, so it rides the same chain.
+img_create derives it from the executables' version records rather than from the
+param.sfo handed to it, so a package whose stamps were lowered still ships asking
+for the firmware they were built against; setting it here is after the fact.
+
+Usage: pkg-set-appver.py <pkg> <new_app_ver> [system_ver]   e.g. 01.23 0x08500000
 """
 import hashlib
+import mmap
 import struct
 import sys
 from pathlib import Path
@@ -60,10 +66,21 @@ PKG_SIGN_KEY = bytes.fromhex(
     "09b78d28d4a6c3b81e1f07ebb4120b95b88530fddc3913d07cdc8fedf9c9a3c1")
 
 
+HASH_CHUNK = 1 << 24
+
+
 class Pkg:
+    """A package opened in place.
+
+    Mapped rather than read: an app package runs to tens of gigabytes and the
+    body digest covers all of it, so holding either the file or that slice in
+    memory is not an option.
+    """
+
     def __init__(self, path):
         self.path = path
-        self.blob = bytearray(Path(path).read_bytes())
+        self.file = open(path, "r+b")
+        self.blob = mmap.mmap(self.file.fileno(), 0)
         if struct.unpack_from(">I", self.blob, 0)[0] != PKG_MAGIC:
             raise SystemExit("not a PS4 pkg")
         self.entry_count, = struct.unpack_from(">I", self.blob, 0x10)
@@ -88,8 +105,23 @@ class Pkg:
     def put(self, at, value):
         self.blob[at:at + len(value)] = value
 
+    def sha_range(self, off, size):
+        """SHA256 over a span of the file, read in chunks so nothing is copied
+        whole. The body digest covers the entire package."""
+        digest = hashlib.sha256()
+        view = memoryview(self.blob)
+        end = off + size
+        while off < end:
+            step = min(HASH_CHUNK, end - off)
+            digest.update(view[off:off + step])
+            off += step
+        view.release()
+        return digest.digest()
+
     def save(self):
-        Path(self.path).write_bytes(self.blob)
+        self.blob.flush()
+        self.blob.close()
+        self.file.close()
 
 
 def sfo_field(blob, key):
@@ -118,6 +150,15 @@ def main() -> int:
     pkg.put(sfo_off + rel, encoded.ljust(length, b"\0"))
     print(f"param.sfo APP_VER {old} -> {new_ver}")
 
+    if len(sys.argv) > 3:
+        want = int(sys.argv[3], 0)
+        rel, length, _ = sfo_field(pkg.data(PARAM_SFO), "SYSTEM_VER")
+        if length != 4:
+            raise SystemExit(f"SYSTEM_VER is {length} bytes, expected 4")
+        was, = struct.unpack_from("<I", pkg.blob, sfo_off + rel)
+        pkg.put(sfo_off + rel, struct.pack("<I", want))
+        print(f"param.sfo SYSTEM_VER {was:#010x} -> {want:#010x}")
+
     gen_idx, gen_off, _ = pkg.entries[GENERAL_DIGESTS]
     pkg.put(gen_off + GEN_SLOT_PARAM_DIGEST, pkg.sha_entry(PARAM_SFO))
 
@@ -140,14 +181,10 @@ def main() -> int:
         parts.append(bytes(pkg.blob[off:off + size]))
     pkg.put(HDR_SC_ENTRIES2, hashlib.sha256(b"".join(parts)).digest())
 
-    pkg.put(HDR_DIGEST_TABLE, hashlib.sha256(
-        pkg.blob[dig_off:dig_off + dig_size]).digest())
-    pkg.put(HDR_BODY_DIGEST, hashlib.sha256(
-        pkg.blob[pkg.body_off:pkg.body_off + pkg.body_size]).digest())
-    pkg.put(HDR_SELF_DIGEST, hashlib.sha256(
-        pkg.blob[0:HDR_SELF_DIGEST]).digest())
-    pkg.put(HDR_SIGNATURE, sign(PKG_SIGN_KEY, hashlib.sha256(
-        pkg.blob[0:HDR_SIGNATURE]).digest()))
+    pkg.put(HDR_DIGEST_TABLE, pkg.sha_range(dig_off, dig_size))
+    pkg.put(HDR_BODY_DIGEST, pkg.sha_range(pkg.body_off, pkg.body_size))
+    pkg.put(HDR_SELF_DIGEST, pkg.sha_range(0, HDR_SELF_DIGEST))
+    pkg.put(HDR_SIGNATURE, sign(PKG_SIGN_KEY, pkg.sha_range(0, HDR_SIGNATURE)))
     print("repaired: gen +0xc0, digest slots, header 0x100/0x120/0x140/0x160/"
           "0xfe0, signature 0x1000")
 

@@ -60,6 +60,12 @@
 # The update's param.sfo is carried; TARGET_APP_VER is patch-only and dropped
 # from an app or remaster volume. APP_VER is what the console displays.
 #
+# SYSTEM_VER is rewritten to match the executables rather than carried. Sony sets
+# it from release policy, so a patch built long after the code can demand a much
+# newer firmware than anything in it needs. A package holding backported
+# executables asks for the backport target; one holding the originals asks for
+# whatever they were built against.
+#
 # A backport patch declares the same APP_VER as the base it sits on, so the
 # displayed version does not move. img_create requires a patch to out-rank the
 # package its app_path names, so it is built one version up and restamped.
@@ -101,7 +107,15 @@
 #     --remaster         merged remaster pkg with the backport baked in
 #     --separate         app pkg + update pkg + backport patch
 #     --no-backport      do not run the SDK backport pass
-#     --sdk VER          backport target SDK (default 0x10790001)
+#     --base-pkg PKG     build only the backport patch, for a base package that
+#                        already exists. The dumps still supply the executables;
+#                        CONTENT_ID and APP_VER come from the pkg, and a mismatch
+#                        against the dumps is refused since a patch only marries
+#                        the base it was built against.
+#     --sdk VER          backport target SDK, or "auto" (default). "auto" picks
+#                        the oldest firmware exporting everything the title
+#                        imports, which is the most portable target it can take;
+#                        pass an explicit stamp to override.
 #     --dlc DIR          DLC dump dir (holds one or more "*-ac"/"*-al" content
 #                        dirs) to build add-on pkgs from; repeatable. Default:
 #                        auto-detect a sibling "<foo>-dlc" dir.
@@ -159,14 +173,43 @@ wine_run() {
 winpath() { winepath -w "$1"; }
 sfo_get() { "$SFO_TOOL" "$1" -q "$2" 2>/dev/null | tr -d '\r\n'; }
 sfo_edit() { "$SFO_TOOL" "$@" >/dev/null 2>&1 || true; }
+# ---------------------------------------------------------------------------
+# system_ver_for <sdk stamp> -> the SYSTEM_VER a package carrying executables at
+# that stamp should ask for. Same BCD layout with the build field cleared:
+# 0x08500001 -> 0x08500000.
+#
+# It has to be applied to the finished package, not to the staged param.sfo:
+# img_create derives SYSTEM_VER from the executables' own version records, which
+# a stamp rewrite leaves naming the original SDK, so anything set beforehand is
+# overwritten.
+# ---------------------------------------------------------------------------
+system_ver_for() {
+  [ -n "$1" ] && [ "$1" != 0 ] || return 1
+  printf '0x%08x\n' $(( $1 & 0xFFFFF000 ))
+}
 
+# ---------------------------------------------------------------------------
+# sync_pkg_system_ver <pkg> <app_ver> <sdk stamp>
+#   Point a finished package's SYSTEM_VER at the SDK its executables carry,
+#   repairing the digests the edit invalidates. Only for a package holding
+#   restamped executables; one shipping the originals already asks for the right
+#   thing, since that is what img_create derived it from.
+# ---------------------------------------------------------------------------
+sync_pkg_system_ver() {
+  local pkg="$1" app_ver="$2" stamp="$3" sysver
+  sysver="$(system_ver_for "$stamp")" || return 0
+  log "SFO: SYSTEM_VER -> $sysver (what the backported executables ask for)"
+  python3 "$PKG_SET_APPVER" "$pkg" "$app_ver" "$sysver" >&2 \
+    || die "could not set SYSTEM_VER on $(basename "$pkg")"
+}
 # --- args ------------------------------------------------------------------
 # UPDATE: "" = auto-discover sibling "-patch" dir; "none" = base-only;
 #         a path = explicit update dir.
 # DLC_DIRS: explicit --dlc dirs (repeatable). DLC_MODE: "" = auto-discover a
 # sibling "-dlc" dir; "none" = do not build DLC; "explicit" = use DLC_DIRS.
 CONTENT_ID="" UPDATE="" DUMP="" OUT_DIR="$PWD" KEYSTONE_MODE="retail" PS2_TID=""
-MODE="app-merge" BACKPORT=1 BACKPORT_TARGET_SDK="0x10790001"
+MODE="app-merge" BACKPORT=1 BACKPORT_TARGET_SDK="auto" BASE_PKG_IN=""
+RESOLVED_SDK="" OBSERVED_SDK=""
 DLC_MODE="" ; declare -a DLC_DIRS=() DLC_ITEMS=() ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -177,6 +220,7 @@ while [ $# -gt 0 ]; do
     --remaster)   MODE="remaster"; shift ;;
     --separate)   MODE="separate"; shift ;;
     --no-backport) BACKPORT=0; shift ;;
+    --base-pkg)   BASE_PKG_IN="${2:?}"; shift 2 ;;
     --sdk)        BACKPORT_TARGET_SDK="${2:?}"; shift 2 ;;
     --dlc)        DLC_DIRS+=("${2%/}"); DLC_MODE="explicit"; shift 2 ;;
     --no-dlc)     DLC_MODE="none"; shift ;;
@@ -295,6 +339,12 @@ if [ "$BUILD_APP" -eq 1 ]; then
   [ -n "$CONTENT_ID" ] || die "could not determine CONTENT_ID"
   TITLE_ID="$(sfo_get "$DUMP/sce_sys/param.sfo" TITLE_ID)"
   BASE_APPVER="$(sfo_get "$DUMP/sce_sys/param.sfo" APP_VER)"
+  # What the executables ask for, for SYSTEM_VER on packages we do not restamp.
+  declare -a _obs=("$DUMP")
+  if [ -n "$UPDATE" ] && [ "$UPDATE" != none ]; then _obs+=("$UPDATE"); fi
+  OBSERVED_SDK="$(python3 "$BACKPORT_SDK" --observed "${_obs[@]}" 2>/dev/null || true)"
+  unset _obs
+  [ -n "$OBSERVED_SDK" ] && log "executables were built against $OBSERVED_SDK" || true
 
   # --- detect PS2 classic --------------------------------------------------
   # Signal: the PS2 emulator compiler self is present (backed by EMU_VER).
@@ -550,17 +600,26 @@ appver_bump() {
 run_backport() {
   local dest="$1"; shift
   local d rc restamped=0 title
-  BP_DIR=""
+  BP_DIR="" RESOLVED_SDK=""
   if [ "$BACKPORT" -eq 0 ]; then log "backport: skipped (--no-backport)"; return 0; fi
   [ -f "$BACKPORT_SDK" ] || { log "backport: $BACKPORT_SDK not found, skipping"; return 0; }
 
   title="$(sfo_get "$DUMP/sce_sys/param.sfo" TITLE_ID)"
   [ -n "$title" ] || die "could not read TITLE_ID for the backport tree"
   mkdir -p "$dest"
-  log "backport: collecting executables at SDK $BACKPORT_TARGET_SDK"
+  # Resolve "auto" once across every tree: a title's base and update share one
+  # process, so they have to end up carrying the same stamp.
+  local target="$BACKPORT_TARGET_SDK"
+  if [ "$target" = auto ]; then
+    target="$(python3 "$BACKPORT_SDK" --resolve "$@")" \
+      || die "could not resolve an SDK target for $*"
+    log "backport: resolved SDK $target"
+  fi
+  RESOLVED_SDK="$target"
+  log "backport: collecting executables at SDK $target"
   for d in "$@"; do
     rc=0
-    python3 "$BACKPORT_SDK" --sdk "$BACKPORT_TARGET_SDK" --out "$dest" "$d" >&2 || rc=$?
+    python3 "$BACKPORT_SDK" --sdk "$target" --out "$dest" "$d" >&2 || rc=$?
     case "$rc" in
       0) restamped=1 ;;
       3) ;;
@@ -569,7 +628,7 @@ run_backport() {
   done
 
   if [ "$restamped" -eq 0 ]; then
-    log "backport: every stamp is already at or below $BACKPORT_TARGET_SDK"
+    log "backport: every stamp is already at or below $target"
     rm -rf "$dest/$title-bp"
     return 0
   fi
@@ -640,8 +699,9 @@ build_variant_patch() {
   [ -n "$built" ] || die "backport patch build failed"
 
   [ -f "$PKG_SET_APPVER" ] || die "pkg-set-appver.py not found at $PKG_SET_APPVER"
-  log "restamping the patch to APP_VER $app_ver"
-  python3 "$PKG_SET_APPVER" "$built" "$app_ver" >&2 \
+  local sysver; sysver="$(system_ver_for "$RESOLVED_SDK" || true)"
+  log "restamping the patch to APP_VER $app_ver${sysver:+, SYSTEM_VER $sysver}"
+  python3 "$PKG_SET_APPVER" "$built" "$app_ver" ${sysver:+"$sysver"} >&2 \
     || die "could not restamp the backport patch to $app_ver"
 
   local stem; stem="$(basename "${built%.pkg}")"
@@ -843,6 +903,36 @@ if [ "$BUILD_APP" -eq 0 ]; then
 fi
 
 # ===========================================================================
+# BACKPORT ONLY (--base-pkg): a patch for a base package that already exists.
+# The dumps supply the executables; the pkg supplies the identity the patch has
+# to marry, so its CONTENT_ID and APP_VER are read from it rather than guessed.
+# ===========================================================================
+if [ -n "$BASE_PKG_IN" ]; then
+  [ -f "$BASE_PKG_IN" ] || die "--base-pkg: no such file: $BASE_PKG_IN"
+  BASE_PKG_IN="$(cd "$(dirname "$BASE_PKG_IN")" && pwd)/$(basename "$BASE_PKG_IN")"
+  PKG_CID="$("$SFO_TOOL" -q CONTENT_ID "$BASE_PKG_IN" 2>/dev/null || true)"
+  PKG_APPVER="$("$SFO_TOOL" -q APP_VER "$BASE_PKG_IN" 2>/dev/null || true)"
+  [ -n "$PKG_CID" ] || die "--base-pkg: could not read CONTENT_ID from $(basename "$BASE_PKG_IN")"
+  [ -n "$PKG_APPVER" ] || die "--base-pkg: could not read APP_VER from $(basename "$BASE_PKG_IN")"
+  [ "$PKG_CID" = "$CONTENT_ID" ] \
+    || die "--base-pkg is $PKG_CID but the dumps are $CONTENT_ID; a patch only marries its own base"
+  log "base pkg   : $(basename "$BASE_PKG_IN")  ($PKG_CID, APP_VER=$PKG_APPVER)"
+  [ "$BACKPORT" -eq 1 ] || die "--base-pkg with --no-backport would build nothing"
+
+  declare -a BP_SRC=("$DUMP")
+  if [ -n "$UPDATE" ] && [ "$UPDATE" != none ]; then BP_SRC+=("$UPDATE"); fi
+  run_backport "$WORK_DIR" "${BP_SRC[@]}"
+  [ -n "$BP_DIR" ] || die "no executable needed restamping for $BACKPORT_TARGET_SDK"
+  build_variant_patch "$BP_DIR" "$BASE_PKG_IN" "$PKG_APPVER"
+  BP_PATCH_PKG="$PATCH_PKG_RESULT"
+  rm -rf "$BP_DIR"
+  log "backport patch: $BP_PATCH_PKG"
+  ls -la "$BP_PATCH_PKG" >&2
+  echo "$BP_PATCH_PKG"
+  exit 0
+fi
+
+# ===========================================================================
 # BASE-ONLY build: one app pkg, with a backport either as its own patch or, under
 # --remaster, baked in.
 # ===========================================================================
@@ -851,11 +941,15 @@ if [ -z "$UPDATE" ]; then
   stage_tree "$STAGE" ""
 
   run_backport "$WORK_DIR" "$DUMP"
+  # Only a package that carries the restamped executables may claim the lower
+  # firmware; one shipping the originals alongside a backport patch must not.
+  STAGE_SDK="$OBSERVED_SDK"
   if [ -n "$BP_DIR" ] && [ "$MODE" = "remaster" ]; then
     save_stock_binaries "$BP_DIR" "$STAGE" "$OUT_DIR/$TITLE_ID-stock"
     log "baking the backported executables into the app pkg"
     cp -a "$BP_DIR/." "$STAGE/"
     rm -rf "$BP_DIR"; BP_DIR=""
+    STAGE_SDK="$RESOLVED_SDK"
   fi
 
   gen_gp4 "$STAGE"; GP4="$STAGE.gp4"
@@ -865,6 +959,8 @@ if [ -z "$UPDATE" ]; then
   PKG="$(ls -t "$OUT_DIR"/*.pkg 2>/dev/null | head -1)"
   [ -n "$PKG" ] || die "no pkg produced"
   rm -rf "$STAGE" "$GP4"
+  [ "$STAGE_SDK" = "$RESOLVED_SDK" ] && [ -n "$RESOLVED_SDK" ] \
+    && sync_pkg_system_ver "$PKG" "$BASE_APPVER" "$RESOLVED_SDK" || true
   log "app pkg: $PKG"
 
   if [ -n "$BP_DIR" ]; then
@@ -959,11 +1055,13 @@ if [ "$MODE" = "remaster" ]; then
   stage_tree "$STAGE" overlay
 
   run_backport "$WORK_DIR" "$DUMP" "$UPDATE"
+  STAGE_SDK="$OBSERVED_SDK"
   if [ -n "$BP_DIR" ]; then
     save_stock_binaries "$BP_DIR" "$STAGE" "$OUT_DIR/$TITLE_ID-stock"
     log "baking the backported executables into the remaster"
     cp -a "$BP_DIR/." "$STAGE/"
     rm -rf "$BP_DIR"
+    STAGE_SDK="$RESOLVED_SDK"
   fi
 
   gen_gp4 "$STAGE"; GP4="$STAGE.gp4"
@@ -990,6 +1088,9 @@ if [ "$MODE" = "remaster" ]; then
   [ -n "$PKG" ] || die "no pkg produced"
 
   rm -rf "$STAGE" "$GP4" "$BASE_OUT"
+  if [ "$STAGE_SDK" = "$RESOLVED_SDK" ] && [ -n "$RESOLVED_SDK" ]; then
+    sync_pkg_system_ver "$PKG" "$UPDATE_APPVER" "$RESOLVED_SDK"
+  fi
   log "done: $PKG"
   ls -la "$PKG" >&2
   echo "$PKG"

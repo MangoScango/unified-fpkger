@@ -6,24 +6,46 @@
 #
 # USAGE
 #   backport-sdk.py [options] DUMP_DIR
-#     -s, --sdk VER     target SDK version (default 0x10790001)
+#     -s, --sdk VER     target SDK version, or "auto" (default 0x10790001)
 #     -o, --out DIR     where to create <TITLEID>-bp (default: cwd)
 #     -n, --dry-run     report what would happen, write nothing
 #     -f, --force       restamp even when that would raise the SDK version
+#     -r, --resolve     print the "auto" target for one or more dumps and exit,
+#                       so a caller restamping several trees resolves once and
+#                       applies the same stamp to each
+#         --observed    print the highest SDK stamp the dumps' executables carry
+#                       and exit, which is what their param.sfo should ask for
 #     -h, --help        this text
 #
 #   A stamp already at or below the target is left as it is, so a mixed tree can
 #   be run through repeatedly without pushing old modules forward.
+#
+#   "auto" reads the dump's imports and picks the oldest firmware that exports
+#   all of them, which is the most portable target the title can take. Imports a
+#   module in the dump satisfies itself are not counted; a game bundles its own
+#   libc and friends under sce_module.
+#
+#   It reads the tables build-export-db.py writes, by default from ./docs beside
+#   this file and otherwise from $FW_EXPORT_DB. An import no sampled firmware
+#   exports is an error rather than a lower floor, because lowering the stamp
+#   does not conjure the symbol and the result would not load. Adding a newer
+#   firmware dump or naming an explicit --sdk are the ways past it.
+#
+#   The stamp it emits is the floor's compat level with the point-release digit
+#   dropped, so 07.590 becomes 07.500. An explicit --sdk is used exactly as
+#   given.
 #
 # EXIT STATUS
 #   0  at least one executable was restamped
 #   3  nothing needed lowering
 #   1  error
 #
-#   Executables are eboot.bin and any .elf/.self/.prx/.sprx, copied with their
-#   relative paths intact so the result can be dropped back over a staged tree.
-#   param.sfo comes along unmodified, for the title id and as a record of what
-#   the dump asked for.
+#   Executables are eboot.bin and any .elf/.self/.prx/.sprx. Only the ones this
+#   actually restamps are written, with their relative paths intact so the result
+#   can be dropped back over a staged tree; an executable with no param segment,
+#   or already at or below the target, is reported and left out. param.sfo comes
+#   along unmodified, for the title id and as a record of what the dump asked
+#   for.
 #
 #   The stamp lives at offset 0x10 of PT_SCE_PROCPARAM (executables) and
 #   PT_SCE_MODULE_PARAM (libraries), and patching it does not change any file's
@@ -31,10 +53,14 @@
 #   still name the original SDK, and imports the target firmware does not
 #   export are left alone. Both are reported.
 # ----------------------------------------------------------------------------
+import csv
 import os
 import shutil
 import struct
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ps4elf
 
 PT_LOAD = 1
 PT_SCE_PROCPARAM = 0x61000001
@@ -46,6 +72,9 @@ SDK_OFFSET = 0x10
 DEFAULT_SDK = 0x10790001
 EXEC_SUFFIXES = ('.elf', '.self', '.prx', '.sprx')
 SFO_MAGIC = b'\x00PSF'
+DB_DIR = os.environ.get('FW_EXPORT_DB',
+                        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'docs'))
 
 
 def die(msg):
@@ -109,6 +138,170 @@ def find_content(dump):
     return execs, sfo
 
 
+def fw_key(name):
+    return tuple(int(part) for part in name.split('.'))
+
+
+def relax_point_release(stamp):
+    """Drop the point-release digit from a compat level: 7.59 -> 7.50.
+
+    A PS5's compatibility layer advertises a PS4 system software level set just
+    above the newest PS4 release of its era, so the levels are versions PS4
+    hardware never shipped: 07.590, 08.540, 10.790. Stamping one verbatim
+    demands a PS4 point release that does not exist and gates the title to the
+    next minor version for nothing, since the ABI does not move within one.
+    Rounding down to the x.x0 boundary lands on a release that shipped and stays
+    within the same compat band.
+    """
+    return stamp & ~0x000F0000
+
+
+def load_export_db():
+    """-> (levels oldest-first, stamp by level, ranges, names, holes)
+
+    ranges maps (library, nid) to (min_fw, max_fw), the oldest and newest
+    firmware seen exporting it. Every library a title can link is described, so
+    an import absent from ranges is exported by no firmware in the collection.
+    """
+    levels, stamps = [], {}
+    with open(os.path.join(DB_DIR, 'fw-levels.csv')) as fh:
+        for row in csv.DictReader(fh):
+            levels.append(row['ps5_system_software'])
+            stamps[row['ps5_system_software']] = int(row['ps4_stamp'], 16)
+
+    ranges, names = {}, {}
+    with open(os.path.join(DB_DIR, 'fw-exports.csv')) as fh:
+        for row in csv.DictReader(fh):
+            key = (row['library'], row['nid'])
+            ranges[key] = (row['min_fw'], row['max_fw'])
+            if row['name']:
+                names[key] = row['name']
+
+
+    holes = {}
+    path = os.path.join(DB_DIR, 'fw-export-gaps.csv')
+    if os.path.exists(path):
+        with open(path) as fh:
+            for row in csv.DictReader(fh):
+                holes[(row['library'], row['nid'])] = row['missing_fw'].split(';')
+    return levels, stamps, ranges, names, holes
+
+
+def observed_sdk(dumps):
+    """The highest SDK stamp any executable in the dumps carries.
+
+    This is what the package genuinely requires, as opposed to the SYSTEM_VER its
+    param.sfo asks for, which Sony sets from release policy.
+    """
+    highest = 0
+    for dump in dumps:
+        execs, _ = find_content(dump)
+        for rel in execs:
+            data = open(os.path.join(dump, rel), 'rb').read(4)
+            if data != b'\x7fELF':
+                continue
+            module = ps4elf.read(os.path.join(dump, rel))
+            if module is None:
+                continue
+            for stamp in (module.ps4_sdk, module.ps5_sdk):
+                if stamp and stamp > highest:
+                    highest = stamp
+    return highest
+
+
+def collect_modules(dumps):
+    """Parse every executable across the given dumps."""
+    modules = []
+    for dump in dumps:
+        execs, _ = find_content(dump)
+        for rel in execs:
+            module = ps4elf.read(os.path.join(dump, rel))
+            if module is not None:
+                modules.append(module)
+    return modules
+
+
+def choose_sdk(dumps):
+    """Pick the oldest firmware that exports everything the dumps import.
+
+    Resolve over every dump at once: a title's base and its update share one
+    process, so a symbol the update bundles satisfies the base's import of it.
+
+    -> (stamp, list of report lines)
+    """
+    levels, stamps, ranges, names, holes = load_export_db()
+    rank = {name: i for i, name in enumerate(levels)}
+    modules = collect_modules(dumps)
+    if not modules:
+        die('no readable executables in %s' % ', '.join(dumps))
+
+    provided, imported = set(), set()
+    for module in modules:
+        imported |= set(module.imports)
+        for library, nids in module.exports.items():
+            provided |= {(library, nid) for nid in nids}
+    wanted = imported - provided
+
+    def label(pair):
+        return names.get(pair) or '%s / %s' % pair
+
+    floor, floor_for = levels[0], None
+    ceiling, ceiling_for = levels[-1], None
+    beyond, gated = [], []
+    for pair in sorted(wanted):
+        if pair not in ranges:
+            beyond.append(pair)
+            continue
+        low, high = ranges[pair]
+        if rank[low] > rank[floor]:
+            floor, floor_for = low, pair
+        if rank[high] < rank[ceiling]:
+            ceiling, ceiling_for = high, pair
+        if pair in holes:
+            gated.append((pair, holes[pair]))
+
+    if beyond:
+        known = {library for library, _ in ranges}
+        foreign = sorted({library for library, _ in beyond
+                          if library not in known})
+        if foreign:
+            die('%d import(s) come from libraries no firmware provides: %s.\n'
+                'A title bundles these under sce_module, so resolve over the '
+                'dump that carries them as well.'
+                % (len(beyond), ', '.join(foreign[:6])))
+        detail = ['  %s / %s' % pair for pair in beyond[:12]]
+        if len(beyond) > 12:
+            detail.append('  ... and %d more' % (len(beyond) - 12))
+        die('%d import(s) are exported by no firmware in the tables, so no '
+            'target satisfies this title. The newest sampled is PS5 %s:\n%s\n'
+            'Add a newer firmware dump and rerun build-export-db.py, or pass an '
+            'explicit --sdk to stamp it anyway.'
+            % (len(beyond), levels[-1], '\n'.join(detail)))
+
+    lines = ['%d imports: %d satisfied within the dump, %d from firmware'
+             % (len(imported), len(imported) - len(wanted), len(wanted))]
+    lines.append('floor: PS5 %s%s' % (
+        floor, '  (%s)' % label(floor_for) if floor_for
+        else '  (no import raises it)'))
+    if rank[ceiling] < rank[levels[-1]]:
+        lines.append('ceiling: PS5 %s  (%s is gone after it)'
+                     % (ceiling, label(ceiling_for)))
+    if rank[ceiling] < rank[floor]:
+        die('no sampled firmware exports every import: floor is %s but %s '
+            'is gone after %s' % (floor, label(ceiling_for), ceiling))
+    for pair, missing in gated:
+        above = [fw for fw in missing if rank.get(fw, -1) >= rank[floor]]
+        if above:
+            lines.append('%s is missing at %s inside its own range'
+                         % (label(pair), ', '.join(above)))
+
+    stamp = relax_point_release(stamps[floor])
+    if stamp != stamps[floor]:
+        lines.append('stamp 0x%08x relaxed to 0x%08x, a PS4 release that exists'
+                     % (stamps[floor], stamp))
+    return stamp, lines
+
+
 def patch(data, sdk, force, label):
     """Rewrite the stamp in place. -> (list of report lines, changed?)"""
     lines, changed = [], False
@@ -142,6 +335,7 @@ def patch(data, sdk, force, label):
 
 def main(argv):
     sdk, out_base, dry_run, force = DEFAULT_SDK, '.', False, False
+    resolve_only = observed_only = False
     dumps = []
     i = 0
     while i < len(argv):
@@ -156,10 +350,14 @@ def main(argv):
             return 0
         elif a in ('-s', '--sdk'):
             i += 1
-            sdk = int(argv[i], 0)
+            sdk = 'auto' if argv[i].lower() == 'auto' else int(argv[i], 0)
         elif a in ('-o', '--out'):
             i += 1
             out_base = argv[i]
+        elif a in ('-r', '--resolve'):
+            resolve_only = True
+        elif a == '--observed':
+            observed_only = True
         elif a in ('-n', '--dry-run'):
             dry_run = True
         elif a in ('-f', '--force'):
@@ -170,12 +368,30 @@ def main(argv):
             dumps.append(a)
         i += 1
 
+    dumps = [d.rstrip('/') for d in dumps]
+    for d in dumps:
+        if not os.path.isdir(d):
+            die('not a directory: %s' % d)
+
+    if observed_only:
+        if not dumps:
+            die('give at least one dump directory (see --help)')
+        print('0x%08x' % observed_sdk(dumps))
+        return 0
+
+    if resolve_only:
+        if not dumps:
+            die('give at least one dump directory (see --help)')
+        stamp, why = choose_sdk(dumps)
+        for line in why:
+            print(line, file=sys.stderr)
+        print('0x%08x' % stamp)
+        return 0
+
     if len(dumps) != 1:
-        die('give exactly one dump directory (see --help)')
-    dump = dumps[0].rstrip('/')
-    if not os.path.isdir(dump):
-        die('not a directory: %s' % dump)
-    if not 0 <= sdk <= 0xFFFFFFFF:
+        die('give exactly one dump directory, or --resolve for several')
+    dump = dumps[0]
+    if sdk != 'auto' and not 0 <= sdk <= 0xFFFFFFFF:
         die('SDK version must fit in 32 bits')
 
     execs, sfo = find_content(dump)
@@ -202,6 +418,10 @@ def main(argv):
                  '0x%08x' % sfo_values['SYSTEM_VER'] if 'SYSTEM_VER' in sfo_values else '?',
                  dict(p.split('=', 1) for p in sfo_values.get('PUBTOOLINFO', '').split(',')
                       if '=' in p).get('sdk_ver', '?')))
+    if sdk == 'auto':
+        sdk, why = choose_sdk([dump])
+        for line in why:
+            print(line)
     print('target SDK 0x%08x%s\n' % (sdk, '  (dry run)' if dry_run else ''))
 
     if not dry_run:
@@ -218,7 +438,10 @@ def main(argv):
         for extra in lines[1:]:
             print('%-34s %s' % ('', extra))
         patched += changed
-        if not dry_run:
+        # Only restamped files belong in the tree. Carrying an executable this
+        # did not touch would put a byte-identical copy in the patch package and
+        # have it replace the base's.
+        if changed and not dry_run:
             dst = os.path.join(out, rel)
             os.makedirs(os.path.dirname(dst) or '.', exist_ok=True)
             with open(dst, 'wb') as fh:

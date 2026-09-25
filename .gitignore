@@ -8,10 +8,6 @@ sfo
 /tools
 *.log
 /fpkgwork*/
-/patchpkg_*/
-/bppkg_*/
-/.basepkg_*/
 *.har
 /.vscode
 /__pycache__
-/mini

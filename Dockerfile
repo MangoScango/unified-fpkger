@@ -50,6 +50,8 @@ ENV SDK_DIR=/opt/fpkger/PS4_Fake_PKG_Tools_3 \
     GENGP4_APP=/opt/fpkger/PS4_Fake_PKG_Tools_3/gengp4_app.exe \
     ORBIS_PUB_CMD=/opt/fpkger/PS4_Fake_PKG_Tools_3/orbis-pub-cmd.exe \
     PKG_SET_APPVER=/opt/fpkger/pkg-set-appver.py \
+    BACKPORT_SDK=/opt/fpkger/backport-sdk.py \
+    FW_EXPORT_DB=/opt/fpkger/docs \
     WINEDEBUG=-all \
     WINEDLLOVERRIDES="wineps.drv,localspl.dll,spoolss.dll=d"
 
@@ -58,7 +60,12 @@ COPY --from=deps /out-pkgtools /opt/fpkger/PS4_Fake_PKG_Tools_3
 # ftpdump takes sfo from its own directory when sfo_path is unset, so they ship
 # side by side.
 COPY build-fpkg.sh dump-build.sh ftpdump.sh make_fself.py \
-     pkg-set-appver.py pkgsig.py /opt/fpkger/
+     pkg-set-appver.py pkgsig.py backport-sdk.py ps4elf.py /opt/fpkger/
+# The firmware dumps these are derived from are far too large to ship, so the
+# tables travel with the image instead. build-export-db.py regenerates them and
+# stays out.
+COPY docs/fw-levels.csv docs/fw-exports.csv docs/fw-export-gaps.csv \
+     /opt/fpkger/docs/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # 0x3681B is the JZ guarding orbis-pub-cmd's "app volume must carry
