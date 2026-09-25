@@ -41,19 +41,28 @@
 #     is native but its PFSC writer does not actually compress.)
 #
 # ----------------------------------------------------------------------------
-# MERGE (--update DIR): builds base+update into one standalone pkg, as a
-# REMASTER, so the updated version displays in the UI. This mirrors the Windows
-# "Merge Game + Update" flow, which is the only way this CyB1K orbis-pub-cmd
-# will emit APP_VER != 01.00:
-#   1. build the BASE pkg first (used as the --app_path reference)
-#   2. overlay the update tree on the base (update wins)
-#   3. gengp4, then set volume_type = pkg_ps4_remaster
-#   4. gp4_proj_update --app_path <base.pkg>   (lets it accept the elevated ver)
-#   5. SFO: CATEGORY <- base value, add REMASTER_TYPE=1, APP_VER <- update's
-#           APP_VER, VERSION <- 01.00 (matches how retail remaster pkgs look)
-#   6. img_create --skip_digest
-# The update's param.sfo (patch notes changeinfo/changeinfo.xml too) is carried;
-# TARGET_APP_VER (patch-only) is dropped. APP_VER is what the console displays.
+# BUILD MODES
+#
+#   A base on its own builds one app pkg, with the backport handled the same way
+#   each mode handles it below: as its own patch, or baked in under --remaster.
+#
+#   default        one pkg_ps4_app holding base+update at the update's APP_VER,
+#                  plus a small patch for the backport. This needs the patched
+#                  orbis-pub-cmd; stock rejects APP_VER != 01.00 on an app volume.
+#   --remaster     one pkg_ps4_remaster. A remaster cannot be patched
+#                  afterwards, so a backport is baked in and the executables it
+#                  displaces are written to <TITLEID>-stock beside the output.
+#   --separate     app pkg and update pkg as retail ships them, plus a second
+#                  full update carrying the backport.
+#
+# --no-backport skips the SDK pass in any mode.
+#
+# The update's param.sfo is carried; TARGET_APP_VER is patch-only and dropped
+# from an app or remaster volume. APP_VER is what the console displays.
+#
+# A backport patch declares the same APP_VER as the base it sits on, so the
+# displayed version does not move. img_create requires a patch to out-rank the
+# package its app_path names, so it is built one version up and restamped.
 #
 # ----------------------------------------------------------------------------
 # DLC: builds a SEPARATE add-on (ac) pkg for each DLC found, alongside the
@@ -88,6 +97,11 @@
 #     --content-id CID   pkg content id (default: read from base param.sfo)
 #     --update DIR       explicit update/patch dump to merge onto the base
 #     --no-update        base-only; do not auto-merge a sibling patch
+#     --app-merge        merged app pkg + backport patch (default)
+#     --remaster         merged remaster pkg with the backport baked in
+#     --separate         app pkg + update pkg + backport patch
+#     --no-backport      do not run the SDK backport pass
+#     --sdk VER          backport target SDK (default 0x10790001)
 #     --dlc DIR          DLC dump dir (holds one or more "*-ac"/"*-al" content
 #                        dirs) to build add-on pkgs from; repeatable. Default:
 #                        auto-detect a sibling "<foo>-dlc" dir.
@@ -110,8 +124,12 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --- tools (override via env) ----------------------------------------------
 SDK_DIR="${SDK_DIR:-$SELF_DIR/PS4_Fake_PKG_Tools_3}"
 GENGP4_APP="${GENGP4_APP:-$SDK_DIR/gengp4_app.exe}"
+GENGP4_PATCH="${GENGP4_PATCH:-$SDK_DIR/gengp4_patch.exe}"
+# Patched to accept APP_VER != 01.00 on an app volume.
 ORBIS_PUB_CMD="${ORBIS_PUB_CMD:-$SDK_DIR/orbis-pub-cmd.exe}"
 MAKE_FSELF="${MAKE_FSELF:-$SELF_DIR/make_fself.py}"
+BACKPORT_SDK="${BACKPORT_SDK:-$SELF_DIR/backport-sdk.py}"
+PKG_SET_APPVER="${PKG_SET_APPVER:-$SELF_DIR/pkg-set-appver.py}"
 SFO_TOOL="${SFO_TOOL:-$SELF_DIR/sfo}"
 FAKE_PASSCODE="00000000000000000000000000000000"
 DLC_ENT_KEY="00000000000000000000000000000000"   # zero entitlement key (kstuff fakes the check)
@@ -148,12 +166,18 @@ sfo_edit() { "$SFO_TOOL" "$@" >/dev/null 2>&1 || true; }
 # DLC_DIRS: explicit --dlc dirs (repeatable). DLC_MODE: "" = auto-discover a
 # sibling "-dlc" dir; "none" = do not build DLC; "explicit" = use DLC_DIRS.
 CONTENT_ID="" UPDATE="" DUMP="" OUT_DIR="$PWD" KEYSTONE_MODE="retail" PS2_TID=""
+MODE="app-merge" BACKPORT=1 BACKPORT_TARGET_SDK="0x10790001"
 DLC_MODE="" ; declare -a DLC_DIRS=() DLC_ITEMS=() ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --content-id) CONTENT_ID="${2:?}"; shift 2 ;;
     --update)     UPDATE="${2%/}"; shift 2 ;;
     --no-update)  UPDATE="none"; shift ;;
+    --app-merge)  MODE="app-merge"; shift ;;
+    --remaster)   MODE="remaster"; shift ;;
+    --separate)   MODE="separate"; shift ;;
+    --no-backport) BACKPORT=0; shift ;;
+    --sdk)        BACKPORT_TARGET_SDK="${2:?}"; shift 2 ;;
     --dlc)        DLC_DIRS+=("${2%/}"); DLC_MODE="explicit"; shift 2 ;;
     --no-dlc)     DLC_MODE="none"; shift ;;
     --keystone)   KEYSTONE_MODE="${2:?}"; shift 2 ;;
@@ -269,6 +293,8 @@ IS_PS2=0
 if [ "$BUILD_APP" -eq 1 ]; then
   [ -n "$CONTENT_ID" ] || CONTENT_ID="$(sfo_get "$DUMP/sce_sys/param.sfo" CONTENT_ID)"
   [ -n "$CONTENT_ID" ] || die "could not determine CONTENT_ID"
+  TITLE_ID="$(sfo_get "$DUMP/sce_sys/param.sfo" TITLE_ID)"
+  BASE_APPVER="$(sfo_get "$DUMP/sce_sys/param.sfo" APP_VER)"
 
   # --- detect PS2 classic --------------------------------------------------
   # Signal: the PS2 emulator compiler self is present (backed by EMU_VER).
@@ -286,6 +312,7 @@ if [ "$BUILD_APP" -eq 1 ]; then
   log "content id : $CONTENT_ID"
   log "type       : $([ "$IS_PS2" -eq 1 ] && echo "PS2 classic (ps2-tid=$PS2_TID)" || echo "normal PS4")"
   log "update     : ${UPDATE:-<none>}"
+  log "mode       : $MODE$([ "$BACKPORT" -eq 1 ] || echo " (no backport)")"
   log "keystone   : $KEYSTONE_MODE"
 else
   log "add-ons only (no base app dump given)"
@@ -349,6 +376,22 @@ stage_tree() {
     log "using retail keystone from base dump"
     cp --remove-destination "$DUMP/sce_sys/keystone" "$stage/sce_sys/keystone"
   fi
+
+  unlink_executables "$stage"
+}
+
+# ---------------------------------------------------------------------------
+# unlink_executables <stage_dir>
+#   img_create fake-signs executables by rewriting them where they lie, so a
+#   hardlink from the stage would carry the rewrite back into the dump.
+# ---------------------------------------------------------------------------
+unlink_executables() {
+  local stage="$1" f
+  while IFS= read -r f; do
+    [ "$(stat -c %h "$f")" -gt 1 ] || continue
+    cp -a "$f" "$f.unlinking" && mv -f "$f.unlinking" "$f"
+  done < <(find "$stage" -type f \( -name eboot.bin -o -name '*.elf' \
+             -o -name '*.self' -o -name '*.prx' -o -name '*.sprx' \))
 }
 
 # ---------------------------------------------------------------------------
@@ -392,13 +435,220 @@ gp4_restore_names() {
   rm -f "$map"
 }
 
+# gen_gp4 <stage_dir> [generator]   (default: gengp4_app.exe)
+# A stage name may not start with a dot: these tools treat everything after one
+# as an extension and would write the project to ".gp4".
 gen_gp4() {
-  local stage="$1" gp4="$1.gp4"
+  local stage="$1" gp4="$1.gp4" gen="${2:-$GENGP4_APP}"
+  case "$(basename "$stage")" in .*) die "stage name may not start with a dot: $stage" ;; esac
   rm -f "$gp4"
   stage_fix_names "$stage"
-  ( cd "$(dirname "$stage")" && wine_run "$GENGP4_APP" "$(winpath "$stage")" ) || true
+  ( cd "$(dirname "$stage")" && wine_run "$gen" "$(winpath "$stage")" ) || true
   [ -f "$gp4" ] || die "gengp4 did not produce $gp4"
   gp4_restore_names "$stage"
+
+  # gengp4 can point default_id at a scenario that isn't there, which both
+  # img_create and gp4_proj_update reject.
+  local first
+  first="$(grep -oE '<scenario id="[0-9]+"' "$gp4" | head -1 | grep -oE '[0-9]+')"
+  [ -z "$first" ] || sed -i "s|<scenarios default_id=\"[0-9]*\">|<scenarios default_id=\"$first\">|" "$gp4"
+}
+
+# ---------------------------------------------------------------------------
+# stage_from <src_dir> <stage_dir> [overlay_dir]
+#   Hardlinked copy of any tree, with sce_sys as real files (gengp4_app rewrites
+#   param.sfo in place, and a hardlink would write through to the dump).
+#   Unlike stage_tree this touches neither the keystone nor the PS2 modules: it
+#   is for update trees, which carry their own sce_sys and no keystone.
+# ---------------------------------------------------------------------------
+stage_from() {
+  local src="$1" stage="$2" overlay="${3:-}"
+  rm -rf "$stage"
+  cp -al "$src" "$stage" 2>/dev/null || cp -a "$src" "$stage"
+  rm -rf "$stage/sce_sys"; cp -a "$src/sce_sys" "$stage/sce_sys"
+  if [ -n "$overlay" ]; then
+    log "overlaying $(basename "$overlay") onto the update tree"
+    cp -a "$overlay/." "$stage/"
+    # the overlay carries whichever param.sfo the backport last collected
+    cp -a "$src/sce_sys/param.sfo" "$stage/sce_sys/param.sfo"
+  fi
+  unlink_executables "$stage"
+}
+
+# ---------------------------------------------------------------------------
+# build_patch_pkg <update_dir> <app_pkg> <suffix> [overlay_dir]
+#   Result lands in PATCH_PKG_RESULT, not on stdout: the tools write their own
+#   output there, so a command substitution would capture their chatter too.
+#   Scanned with gengp4_patch.exe, which is the generator meant for update trees
+#   (it keeps a keystone out of the project), then pointed at the app pkg it
+#   patches -- the headless equivalent of the GUI's Project Settings > Patch >
+#   "Application Package" field. The update's own sce_sys already holds
+#   CATEGORY=gp / APP_VER / TARGET_APP_VER, so no SFO surgery is needed.
+#   <suffix> distinguishes the output file, since two patches for one title
+#   otherwise land on the same name.
+#
+#   The stage has to be named "<TITLEID>-patch": these generators read the
+#   directory name to decide what they are looking at, and given anything else
+#   gengp4_patch rewrites the staged param.sfo (CATEGORY, APP_VER) and emits an
+#   app volume, which img_create then rejects as "unexpected APP_VER". Named
+#   correctly it emits pkg_ps4_patch with storage_type=digital25 and leaves the
+#   sfo alone, so no volume or SFO surgery is needed here at all.
+# ---------------------------------------------------------------------------
+build_patch_pkg() {
+  local update="$1" app_pkg="$2" suffix="$3" overlay="${4:-}"
+  local tag; tag="$(printf '%s' "$CONTENT_ID$suffix" | tr -c 'A-Za-z0-9_-' '_')"
+  local parent="$WORK_DIR/fpkgwork_patch_$tag" out="$WORK_DIR/patchpkg_$tag" gp4
+  local title; title="$(sfo_get "$update/sce_sys/param.sfo" TITLE_ID)"
+  [ -n "$title" ] || die "could not read TITLE_ID from $update/sce_sys/param.sfo"
+
+  # the generators read the directory name; anything but "<TITLEID>-patch" makes
+  # gengp4_patch rewrite the staged sfo and emit an app volume
+  rm -rf "$parent"; mkdir -p "$parent"
+  local stage="$parent/$title-patch"
+  stage_from "$update" "$stage" "$overlay"
+
+  [ -f "$GENGP4_PATCH" ] || die "gengp4_patch.exe not found at $GENGP4_PATCH"
+  gen_gp4 "$stage" "$GENGP4_PATCH"; gp4="$stage.gp4"
+  grep -q '<volume_type>pkg_ps4_patch</volume_type>' "$gp4" \
+    || die "gengp4_patch emitted an app volume for $stage"
+
+  log "gp4_proj_update --app_path $(basename "$app_pkg")"
+  wine_run "$ORBIS_PUB_CMD" gp4_proj_update --app_path "$(winpath "$app_pkg")" \
+    "$(winpath "$gp4")" || die "gp4_proj_update failed for the patch pkg"
+
+  rm -rf "$out"; mkdir -p "$out"
+  log "building patch pkg (orbis-pub-cmd img_create --skip_digest)"
+  wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --skip_digest --no_progress_bar \
+    "$(winpath "$gp4")" "$(winpath "$out")" || true
+  local built; built="$(ls -t "$out"/*.pkg 2>/dev/null | head -1)"
+  [ -n "$built" ] || die "patch pkg build failed"
+
+  local final="$OUT_DIR/$(basename "${built%.pkg}")$suffix.pkg"
+  # an app and its patch can carry the same version in their names
+  [ "$final" != "$app_pkg" ] || final="$OUT_DIR/$(basename "${built%.pkg}")$suffix-patch.pkg"
+  mv -f "$built" "$final"
+  rm -rf "$parent" "$out"
+  PATCH_PKG_RESULT="$final"
+}
+
+# ---------------------------------------------------------------------------
+# appver_bump <XX.YY> -> the next version
+# ---------------------------------------------------------------------------
+appver_bump() {
+  local maj min
+  maj=$(( 10#${1%%.*} )); min=$(( 10#${1##*.} + 1 ))
+  [ "$min" -le 99 ] || { maj=$(( maj + 1 )); min=0; }
+  printf '%02d.%02d' "$maj" "$min"
+}
+
+# ---------------------------------------------------------------------------
+# run_backport <dest_parent> <dump_dir>...
+#   Collect every executable into <dest_parent>/<TITLEID>-bp, restamping any
+#   whose SDK sits above the target. Later dirs win, so pass the base before the
+#   update. Sets BP_DIR to the tree, or "" when nothing needed lowering.
+# ---------------------------------------------------------------------------
+run_backport() {
+  local dest="$1"; shift
+  local d rc restamped=0 title
+  BP_DIR=""
+  if [ "$BACKPORT" -eq 0 ]; then log "backport: skipped (--no-backport)"; return 0; fi
+  [ -f "$BACKPORT_SDK" ] || { log "backport: $BACKPORT_SDK not found, skipping"; return 0; }
+
+  title="$(sfo_get "$DUMP/sce_sys/param.sfo" TITLE_ID)"
+  [ -n "$title" ] || die "could not read TITLE_ID for the backport tree"
+  mkdir -p "$dest"
+  log "backport: collecting executables at SDK $BACKPORT_TARGET_SDK"
+  for d in "$@"; do
+    rc=0
+    python3 "$BACKPORT_SDK" --sdk "$BACKPORT_TARGET_SDK" --out "$dest" "$d" >&2 || rc=$?
+    case "$rc" in
+      0) restamped=1 ;;
+      3) ;;
+      *) die "backport-sdk.py failed on $(basename "$d") (exit $rc)" ;;
+    esac
+  done
+
+  if [ "$restamped" -eq 0 ]; then
+    log "backport: every stamp is already at or below $BACKPORT_TARGET_SDK"
+    rm -rf "$dest/$title-bp"
+    return 0
+  fi
+  BP_DIR="$dest/$title-bp"
+  [ -d "$BP_DIR" ] || die "backport-sdk.py produced no $title-bp"
+}
+
+# ---------------------------------------------------------------------------
+# save_stock_binaries <bp_dir> <stage_dir> <dest_dir>
+#   Keep the pre-backport copy of everything the backport collected, for builds
+#   that overwrite those files inside the package.
+# ---------------------------------------------------------------------------
+save_stock_binaries() {
+  local bp="$1" stage="$2" dest="$3" rel n=0
+  rm -rf "$dest"; mkdir -p "$dest"
+  while IFS= read -r rel; do
+    [ -f "$stage/$rel" ] || continue
+    mkdir -p "$dest/$(dirname "$rel")"
+    cp -a "$stage/$rel" "$dest/$rel"
+    n=$(( n + 1 ))
+  done < <(cd "$bp" && find . -type f ! -path './sce_sys/param.sfo' -printf '%P\n')
+  log "kept $n stock binaries in $(basename "$dest")"
+}
+
+# ---------------------------------------------------------------------------
+# build_variant_patch <bp_dir> <app_pkg> <app_ver>
+#   A patch carrying only the backported executables, declaring the same APP_VER
+#   as the package it sits on so installing it does not change the version the
+#   console shows. img_create requires a patch to out-rank the package named by
+#   app_path, so it is built one version up and the finished pkg restamped back
+#   down. Result in PATCH_PKG_RESULT.
+# ---------------------------------------------------------------------------
+build_variant_patch() {
+  local bp="$1" app_pkg="$2" app_ver="$3"
+  local built_ver; built_ver="$(appver_bump "$app_ver")"
+  local tag; tag="$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
+  local parent="$WORK_DIR/fpkgwork_bp_$tag" out="$WORK_DIR/bppkg_$tag" gp4 p
+  local title; title="$(sfo_get "$DUMP/sce_sys/param.sfo" TITLE_ID)"
+
+  rm -rf "$parent" "$out"; mkdir -p "$parent" "$out"
+  local stage="$parent/$title-patch"
+  cp -al "$bp" "$stage" 2>/dev/null || cp -a "$bp" "$stage"
+  # The collected tree needs the rest of an update's sce_sys around it, but an
+  # executable can live under sce_sys too, so the collected copies go back last.
+  local src_sys="${UPDATE:-$DUMP}/sce_sys"
+  cp -a "$src_sys/." "$stage/sce_sys/"
+  cp -a "$bp/sce_sys/." "$stage/sce_sys/"
+  cp -a "$src_sys/param.sfo" "$stage/sce_sys/param.sfo"
+  unlink_executables "$stage"
+
+  gen_gp4 "$stage" "$GENGP4_PATCH"; gp4="$stage.gp4"
+  grep -q '<volume_type>pkg_ps4_patch</volume_type>' "$gp4" \
+    || die "gengp4_patch emitted an app volume for $stage"
+
+  log "gp4_proj_update --app_path $(basename "$app_pkg")"
+  wine_run "$ORBIS_PUB_CMD" gp4_proj_update --app_path "$(winpath "$app_pkg")" \
+    "$(winpath "$gp4")" || die "gp4_proj_update failed for the backport patch"
+
+  p="$stage/sce_sys/param.sfo"
+  log "SFO: CATEGORY=gp, TARGET_APP_VER=$app_ver, APP_VER=$built_ver"
+  sfo_edit -s str CATEGORY gp -s str TARGET_APP_VER "$app_ver" \
+    -s str APP_VER "$built_ver" "$p"
+
+  log "building backport patch (img_create --skip_digest)"
+  wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --skip_digest --no_progress_bar \
+    "$(winpath "$gp4")" "$(winpath "$out")" || true
+  local built; built="$(ls -t "$out"/*.pkg 2>/dev/null | head -1)"
+  [ -n "$built" ] || die "backport patch build failed"
+
+  [ -f "$PKG_SET_APPVER" ] || die "pkg-set-appver.py not found at $PKG_SET_APPVER"
+  log "restamping the patch to APP_VER $app_ver"
+  python3 "$PKG_SET_APPVER" "$built" "$app_ver" >&2 \
+    || die "could not restamp the backport patch to $app_ver"
+
+  local stem; stem="$(basename "${built%.pkg}")"
+  local final="$OUT_DIR/${stem/-A${built_ver//./}-/-A${app_ver//./}-}-bp.pkg"
+  mv -f "$built" "$final"
+  rm -rf "$parent" "$out"
+  PATCH_PKG_RESULT="$final"
 }
 
 # ---------------------------------------------------------------------------
@@ -593,11 +843,21 @@ if [ "$BUILD_APP" -eq 0 ]; then
 fi
 
 # ===========================================================================
-# BASE-ONLY build
+# BASE-ONLY build: one app pkg, with a backport either as its own patch or, under
+# --remaster, baked in.
 # ===========================================================================
 if [ -z "$UPDATE" ]; then
   STAGE="$WORK_DIR/fpkgwork_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
   stage_tree "$STAGE" ""
+
+  run_backport "$WORK_DIR" "$DUMP"
+  if [ -n "$BP_DIR" ] && [ "$MODE" = "remaster" ]; then
+    save_stock_binaries "$BP_DIR" "$STAGE" "$OUT_DIR/$TITLE_ID-stock"
+    log "baking the backported executables into the app pkg"
+    cp -a "$BP_DIR/." "$STAGE/"
+    rm -rf "$BP_DIR"; BP_DIR=""
+  fi
+
   gen_gp4 "$STAGE"; GP4="$STAGE.gp4"
   log "building pkg (orbis-pub-cmd img_create)"
   wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --no_progress_bar \
@@ -605,77 +865,174 @@ if [ -z "$UPDATE" ]; then
   PKG="$(ls -t "$OUT_DIR"/*.pkg 2>/dev/null | head -1)"
   [ -n "$PKG" ] || die "no pkg produced"
   rm -rf "$STAGE" "$GP4"
-  log "done: $PKG"
-  ls -la "$PKG" >&2
+  log "app pkg: $PKG"
+
+  if [ -n "$BP_DIR" ]; then
+    build_variant_patch "$BP_DIR" "$PKG" "$BASE_APPVER"
+    BP_PATCH_PKG="$PATCH_PKG_RESULT"
+    rm -rf "$BP_DIR"
+    log "backport patch: $BP_PATCH_PKG"
+  fi
+
+  ls -la "$PKG" ${BP_PATCH_PKG:+"$BP_PATCH_PKG"} >&2
   echo "$PKG"
+  [ -z "${BP_PATCH_PKG:-}" ] || printf '%s\n' "$BP_PATCH_PKG"
   build_dlc_pkgs                     # separate add-on pkg(s), if any DLC
   exit 0
 fi
 
 # ===========================================================================
-# MERGE (base + update) as a REMASTER, so the updated APP_VER displays.
+# SEPARATE (--separate): app pkg and update pkg as their own packages, the way
+# retail ships them, then a backported patch if the dumps ask for a newer SDK
+# than the target firmware provides.
 #
-# Mirrors the Windows "Merge Game + Update" flow (which we verified is the only
-# way this CyB1K orbis-pub-cmd will emit APP_VER != 01.00):
-#   1. build the BASE pkg (needed as --app_path reference)
-#   2. stage the merged tree
-#   3. gengp4, flip volume_type -> pkg_ps4_remaster
-#   4. gp4_proj_update --app_path <base.pkg>   (lets the tool accept the version)
-#   5. SFO: CATEGORY=base, REMASTER_TYPE=1, APP_VER=<update's>, VERSION=01.00
-#   6. img_create --skip_digest
+# That backport patch is the whole update tree with the restamped executables
+# overlaid: the console replaces the entire patch layer, so a handful of files on
+# their own would drop the rest of the update.
 # ===========================================================================
+if [ "$MODE" = "separate" ]; then
+  log "separate build: app + update as individual pkgs"
+
+  STAGE="$WORK_DIR/fpkgwork_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
+  stage_tree "$STAGE" ""
+  gen_gp4 "$STAGE"; GP4="$STAGE.gp4"
+  log "building app pkg (orbis-pub-cmd img_create)"
+  wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --no_progress_bar \
+    "$(winpath "$GP4")" "$(winpath "$OUT_DIR")" || true
+  APP_PKG="$(ls -t "$OUT_DIR"/*.pkg 2>/dev/null | head -1)"
+  [ -n "$APP_PKG" ] || die "app pkg build failed"
+  rm -rf "$STAGE" "$GP4"
+  log "app pkg  : $APP_PKG"
+
+  build_patch_pkg "$UPDATE" "$APP_PKG" ""
+  PATCH_PKG="$PATCH_PKG_RESULT"
+  log "patch pkg: $PATCH_PKG"
+
+  # 3. backport pass over both dumps; the update runs last so its param.sfo wins
+  run_backport "$WORK_DIR" "$DUMP" "$UPDATE"
+
+  # 4. second patch built from the restamped binaries
+  if [ -n "$BP_DIR" ]; then
+    log "backport: building a second patch from $(basename "$BP_DIR")"
+    build_patch_pkg "$UPDATE" "$APP_PKG" "-bp" "$BP_DIR"
+    BP_PATCH_PKG="$PATCH_PKG_RESULT"
+    rm -rf "$BP_DIR"
+    log "backported patch: $BP_PATCH_PKG"
+  fi
+
+  ls -la "$APP_PKG" "$PATCH_PKG" ${BP_PATCH_PKG:+"$BP_PATCH_PKG"} >&2
+  printf '%s\n%s\n' "$APP_PKG" "$PATCH_PKG"
+  [ -z "${BP_PATCH_PKG:-}" ] || printf '%s\n' "$BP_PATCH_PKG"
+
+  build_dlc_pkgs
+  exit 0
+fi
+
 UPDATE_APPVER="$(sfo_get "$UPDATE/sce_sys/param.sfo" APP_VER)"
 BASE_CAT="$(sfo_get "$DUMP/sce_sys/param.sfo" CATEGORY)"
 [ -n "$UPDATE_APPVER" ] || die "could not read update APP_VER"
-log "merge (remaster): base_cat=$BASE_CAT  app_ver=$UPDATE_APPVER"
-
-# 1. base pkg (temp, into a subdir so it isn't confused with the final output)
-BASE_OUT="$WORK_DIR/.basepkg_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
-rm -rf "$BASE_OUT"; mkdir -p "$BASE_OUT"
-BASE_STAGE="$WORK_DIR/fpkgwork_base_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
-log "building base pkg (for --app_path reference)"
-stage_tree "$BASE_STAGE" ""              # base only, no overlay
-gen_gp4 "$BASE_STAGE"; BASE_GP4="$BASE_STAGE.gp4"
-wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --no_progress_bar \
-  "$(winpath "$BASE_GP4")" "$(winpath "$BASE_OUT")" || true
-BASE_PKG="$(ls -t "$BASE_OUT"/*.pkg 2>/dev/null | head -1)"
-[ -n "$BASE_PKG" ] || die "base pkg build failed"
-rm -rf "$BASE_STAGE" "$BASE_GP4"
-
-# 2. staged merged tree
 STAGE="$WORK_DIR/fpkgwork_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
+
+# ===========================================================================
+# REMASTER (--remaster): base + update merged into one pkg_ps4_remaster. A
+# remaster supersedes the whole application and cannot be patched afterwards, so
+# a backport has to be baked in.
+#
+# The throwaway base pkg exists only to be named by --app_path, which is what
+# lets the tool accept an elevated APP_VER on a remaster volume.
+# ===========================================================================
+if [ "$MODE" = "remaster" ]; then
+  log "merge (remaster): base_cat=$BASE_CAT  app_ver=$UPDATE_APPVER"
+
+  BASE_OUT="$WORK_DIR/.basepkg_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
+  rm -rf "$BASE_OUT"; mkdir -p "$BASE_OUT"
+  BASE_STAGE="$WORK_DIR/fpkgwork_base_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
+  log "building base pkg (for --app_path reference)"
+  stage_tree "$BASE_STAGE" ""              # base only, no overlay
+  gen_gp4 "$BASE_STAGE"; BASE_GP4="$BASE_STAGE.gp4"
+  wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --no_progress_bar \
+    "$(winpath "$BASE_GP4")" "$(winpath "$BASE_OUT")" || true
+  BASE_PKG="$(ls -t "$BASE_OUT"/*.pkg 2>/dev/null | head -1)"
+  [ -n "$BASE_PKG" ] || die "base pkg build failed"
+  rm -rf "$BASE_STAGE" "$BASE_GP4"
+
+  stage_tree "$STAGE" overlay
+
+  run_backport "$WORK_DIR" "$DUMP" "$UPDATE"
+  if [ -n "$BP_DIR" ]; then
+    save_stock_binaries "$BP_DIR" "$STAGE" "$OUT_DIR/$TITLE_ID-stock"
+    log "baking the backported executables into the remaster"
+    cp -a "$BP_DIR/." "$STAGE/"
+    rm -rf "$BP_DIR"
+  fi
+
+  gen_gp4 "$STAGE"; GP4="$STAGE.gp4"
+  sed -i 's|<volume_type>pkg_ps4_app</volume_type>|<volume_type>pkg_ps4_remaster</volume_type>|' "$GP4"
+
+  log "gp4_proj_update --app_path <base pkg>"
+  wine_run "$ORBIS_PUB_CMD" gp4_proj_update --app_path "$(winpath "$BASE_PKG")" \
+    "$(winpath "$GP4")" || die "gp4_proj_update failed"
+
+  # gengp4 and gp4_proj_update both rewrite param.sfo, so identity is set after.
+  P="$STAGE/sce_sys/param.sfo"
+  log "SFO: CATEGORY=$BASE_CAT, REMASTER_TYPE=1, APP_VER=$UPDATE_APPVER, VERSION=01.00"
+  sfo_edit -e CATEGORY "$BASE_CAT" "$P"
+  sfo_edit -d TARGET_APP_VER "$P"                    # patch-only key
+  sfo_edit -a int REMASTER_TYPE 0x00000001 "$P"
+  sfo_edit -e APP_VER "$UPDATE_APPVER" "$P"
+  sfo_edit -e VERSION 01.00 "$P"
+
+  log "building remaster pkg (orbis-pub-cmd img_create --skip_digest)"
+  wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --skip_digest --no_progress_bar \
+    "$(winpath "$GP4")" "$(winpath "$OUT_DIR")" || true
+
+  PKG="$(ls -t "$OUT_DIR"/*.pkg 2>/dev/null | head -1)"
+  [ -n "$PKG" ] || die "no pkg produced"
+
+  rm -rf "$STAGE" "$GP4" "$BASE_OUT"
+  log "done: $PKG"
+  ls -la "$PKG" >&2
+  echo "$PKG"
+
+  build_dlc_pkgs                     # separate add-on pkg(s), if any DLC
+  exit 0
+fi
+
+# ===========================================================================
+# APP-MERGE (default): base + update merged into a single pkg_ps4_app carrying
+# the update's APP_VER. The patch layer stays free, so a backport ships as its
+# own patch declaring that same APP_VER.
+# ===========================================================================
+log "merge (app): base_cat=$BASE_CAT  app_ver=$UPDATE_APPVER"
+
 stage_tree "$STAGE" overlay
-
-# 3. gengp4 + remaster volume
 gen_gp4 "$STAGE"; GP4="$STAGE.gp4"
-sed -i 's|<volume_type>pkg_ps4_app</volume_type>|<volume_type>pkg_ps4_remaster</volume_type>|' "$GP4"
 
-# 4. point the remaster at the base pkg
-log "gp4_proj_update --app_path <base pkg>"
-wine_run "$ORBIS_PUB_CMD" gp4_proj_update --app_path "$(winpath "$BASE_PKG")" \
-  "$(winpath "$GP4")" || die "gp4_proj_update failed"
-
-# 5. SFO edits LAST (after gengp4/gp4_proj_update, matching the verified order):
-#    take update's values (already staged from overlay), fix identity.
 P="$STAGE/sce_sys/param.sfo"
-log "SFO: CATEGORY=$BASE_CAT, REMASTER_TYPE=1, APP_VER=$UPDATE_APPVER, VERSION=01.00"
+log "SFO: CATEGORY=$BASE_CAT, APP_VER=$UPDATE_APPVER, VERSION=01.00"
 sfo_edit -e CATEGORY "$BASE_CAT" "$P"
-sfo_edit -d TARGET_APP_VER "$P"                    # patch-only key
-sfo_edit -a int REMASTER_TYPE 0x00000001 "$P"
+sfo_edit -d TARGET_APP_VER "$P"                      # patch-only key
 sfo_edit -e APP_VER "$UPDATE_APPVER" "$P"
 sfo_edit -e VERSION 01.00 "$P"
 
-# 6. build (skip_digest, as the Windows flow does for merges)
-log "building remaster pkg (orbis-pub-cmd img_create --skip_digest)"
-wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --skip_digest --no_progress_bar \
-  "$(winpath "$GP4")" "$(winpath "$OUT_DIR")" || true
-
+log "building merged app pkg (img_create --skip_digest)"
+wine_run "$ORBIS_PUB_CMD" img_create --oformat pkg --skip_digest \
+  --no_progress_bar "$(winpath "$GP4")" "$(winpath "$OUT_DIR")" || true
 PKG="$(ls -t "$OUT_DIR"/*.pkg 2>/dev/null | head -1)"
 [ -n "$PKG" ] || die "no pkg produced"
+rm -rf "$STAGE" "$GP4"
+log "merged app pkg: $PKG"
 
-rm -rf "$STAGE" "$GP4" "$BASE_OUT"
-log "done: $PKG"
-ls -la "$PKG" >&2
+run_backport "$WORK_DIR" "$DUMP" "$UPDATE"
+if [ -n "$BP_DIR" ]; then
+  build_variant_patch "$BP_DIR" "$PKG" "$UPDATE_APPVER"
+  BP_PATCH_PKG="$PATCH_PKG_RESULT"
+  rm -rf "$BP_DIR"
+  log "backport patch: $BP_PATCH_PKG"
+fi
+
+ls -la "$PKG" ${BP_PATCH_PKG:+"$BP_PATCH_PKG"} >&2
 echo "$PKG"
+[ -z "${BP_PATCH_PKG:-}" ] || printf '%s\n' "$BP_PATCH_PKG"
 
 build_dlc_pkgs                       # separate add-on pkg(s), if any DLC

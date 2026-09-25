@@ -49,6 +49,7 @@ ENV SDK_DIR=/opt/fpkger/PS4_Fake_PKG_Tools_3 \
     MAKE_FSELF=/opt/fpkger/make_fself.py \
     GENGP4_APP=/opt/fpkger/PS4_Fake_PKG_Tools_3/gengp4_app.exe \
     ORBIS_PUB_CMD=/opt/fpkger/PS4_Fake_PKG_Tools_3/orbis-pub-cmd.exe \
+    PKG_SET_APPVER=/opt/fpkger/pkg-set-appver.py \
     WINEDEBUG=-all \
     WINEDLLOVERRIDES="wineps.drv,localspl.dll,spoolss.dll=d"
 
@@ -56,14 +57,27 @@ COPY --from=deps /out-sfo      /opt/fpkger/sfo
 COPY --from=deps /out-pkgtools /opt/fpkger/PS4_Fake_PKG_Tools_3
 # ftpdump takes sfo from its own directory when sfo_path is unset, so they ship
 # side by side.
-COPY build-fpkg.sh dump-build.sh ftpdump.sh make_fself.py /opt/fpkger/
+COPY build-fpkg.sh dump-build.sh ftpdump.sh make_fself.py \
+     pkg-set-appver.py pkgsig.py /opt/fpkger/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+
+# 0x3681B is the JZ guarding orbis-pub-cmd's "app volume must carry
+# APP_VER == 01.00" test (VA 0x43741B). EB makes it unconditional, letting a
+# merged app+update package advertise the game's real version.
+RUN off=$((0x3681B)) \
+    && [ "$(dd if="$ORBIS_PUB_CMD" bs=1 skip=$off count=2 status=none \
+            | od -An -tx1 | tr -d ' \n')" = 7407 ] \
+    && printf '\353' \
+       | dd of="$ORBIS_PUB_CMD" bs=1 seek=$off conv=notrunc status=none
+
 RUN chmod +x /opt/fpkger/build-fpkg.sh /opt/fpkger/dump-build.sh \
-        /opt/fpkger/ftpdump.sh /opt/fpkger/sfo /usr/local/bin/entrypoint.sh \
+        /opt/fpkger/ftpdump.sh /opt/fpkger/pkg-set-appver.py /opt/fpkger/sfo \
+        /usr/local/bin/entrypoint.sh \
     && for t in build-fpkg dump-build ftpdump; do \
          ln -s "/opt/fpkger/$t.sh" "/usr/local/bin/$t.sh"; \
        done \
-    && ln -s /opt/fpkger/sfo /usr/local/bin/sfo
+    && ln -s /opt/fpkger/sfo /usr/local/bin/sfo \
+    && ln -s /opt/fpkger/pkg-set-appver.py /usr/local/bin/pkg-set-appver.py
 
 # No PUID/PGID default: unset means "run in place" (see entrypoint), which is
 # what a rootless `docker run` needs.
