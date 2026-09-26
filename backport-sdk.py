@@ -233,15 +233,21 @@ def observed_sdk(dumps):
 
 
 def collect_modules(dumps):
-    """Parse every executable across the given dumps."""
-    modules = []
+    """Parse every executable across the given dumps.
+
+    -> (modules, library names carried as empty files)
+    """
+    modules, blanked = [], set()
     for dump in dumps:
         execs, _ = find_content(dump)
         for rel in execs:
-            module = ps4elf.read(os.path.join(dump, rel))
+            full = os.path.join(dump, rel)
+            module = ps4elf.read(full)
             if module is not None:
                 modules.append(module)
-    return modules
+            elif os.path.getsize(full) == 0:
+                blanked.add(os.path.basename(rel).rsplit('.', 1)[0])
+    return modules, blanked
 
 
 def choose_sdk(dumps):
@@ -254,7 +260,7 @@ def choose_sdk(dumps):
     """
     levels, stamps, ranges, names, holes = load_export_db()
     rank = {name: i for i, name in enumerate(levels)}
-    modules = collect_modules(dumps)
+    modules, blanked = collect_modules(dumps)
     if not modules:
         die('no readable executables in %s' % ', '.join(dumps))
 
@@ -264,6 +270,12 @@ def choose_sdk(dumps):
         for library, nids in module.exports.items():
             provided |= {(library, nid) for nid in nids}
     wanted = imported - provided
+    # An update can supersede a bundled library and blank the original rather
+    # than delete it, leaving the old importer in the tree with nothing to bind
+    # to. The console never loads it, and no firmware exports the library, so
+    # those imports are not a firmware requirement.
+    superseded = sorted({pair for pair in wanted if pair[0] in blanked})
+    wanted -= set(superseded)
 
     def label(pair):
         return names.get(pair) or '%s / %s' % pair
@@ -303,6 +315,11 @@ def choose_sdk(dumps):
 
     lines = ['%d imports: %d satisfied within the dump, %d from firmware'
              % (len(imported), len(imported) - len(wanted), len(wanted))]
+    if superseded:
+        lines.append('%d import(s) of %s ignored: carried as an empty file, so '
+                     'an update superseded it'
+                     % (len(superseded),
+                        ', '.join(sorted({lib for lib, _ in superseded}))))
     lines.append('floor: PS5 %s%s' % (
         floor, '  (%s)' % label(floor_for) if floor_for
         else '  (no import raises it)'))

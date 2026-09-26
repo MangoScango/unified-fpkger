@@ -241,8 +241,16 @@ img_create() {
   # The watcher reads IMG_TMP_DIR, so resolve it before forking.
   img_tmp_init
   img_progress_start "$out"
-  wine_run "$ORBIS_PUB_CMD" img_create --tmp_path "$IMG_TMP_WIN" "$@" || true
+  local log_file; log_file="$(mktemp)"
+  wine_run "$ORBIS_PUB_CMD" img_create --tmp_path "$IMG_TMP_WIN" "$@" \
+    2> >(tee -a "$log_file" >&2) | tee -a "$log_file" || true
   img_progress_stop
+  # The exit status is useless here - orbis-pub-cmd returns non-zero for warnings
+  # alone - but it prefixes real failures with [Error].
+  local errors; errors="$(tr -d '\000' < "$log_file" | grep '^\[Error\]' || true)"
+  rm -f "$log_file"
+  [ -z "$errors" ] || die "img_create failed:
+$errors"
 }
 # The CyB1K tools write to a Windows console, which wine only bridges onto unix
 # fds when fd 0/1/2 is a tty, so run them under a pty. /dev/null as the typescript
@@ -466,6 +474,7 @@ stage_tree() {
   if [ -n "$overlay" ] && [ -n "$UPDATE" ]; then
     log "overlaying update (update wins)"
     cp -a "$UPDATE/." "$stage/"
+    dedupe_case "$stage" "$UPDATE"
   fi
 
   if [ "$IS_PS2" -eq 1 ]; then
@@ -494,6 +503,35 @@ stage_tree() {
   fi
 
   unlink_executables "$stage"
+}
+
+# ---------------------------------------------------------------------------
+# dedupe_case <stage_dir> <update_dir>
+#   An update can respell a file it replaces (il2CppUserAssemblies.prx ->
+#   Il2CppUserAssemblies.prx). Both survive the overlay on a case-sensitive host,
+#   and img_create rejects a project holding two targ_paths that differ only in
+#   case. The update's spelling wins, matching what the console resolves to.
+# ---------------------------------------------------------------------------
+dedupe_case() {
+  local stage="$1" update="$2" lower rel prev_lower="" prev_rel="" n=0
+  [ -d "$update" ] || return 0
+  while IFS=$'\t' read -r lower rel; do
+    if [ "$lower" = "$prev_lower" ]; then
+      if [ -e "$update/$rel" ] && [ ! -e "$update/$prev_rel" ]; then
+        rm -f "$stage/$prev_rel" && n=$((n + 1))
+        log "case-duplicate from the base dropped: $prev_rel"
+      elif [ -e "$update/$prev_rel" ] && [ ! -e "$update/$rel" ]; then
+        rm -f "$stage/$rel" && n=$((n + 1))
+        log "case-duplicate from the base dropped: $rel"
+        continue
+      else
+        die "two files differ only in case and the update claims neither or both, so there is no way to tell which img_create should carry: $prev_rel, $rel"
+      fi
+    fi
+    prev_lower="$lower" prev_rel="$rel"
+  done < <(cd "$stage" && find . -type f -printf '%P\n' \
+    | awk '{ print tolower($0) "\t" $0 }' | LC_ALL=C sort)
+  [ "$n" -eq 0 ] || log "dropped $n case-duplicate file(s) the update respelled"
 }
 
 # ---------------------------------------------------------------------------
@@ -1220,10 +1258,17 @@ sfo_edit -e APP_VER "$UPDATE_APPVER" "$P"
 sfo_edit -e VERSION 01.00 "$P"
 
 log "building merged app pkg (img_create --skip_digest)"
-img_create "$OUT_DIR" --oformat pkg --skip_digest \
-  --no_progress_bar "$(winpath "$GP4")" "$(winpath "$OUT_DIR")"
-PKG="$(ls -t "$OUT_DIR"/*.pkg 2>/dev/null | head -1)"
+# Built into an empty directory of its own: OUT_DIR usually holds packages from
+# earlier runs, and picking the newest of those hides a failed build.
+APP_OUT="$WORK_DIR/apppkg_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
+rm -rf "$APP_OUT"; mkdir -p "$APP_OUT"
+img_create "$APP_OUT" --oformat pkg --skip_digest \
+  --no_progress_bar "$(winpath "$GP4")" "$(winpath "$APP_OUT")"
+PKG="$(ls -t "$APP_OUT"/*.pkg 2>/dev/null | head -1)"
 [ -n "$PKG" ] || die "no pkg produced"
+mv "$PKG" "$OUT_DIR/" || die "could not move $PKG to $OUT_DIR"
+PKG="$OUT_DIR/$(basename "$PKG")"
+rmdir "$APP_OUT" 2>/dev/null
 rm -f "$GP4"
 log "merged app pkg: $PKG"
 

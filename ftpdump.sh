@@ -618,6 +618,17 @@ lftp_run() {
   lftp -u anonymous, "ftp://$ip:$port" -e "$settings $1 exit"
 }
 
+# Prints the size of remote file $1 per MLST, which unlike SIZE is not truncated
+# to 32 bits. Takes either an ftp:// URL or a path on the server.
+remote_size() {
+  local path=$1
+  case $path in
+    ftp://*) path=/${path#ftp://*/} ;;
+  esac
+  lftp_run "quote MLST $path;" 2> /dev/null \
+    | sed -n 's/.*size=\([0-9]*\).*/\1/p' | head -1
+}
+
 # Succeeds if file $1 starts with the ELF magic number.
 is_elf() {
   [[ $(od -A n -t x1 -N 4 "$1" 2> /dev/null | tr -d ' \n') == 7f454c46 ]]
@@ -745,6 +756,14 @@ verify_executables() {
     elf_is_damaged "$file_path" || continue
 
     file_name=${file_path#./}
+    # A patch can supersede a module and blank the original, e.g. replacing
+    # libSceNpToolkit.prx with libSceNpToolkit2.prx. The console mounts the empty
+    # file, so an empty source means the dump is right, not truncated.
+    if [[ ! -s "$file_path" && $(remote_size "$1$file_name") == 0 ]]; then
+      [[ $debug ]] && debug_message \
+        "Executable \"$file_name\" is empty on the console - keeping it."
+      continue
+    fi
     warning_message "Executable \"$file_name\" is incomplete - downloading it again."
     dir=${file_path%/*}
     cd "$dir" || abort
