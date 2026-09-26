@@ -102,11 +102,10 @@ while IFS= read -r d; do
 done < <(find "$DUMP_DIR" -mindepth 1 -maxdepth 1 -type d \
            \( -name '*-app' -o -name '*-patch' -o -name '*-dlc' -o -name '*-keystone' \))
 
-DUMP_LOG="$(mktemp)"
 STARTED="$(date +%s)"
-keep_log=0
-cleanup() { [ "$keep_log" -eq 1 ] || rm -f "$DUMP_LOG"; }
-trap cleanup EXIT
+RUN_LOG="${RUN_LOG:-$DUMP_DIR/dump-build-$(date +%Y%m%d-%H%M%S).log}"
+DUMP_LOG="$RUN_LOG"
+log "logging this run to $RUN_LOG"
 
 # A union dump folds the patch into the app tree, which only a merged build can
 # use: --remaster needs a base-only tree for its --app_path reference, --separate
@@ -133,7 +132,6 @@ else
 fi
 
 if [ "$rc" -ne 0 ]; then
-  keep_log=1
   die "ftpdump failed (exit $rc); output kept at $DUMP_LOG"
 fi
 
@@ -158,7 +156,7 @@ else
   done < <(find "$DUMP_DIR" -mindepth 1 -maxdepth 1 -type d -name '*-app' | sort)
 fi
 
-[ -n "$APP_DIR" ] || { keep_log=1; die "no dumped *-app dir found under $DUMP_DIR (log: $DUMP_LOG)"; }
+[ -n "$APP_DIR" ] || { die "no dumped *-app dir found under $DUMP_DIR (log: $DUMP_LOG)"; }
 log "dumped: $APP_DIR"
 
 if [ "$DUMP_ONLY" -eq 1 ]; then
@@ -167,12 +165,15 @@ if [ "$DUMP_ONLY" -eq 1 ]; then
 fi
 
 log "building pkg from $(basename "$APP_DIR")"
-if [ "$DELETE_DUMPS" -eq 0 ]; then
-  exec "$BUILD_FPKG" ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} "$APP_DIR"
-fi
+"$BUILD_FPKG" ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} "$APP_DIR" 2>&1 | tee -a "$RUN_LOG"
+brc="${PIPESTATUS[0]}"
+[ "$brc" -eq 0 ] \
+  || die "build failed; dumps kept under $DUMP_DIR (log: $RUN_LOG)"
 
-"$BUILD_FPKG" ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} "$APP_DIR" \
-  || die "build failed; dumps kept under $DUMP_DIR"
+if [ "$DELETE_DUMPS" -eq 0 ]; then
+  log "log: $RUN_LOG"
+  exit 0
+fi
 
 # build-fpkg.sh aborts unless it produced a pkg.
 TITLE="$(basename "$APP_DIR")"; TITLE="${TITLE%-app}"
