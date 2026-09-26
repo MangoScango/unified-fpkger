@@ -11,3 +11,4 @@ sfo
 *.har
 /.vscode
 /__pycache__
+/fpkgtmp/

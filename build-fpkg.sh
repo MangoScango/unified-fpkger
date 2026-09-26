@@ -162,30 +162,70 @@ log() { echo ">> $*" >&2; }
 #   Report the package as it grows, since orbis-pub-cmd prints nothing while
 #   img_create runs. NO_PROGRESS silences it, PROGRESS_EVERY sets the interval.
 # ---------------------------------------------------------------------------
-IMG_PROGRESS_PID=""
+IMG_PROGRESS_PID="" IMG_PROGRESS_MARKER="" IMG_PS4PUB="" IMG_TMP_WIN=""
+# orbis-pub-cmd stages the internal image as numbered .tpfs files under
+# <tmp_path>\ps4pub\build<id>\, needing room for another copy of the title.
+# IMG_TMP_DIR overrides the location.
+img_tmp_init() {
+  [ -n "$IMG_TMP_WIN" ] && return
+  IMG_TMP_DIR="${IMG_TMP_DIR:-$WORK_DIR/fpkgtmp}"
+  mkdir -p "$IMG_TMP_DIR"
+  IMG_TMP_WIN="$(winpath "$IMG_TMP_DIR")"
+}
+ps4pub_dir() {
+  [ -n "$IMG_PS4PUB" ] || IMG_PS4PUB="$(find "${WINEPREFIX:-$HOME/.wine}/drive_c" \
+    -maxdepth 3 -type d -name ps4pub -print -quit 2>/dev/null)"
+  printf '%s' "$IMG_PS4PUB"
+}
+# Bytes in the build dirs this run created. A failed run leaves its dir behind, so
+# the marker is what separates ours from the debris.
+img_staged_bytes() {
+  local root d n total=0
+  root="${IMG_TMP_DIR:-}/ps4pub"
+  [ -d "$root" ] || root="$(ps4pub_dir)"
+  [ -n "$root" ] && [ -d "$root" ] || { printf 0; return; }
+  for d in "$root"/build*; do
+    [ -d "$d" ] && [ "$d" -nt "$IMG_PROGRESS_MARKER" ] || continue
+    n="$(du -sb "$d" 2>/dev/null | cut -f1)"
+    [ -n "$n" ] && total=$(( total + n ))
+  done
+  printf '%s' "$total"
+}
 img_progress_start() {
   local dir="$1" every="${PROGRESS_EVERY:-15}"
   IMG_PROGRESS_PID=""
   [ -z "${NO_PROGRESS:-}" ] || return 0
   [ "$every" -gt 0 ] || return 0
+  IMG_PROGRESS_MARKER="$(mktemp)"
   (
     # The package does not exist for the first few seconds; errexit would take
     # the watcher down with the failing listing.
     set +e
-    prev=0
+    prev=0 iprev=0
     while sleep "$every"; do
+      # img_create creates the package up front and leaves it at zero bytes until
+      # staging finishes.
       f="$(ls -t "$dir"/*.pkg 2>/dev/null | head -1)"
-      [ -n "$f" ] || continue
-      cur="$(stat -c %s "$f" 2>/dev/null || echo 0)"
-      [ "$cur" -gt "$prev" ] || continue
-      log "image: $(numfmt --to=iec "$cur") written" \
-        "($(numfmt --to=iec $(( (cur - prev) / every )))/s)"
-      prev="$cur"
+      cur=0
+      [ -n "$f" ] && cur="$(stat -c %s "$f" 2>/dev/null || echo 0)"
+      if [ "$cur" -gt "$prev" ]; then
+        log "image: $(numfmt --to=iec "$cur") written" \
+          "($(numfmt --to=iec $(( (cur - prev) / every )))/s)"
+        prev="$cur"
+        continue
+      fi
+      staged="$(img_staged_bytes)"
+      [ "$staged" -gt "$iprev" ] || continue
+      log "internal image: $(numfmt --to=iec "$staged") staged" \
+        "($(numfmt --to=iec $(( (staged - iprev) / every )))/s)"
+      iprev="$staged"
     done
   ) &
   IMG_PROGRESS_PID=$!
 }
 img_progress_stop() {
+  [ -n "$IMG_PROGRESS_MARKER" ] && rm -f "$IMG_PROGRESS_MARKER"
+  IMG_PROGRESS_MARKER=""
   [ -n "$IMG_PROGRESS_PID" ] || return 0
   kill "$IMG_PROGRESS_PID" 2>/dev/null || true
   wait "$IMG_PROGRESS_PID" 2>/dev/null || true
@@ -198,8 +238,10 @@ img_progress_stop() {
 # ---------------------------------------------------------------------------
 img_create() {
   local out="$1"; shift
+  # The watcher reads IMG_TMP_DIR, so resolve it before forking.
+  img_tmp_init
   img_progress_start "$out"
-  wine_run "$ORBIS_PUB_CMD" img_create "$@" || true
+  wine_run "$ORBIS_PUB_CMD" img_create --tmp_path "$IMG_TMP_WIN" "$@" || true
   img_progress_stop
 }
 # The CyB1K tools write to a Windows console, which wine only bridges onto unix
