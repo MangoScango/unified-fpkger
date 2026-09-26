@@ -460,55 +460,6 @@ fix_union_sfo() {
   return 1
 }
 
-# Deletes the redundant spelling where a union dump landed one case-insensitive
-# PFS path twice, keeping the patch's. Run from inside the dump directory.
-resolve_union_case() {
-  local remote=/mnt/sandbox/pfsmnt/$1-patch0
-  local groups authoritative decisions verdict rel dropped=0
-  groups=$(create_temp_file)
-  find . -type f -printf '%P\n' | awk '
-    { k = tolower($0); n[k]++; v[k] = (k in v) ? v[k] SUBSEP $0 : $0 }
-    END { for (k in n) if (n[k] > 1) {
-            c = split(v[k], a, SUBSEP)
-            for (i = 1; i <= c; i++) print k "\t" a[i] } }' \
-    | LC_ALL=C sort > "$groups"
-  if [[ ! -s $groups ]]; then
-    rm -f "$groups"
-    return 0
-  fi
-
-  echo "Resolving $(cut -f1 "$groups" | uniq | wc -l) case-duplicated path(s) against the patch ..."
-  authoritative=$(create_temp_file)
-  lftp_run "find $remote;" 2> /dev/null | sed -e "s|^$remote/||" -e 's|/$||' \
-    > "$authoritative"
-  if [[ ! -s $authoritative ]]; then
-    warning_message "Could not list \"$remote\"; leaving the case duplicates in place."
-    rm -f "$groups" "$authoritative"
-    return 1
-  fi
-
-  decisions=$(create_temp_file)
-  awk -F'\t' '
-    NR == FNR { auth[$0] = 1; next }
-    { key[++n] = $1; rel[n] = $2; if ($2 in auth) keeper[$1] = $2 }
-    END { for (i = 1; i <= n; i++) {
-            if (!(key[i] in keeper)) { print "?\t" rel[i]; continue }
-            if (rel[i] != keeper[key[i]]) print "-\t" rel[i] } }' \
-    "$authoritative" "$groups" > "$decisions"
-
-  while IFS=$'\t' read -r verdict rel; do
-    case $verdict in
-      '-') [[ $verbose ]] && echo "  dropping $rel"
-           rm -f "$rel" && ((dropped++))
-           rmdir -p "$(dirname "$rel")" 2> /dev/null ;;
-      '?') warning_message "The patch has neither spelling of \"$rel\"; keeping it." ;;
-    esac
-  done < "$decisions"
-
-  echo "Removed $dropped file(s) the console does not have under that name."
-  rm -f "$groups" "$authoritative" "$decisions"
-}
-
 # Extracts patch.pkg's sce_sys for Title ID $1 over the current directory.
 extract_patch_sce_sys() {
   local p
@@ -985,10 +936,6 @@ dump_app_data() {
     enable_download_progress "$download_size"
     dump_dir "$root/mnt/sandbox/pfsmnt/$mount/"
     disable_download_progress
-  fi
-
-  if [[ $union_dumped ]]; then
-    resolve_union_case "$1"
   fi
 
   mkdir -p sce_sys && cd sce_sys || abort
