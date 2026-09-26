@@ -9,6 +9,9 @@ services:
     # Make sure your workdir has enough space for 2x the game you want to dump/pack
     # SSD is preferable if you can afford it
     working_dir: /work
+    env_file:
+      - path: .env
+        required: false
     environment:
       # For Unraid. 99:100 = nobody:users
       PUID: 99

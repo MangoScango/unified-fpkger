@@ -447,11 +447,14 @@ check_keystone() {
 
 # Converts a remaster param.sfo file into a regular param.sfo.
 # $1: param.sfo file name
-# Rewrites the two keys that make param.sfo $1 a patch rather than an app.
+# Rewrites the two keys that make param.sfo $1 a patch rather than an app of
+# CATEGORY $2.
 fix_union_sfo() {
   local backup; backup=$(create_temp_file)
   cp "$1" "$backup"
-  "$sfo_path" "$1" -d TARGET_APP_VER -e category gd && return 0
+  # -d exits 1 when the key is absent, and not every patch carries it.
+  "$sfo_path" "$1" -d TARGET_APP_VER &> /dev/null
+  "$sfo_path" "$1" -e category "$2" && return 0
   warning_message "Could not turn \"$1\" into an app param.sfo."
   cp "$backup" "$1" || abort "Restoring $1 also failed; the file is now damaged." 1
   return 1
@@ -961,8 +964,10 @@ dump_app_data() {
   # Layered over app.pkg's sce_sys, which carries what the patch omits (pic0/pic1).
   # ATTRIBUTE, SYSTEM_VER and st_type all move with the patch.
   if [[ $union_dumped ]]; then
+    local base_category
+    base_category=$("$sfo_path" param.sfo -q category 2> /dev/null)
     if extract_patch_sce_sys "$1" && [[ -f param.sfo ]]; then
-      fix_union_sfo param.sfo || union_dumped=
+      fix_union_sfo param.sfo "${base_category:-gd}" || union_dumped=
     else
       warning_message "Could not extract patch.pkg's sce_sys; dumping the patch separately instead."
       union_dumped=
