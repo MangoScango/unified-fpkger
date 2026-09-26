@@ -138,8 +138,8 @@ def version_records(data, seg, sdk=None):
         ver, = struct.unpack_from('>I', data, at)
         if sdk is None:
             out.append((name, ver))
-        elif ver > sdk:
-            struct.pack_into('>I', data, at, sdk)
+        elif version_field(ver) > version_field(sdk):
+            struct.pack_into('>I', data, at, retarget(ver, sdk))
             lowered += 1
         off += length + 1
     return lowered if sdk is not None else out
@@ -163,6 +163,16 @@ def find_content(dump):
 
 def fw_key(name):
     return tuple(int(part) for part in name.split('.'))
+
+
+def version_field(stamp):
+    """The BCD major.minor an SDK stamp names, e.g. 0x08508001 -> 0x0850."""
+    return stamp >> 16
+
+
+def retarget(old, sdk):
+    """Give old the version sdk names, keeping its own revision half-word."""
+    return (sdk & 0xFFFF0000) | (old & 0x0000FFFF)
 
 
 def relax_point_release(stamp):
@@ -351,14 +361,15 @@ def patch(data, sdk, force, label, keep_versions=False):
             at = seg[2] + SDK_OFFSET
             old, = struct.unpack_from('<I', data, at)
             kind = PARAM_NAMES[seg[0]]
-            if old == sdk:
-                lines.append('%-20s already 0x%08x' % (kind, sdk))
-            elif old < sdk and not force:
+            if version_field(old) == version_field(sdk):
+                lines.append('%-20s already 0x%04x0000' % (kind, version_field(sdk)))
+            elif version_field(old) < version_field(sdk) and not force:
                 # backporting only ever lowers the stamp
                 lines.append('%-20s 0x%08x is already below the target, left alone' % (kind, old))
             else:
-                struct.pack_into('<I', data, at, sdk)
-                lines.append('%-20s 0x%08x -> 0x%08x  @0x%x' % (kind, old, sdk, at))
+                new = retarget(old, sdk)
+                struct.pack_into('<I', data, at, new)
+                lines.append('%-20s 0x%08x -> 0x%08x  @0x%x' % (kind, old, new, at))
                 changed = True
         elif seg[0] == PT_SCE_VERSION and seg[5]:
             version_seg = seg
@@ -367,7 +378,8 @@ def patch(data, sdk, force, label, keep_versions=False):
         lines.append('no param segment')
     if version_seg is not None and keep_versions:
         before = version_records(data, version_seg)
-        stale = sorted({v for _, v in before if v > sdk})
+        stale = sorted({v for _, v in before
+                        if version_field(v) > version_field(sdk)})
         lines.append('%-20s %d records left alone%s'
                      % ('PT_SCE_VERSION', len(before),
                         ', naming ' + ', '.join('0x%08x' % v for v in stale)
@@ -377,7 +389,8 @@ def patch(data, sdk, force, label, keep_versions=False):
         lowered = version_records(data, version_seg, sdk)
         if lowered:
             changed = True
-        stale = sorted({v for _, v in before if v > sdk})
+        stale = sorted({v for _, v in before
+                        if version_field(v) > version_field(sdk)})
         lines.append('%-20s %d of %d records lowered%s'
                      % ('PT_SCE_VERSION', lowered, len(before),
                         ' from ' + ', '.join('0x%08x' % v for v in stale)
