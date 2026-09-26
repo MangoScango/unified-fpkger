@@ -94,15 +94,27 @@ keep_log=0
 cleanup() { [ "$keep_log" -eq 1 ] || rm -f "$DUMP_LOG"; }
 trap cleanup EXIT
 
+# A union dump folds the patch into the app tree, which only a merged build can
+# use: --remaster needs a base-only tree for its --app_path reference, --separate
+# builds a distinct patch, and --no-update wants the base alone.
+declare -a UNION=(--union)
+for a in ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}; do
+  case "$a" in
+    --remaster|--separate|--no-update) UNION=() ;;
+  esac
+done
+[ "${#UNION[@]}" -gt 0 ] && log "merge build: dumping the app0-patch0 union"
+
 log "dumping $HOST -> $DUMP_DIR (jobs=$JOBS)"
 rc=0
 if command -v script >/dev/null 2>&1; then
   # A pty keeps ftpdump's progress display working while still capturing output.
   SHELL=/bin/sh script -qefc \
-    "$(printf '%q' "$FTPDUMP") $(printf '%q' "$HOST") -a -d -k -p -r -j $JOBS -o $(printf '%q' "$DUMP_DIR")" \
+    "$(printf '%q' "$FTPDUMP") $(printf '%q' "$HOST") -a -d -k -p -r -j $JOBS ${UNION[*]} -o $(printf '%q' "$DUMP_DIR")" \
     "$DUMP_LOG" || rc=$?
 else
-  "$FTPDUMP" "$HOST" -a -d -k -p -r -j "$JOBS" -o "$DUMP_DIR" 2>&1 | tee "$DUMP_LOG" || true
+  "$FTPDUMP" "$HOST" -a -d -k -p -r -j "$JOBS" ${UNION[@]+"${UNION[@]}"} \
+    -o "$DUMP_DIR" 2>&1 | tee "$DUMP_LOG" || true
   rc="${PIPESTATUS[0]}"
 fi
 

@@ -89,6 +89,12 @@ Options:
   -s, --sflash         Dump sflash0 file and quit.
       --shutdown       Send the custom FTP command "SHUTDOWN" and quit. If the
                        FTP server understands the command, it will stop running.
+      --union          Dump the app0-patch0 union mount into <TITLEID>-app and
+                       skip the patch dump. The console resolves base/patch
+                       conflicts itself, and the union transfers less than both
+                       layers. Builds a merged package only: --remaster and
+                       --separate need the layers apart. Ignored when no patch is
+                       installed. Requires program "sfo".
       --use-pfs        While dumping, instead of downloading files separately,
                        download and extract the PFS image file.
   -v, --verbose        Print the client/server dialog when downloading files.
@@ -418,6 +424,26 @@ check_keystone() {
 
 # Converts a remaster param.sfo file into a regular param.sfo.
 # $1: param.sfo file name
+# Rewrites the two keys that make param.sfo $1 a patch rather than an app.
+fix_union_sfo() {
+  local backup; backup=$(create_temp_file)
+  cp "$1" "$backup"
+  "$sfo_path" "$1" -d TARGET_APP_VER -e category gd && return 0
+  warning_message "Could not turn \"$1\" into an app param.sfo."
+  cp "$backup" "$1" || abort "Restoring $1 also failed; the file is now damaged." 1
+  return 1
+}
+
+# Extracts patch.pkg's sce_sys for Title ID $1 over the current directory.
+extract_patch_sce_sys() {
+  local p
+  for p in "$root/user/patch/$1/patch.pkg" \
+           "$root/mnt/ext0/user/patch/$1/patch.pkg"; do
+    ftp_file_exists "$p" && { dump_and_extract_pkg "$p"; return 0; }
+  done
+  return 1
+}
+
 fix_remaster() {
   local sfo_error=0
 
@@ -849,12 +875,31 @@ replace_np_files() {
   fi
 }
 
-# Dumps app data that belongs to Title ID $1.
+# Dumps app data that belongs to Title ID $1. Sets $union_dumped when the tree is
+# the union mount, which means the patch is already folded in.
 dump_app_data() {
+  local mount=$1-app0
+  union_dumped=
+  if [[ $union_enabled ]]; then
+    # There is no -union-nest, so the PFS image route cannot read a union.
+    if [[ $pfs_extraction_enabled ]]; then
+      warning_message "--union and --use-pfs cannot be combined (no union PFS image); dumping the layers separately."
+    elif ! curl $curl_options --silent --head \
+        "$root/mnt/sandbox/pfsmnt/$1-app0-patch0-union/" > /dev/null; then
+      echo "No patch installed for $1 - dumping app0 rather than the union."
+    elif [[ ! $sfo_path ]]; then
+      missing_prereq "--union needs program \"sfo\" to restamp APP_VER." \
+        && return 1
+    else
+      mount=$1-app0-patch0-union
+      union_dumped=1
+    fi
+  fi
+
   set_download_size "$root/mnt/sandbox/pfsmnt/$1-app0-nest/pfs_image.dat"
 
   cd "$output_dir" || abort
-  echo "Dumping $1 app data ($((download_size / 1000000)) MB):"
+  echo "Dumping $1 ${union_dumped:+union }app data ($((download_size / 1000000)) MB):"
   mkdir -p "$1-app" && cd "$1-app" || abort
 
   if [[ $pfs_extraction_enabled ]]; then
@@ -863,7 +908,7 @@ dump_app_data() {
     replace_encrypted_files "$root/mnt/sandbox/pfsmnt/$1-app0/"
   else
     enable_download_progress "$download_size"
-    dump_dir "$root/mnt/sandbox/pfsmnt/$1-app0/"
+    dump_dir "$root/mnt/sandbox/pfsmnt/$mount/"
     disable_download_progress
   fi
 
@@ -887,6 +932,17 @@ dump_app_data() {
     else
       warning_message \
         "App is of type \"remaster\" - editing the file \"$output_dir/$1-app/sce_sys/param.sfo\" may be necessary (e.g. by using the experimental option --fix-remaster)."
+    fi
+  fi
+
+  # Layered over app.pkg's sce_sys, which carries what the patch omits (pic0/pic1).
+  # ATTRIBUTE, SYSTEM_VER and st_type all move with the patch.
+  if [[ $union_dumped ]]; then
+    if extract_patch_sce_sys "$1" && [[ -f param.sfo ]]; then
+      fix_union_sfo param.sfo || union_dumped=
+    else
+      warning_message "Could not extract patch.pkg's sce_sys; dumping the patch separately instead."
+      union_dumped=
     fi
   fi
 
@@ -1763,6 +1819,8 @@ export LC_ALL=C
 
 # Global variables
 declare download_size
+declare union_enabled
+declare union_dumped
 declare output_dir
 # Absolute path to the directory containing this script, captured before any
 # working-directory changes so helpers can find bundled tools (e.g. sfo).
@@ -1891,6 +1949,7 @@ for ((i = 0; i < argc; i++)); do
         ;;
       -s|--sflash|--sflash0) dump_sflash=1 ;;
       --shutdown) shutdown=1 ;;
+      --union) union_enabled=1 ;;
       --use-pfs) pfs_extraction_enabled=1 ;;
       -v|--verbose)
         verbose=1
@@ -2262,8 +2321,8 @@ if [[ $option_app ]]; then
   dump_app_data "$title_id"
 fi
 
-# Dump patch data
-if [[ $option_patch ]]; then
+# Dump patch data. A union dump already contains it.
+if [[ $option_patch && ! $union_dumped ]]; then
   dump_patch_data "$title_id"
 fi
 

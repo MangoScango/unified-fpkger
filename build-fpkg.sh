@@ -508,9 +508,8 @@ stage_tree() {
 # ---------------------------------------------------------------------------
 # dedupe_case <stage_dir> <update_dir>
 #   An update can respell a file it replaces (il2CppUserAssemblies.prx ->
-#   Il2CppUserAssemblies.prx). Both survive the overlay on a case-sensitive host,
-#   and img_create rejects a project holding two targ_paths that differ only in
-#   case. The update's spelling wins, matching what the console resolves to.
+#   Il2CppUserAssemblies.prx), and img_create rejects a project holding two
+#   targ_paths that differ only in case. The update's spelling wins.
 # ---------------------------------------------------------------------------
 dedupe_case() {
   local stage="$1" update="$2" lower rel prev_lower="" prev_rel="" n=0
@@ -525,7 +524,7 @@ dedupe_case() {
         log "case-duplicate from the base dropped: $rel"
         continue
       else
-        die "two files differ only in case and the update claims neither or both, so there is no way to tell which img_create should carry: $prev_rel, $rel"
+        die "case-duplicate the update does not disambiguate: $prev_rel, $rel"
       fi
     fi
     prev_lower="$lower" prev_rel="$rel"
@@ -1091,6 +1090,15 @@ if [ -z "$UPDATE" ]; then
   fi
 
   gen_gp4 "$STAGE"; GP4="$STAGE.gp4"
+  # gengp4_app normalises an app volume to APP_VER 01.00 and moves the version it
+  # found into VERSION, which loses the patch level of an already-merged dump.
+  # BASE_APPVER predates gengp4, so it still holds what the dump claimed.
+  P="$STAGE/sce_sys/param.sfo"
+  if [ -n "$BASE_APPVER" ] && [ "$BASE_APPVER" != "01.00" ]; then
+    log "SFO: dump already merged, restoring APP_VER=$BASE_APPVER, VERSION=01.00"
+    sfo_edit -e APP_VER "$BASE_APPVER" "$P"
+    sfo_edit -e VERSION 01.00 "$P"
+  fi
   log "building pkg (orbis-pub-cmd img_create)"
   img_create "$OUT_DIR" --oformat pkg --no_progress_bar \
     "$(winpath "$GP4")" "$(winpath "$OUT_DIR")"
@@ -1258,8 +1266,8 @@ sfo_edit -e APP_VER "$UPDATE_APPVER" "$P"
 sfo_edit -e VERSION 01.00 "$P"
 
 log "building merged app pkg (img_create --skip_digest)"
-# Built into an empty directory of its own: OUT_DIR usually holds packages from
-# earlier runs, and picking the newest of those hides a failed build.
+# Its own empty directory, so the result is unambiguous when OUT_DIR already holds
+# packages from earlier runs.
 APP_OUT="$WORK_DIR/apppkg_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
 rm -rf "$APP_OUT"; mkdir -p "$APP_OUT"
 img_create "$APP_OUT" --oformat pkg --skip_digest \
