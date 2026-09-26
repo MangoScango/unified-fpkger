@@ -13,3 +13,4 @@ sfo
 /__pycache__
 /fpkgtmp/
 /.env
+/ucase-fixture
