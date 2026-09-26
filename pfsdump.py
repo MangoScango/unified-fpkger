@@ -24,7 +24,9 @@ import argparse
 import ftplib
 import os
 import re
+import shutil
 import struct
+import subprocess
 import sys
 import time
 
@@ -40,6 +42,23 @@ INODE_MODE_DIR = 0x4000
 
 ELF_MAGIC = b"\x7fELF"
 TRP_MAGIC = b"\xdc\xa2\x4d"
+PKG_MAGIC = 0x7F434E54
+PKG_ENTRY_SIZE = 32
+PKG_ENTRY_NAMES = 0x200
+PKG_ENTRY_ENCRYPTED = 0x80000000
+# Entries below 0x1000 are absent from the name table and carry these names by
+# convention. Everything above it names itself.
+PKG_NAMELESS = {
+    0x400: "license.dat",
+    0x401: "license.info",
+    0x402: "nptitle.dat",
+    0x403: "npbind.dat",
+    0x404: "selfinfo.dat",
+    0x406: "imageinfo.dat",
+    0x407: "target-deltainfo.dat",
+    0x408: "origin-deltainfo.dat",
+    0x409: "psreserved.dat",
+}
 # npbind.dat holds these in a tag/length table; scanning for them is enough to
 # recover the order, which is what maps a set onto trophy<NN>.trp.
 NPWR_ID = re.compile(rb"NPWR[0-9]{5}_[0-9]{2}")
@@ -480,7 +499,7 @@ def replace_executables(mount, title, dest_root, layers, verbose=False):
             staged = local + ".decrypted"
             try:
                 written = mount.download(remote, staged)
-            except (ftplib.all_errors, OSError) as err:
+            except ftplib.all_errors as err:
                 problems.append((rel, f"could not fetch from {layer}: {err}"))
                 if os.path.exists(staged):
                     os.unlink(staged)
@@ -496,6 +515,143 @@ def replace_executables(mount, title, dest_root, layers, verbose=False):
             os.replace(staged, local)
             replaced += 1
     return replaced, problems
+
+
+class PkgEntries:
+    """The named entries of a remote PKG, which is where sce_sys lives.
+
+    Only the entry table and the region it points at are read; the PFS image
+    making up the rest of the package is left alone.
+    """
+
+    def __init__(self, remote):
+        header = remote.read(0, 0x40)
+        magic = struct.unpack_from(">I", header, 0)[0]
+        if magic != PKG_MAGIC:
+            raise Unsupported(f"not a PS4 package (magic 0x{magic:08x})")
+        count = struct.unpack_from(">I", header, 0x10)[0]
+        table_offset = struct.unpack_from(">I", header, 0x18)[0]
+
+        table = remote.read(table_offset, count * PKG_ENTRY_SIZE)
+        raw = []
+        for index in range(count):
+            at = index * PKG_ENTRY_SIZE
+            raw.append(struct.unpack_from(">IIIIII", table, at))
+
+        # One read covering every entry beats a round trip each, and the table
+        # gives its exact extent.
+        span_start = min(row[4] for row in raw if row[5])
+        span_end = max(row[4] + row[5] for row in raw if row[5])
+        blob = remote.read(span_start, span_end - span_start)
+
+        names = b""
+        for entry_id, _name_offset, _f1, _f2, data_offset, size in raw:
+            if entry_id == PKG_ENTRY_NAMES:
+                at = data_offset - span_start
+                names = blob[at:at + size]
+
+        self.files = {}
+        self.unnamed = []
+        self.encrypted = {}
+        for entry_id, name_offset, flags1, flags2, data_offset, size in raw:
+            if entry_id < 0x400:
+                continue
+            if entry_id in PKG_NAMELESS:
+                name = PKG_NAMELESS[entry_id]
+            elif entry_id >= 0x1000 and names:
+                end = names.find(b"\0", name_offset)
+                name = names[name_offset:end].decode("ascii", "replace")
+            else:
+                self.unnamed.append(entry_id)
+                continue
+            at = data_offset - span_start
+            self.files[name] = blob[at:at + size]
+            # Written out as-is, ciphertext and all. The np files get replaced
+            # from appmeta afterwards; the licence entries are account-bound and
+            # nothing downstream reads them, which is also true of the dumps
+            # ftpdump.sh produces.
+            if flags1 & PKG_ENTRY_ENCRYPTED:
+                self.encrypted[name] = (flags2 & 0xF000) >> 12
+
+
+def write_pkg_sce_sys(entries, dest_root, verbose=False):
+    """Writes a PKG's entries into sce_sys, overwriting what is already there."""
+    sce_sys = os.path.join(dest_root, "sce_sys")
+    for name, data in entries.files.items():
+        path = os.path.join(sce_sys, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if verbose:
+            print(f"  sce_sys/{name}", file=sys.stderr)
+        with open(path, "wb") as out:
+            out.write(data)
+    return len(entries.files)
+
+
+def find_pkg(host, port, title, kind):
+    """Opens the app or patch package, wherever the console keeps it.
+
+    Games installed to external storage live under /mnt/ext0. Opening a
+    connection proves nothing about the path, so each candidate is probed with a
+    read before being accepted.
+    """
+    for base in ("/user", "/mnt/ext0/user"):
+        path = f"{base}/{kind}/{title}/{kind}.pkg"
+        remote = FtpFile(host, port, path)
+        try:
+            remote.read(0, 4)
+        except ftplib.all_errors:
+            remote.close()
+            continue
+        return remote, path
+    return None, None
+
+
+def sfo_tool():
+    """Locates hippie68's sfo tool"""
+    override = os.environ.get("SFO_PATH")
+    if override and os.access(override, os.X_OK):
+        return override
+    beside = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sfo")
+    if os.access(beside, os.X_OK):
+        return beside
+    found = shutil.which("sfo")
+    return found
+
+
+def fix_merged_sfo(path, category):
+    """Turns a patch's param.sfo into one an app package will accept.
+
+    A merged tree advertises the game's real version, so the patch's
+    TARGET_APP_VER has to go, and its category has to revert to the base
+    game's. Returns None on success or a reason why not.
+    """
+    tool = sfo_tool()
+    if tool is None:
+        return "sfo not found; set SFO_PATH"
+    backup = path + ".orig"
+    shutil.copyfile(path, backup)
+    # Deleting exits non-zero when the key is absent, which is not an error.
+    subprocess.run([tool, path, "-d", "TARGET_APP_VER"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   check=False)
+    done = subprocess.run([tool, path, "-e", "category", category],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          check=False)
+    if done.returncode != 0:
+        shutil.copyfile(backup, path)
+        os.unlink(backup)
+        return f"sfo could not set category to {category}"
+    os.unlink(backup)
+    return None
+
+
+def sfo_query(path, key):
+    tool = sfo_tool()
+    if tool is None:
+        return None
+    done = subprocess.run([tool, path, "-q", key], capture_output=True,
+                          text=True, check=False)
+    return done.stdout.strip() if done.returncode == 0 else None
 
 
 def dump_np_files(mount, title, dest_root):
@@ -574,9 +730,16 @@ def dump_trophies(mount, dest_root, npbind, verbose=False):
 
 
 def verify(dest_root, plan):
-    """Returns the plan entries whose file is missing or the wrong size."""
+    """Returns the plan entries whose file is missing or the wrong size.
+
+    Executables are exempt: their decrypted form is a different length than the
+    image records, so a re-run over a finished dump would otherwise flag every
+    one. elf_truncated covers them instead.
+    """
     bad = []
     for rel, _offset, size in plan:
+        if is_executable(rel):
+            continue
         path = os.path.join(dest_root, rel)
         try:
             if os.path.getsize(path) != size:
@@ -676,21 +839,81 @@ def main():
             return 1
         print(f"  verified {len(patch_plan) + len(app_plan)} file(s) against the plan")
 
-        if args.no_decrypt:
-            print("  executables left encrypted (--no-decrypt)")
-            return 0
-
+        problems = []
         mount = FtpMount(host, port)
         try:
-            if not mount.enable_decryption():
-                print("  warning: the server did not confirm SELF decryption; "
-                      "check the executables before building", file=sys.stderr)
-            replaced, problems = replace_executables(
-                mount, args.title, dest,
-                {"patch0": patch_plan, "app0": app_plan}, args.verbose)
-            print(f"  decrypted {replaced} executable(s) via the PFS mounts")
+            if args.no_decrypt:
+                print("  executables left encrypted (--no-decrypt)")
+            else:
+                if not mount.enable_decryption():
+                    print("  warning: the server did not confirm SELF "
+                          "decryption; check the executables before building",
+                          file=sys.stderr)
+                replaced, problems = replace_executables(
+                    mount, args.title, dest,
+                    {"patch0": patch_plan, "app0": app_plan}, args.verbose)
+                print(f"  decrypted {replaced} executable(s) via the PFS mounts")
+                if replaced:
+                    damaged = [rel for rel, _o, _s in patch_plan + app_plan
+                               if is_executable(rel)
+                               and elf_truncated(os.path.join(dest, rel))]
+                    problems += [(rel, "decrypted executable is truncated")
+                                 for rel in damaged]
+
+            # sce_sys comes from the package entries, not the PFS image. The app
+            # goes down first and the patch over it, matching how the layers
+            # supersede each other everywhere else.
+            base_category = None
+            ciphertext = {}
+            for kind in ("app", "patch"):
+                if kind == "patch" and not patch_manifest:
+                    continue
+                pkg, pkg_path = find_pkg(host, port, args.title, kind)
+                if pkg is None:
+                    problems.append((f"{kind}.pkg", "not found on the console"))
+                    continue
+                try:
+                    entries = PkgEntries(pkg)
+                finally:
+                    pkg.close()
+                written = write_pkg_sce_sys(entries, dest, args.verbose)
+                ciphertext.update(entries.encrypted)
+                print(f"  sce_sys: {written} entr{'y' if written == 1 else 'ies'} "
+                      f"from {pkg_path}")
+                if entries.encrypted:
+                    listed = ", ".join(
+                        f"{n} (key{k})" for n, k in sorted(entries.encrypted.items()))
+                    print(f"    encrypted entries written as-is: {listed}")
+                if entries.unnamed:
+                    problems.append((
+                        f"{kind}.pkg",
+                        "unnamed entries skipped: "
+                        + ", ".join(f"0x{i:x}" for i in entries.unnamed)))
+                if kind == "app":
+                    base_category = sfo_query(
+                        os.path.join(dest, "sce_sys", "param.sfo"), "category")
+
+            if patch_manifest:
+                sfo_path = os.path.join(dest, "sce_sys", "param.sfo")
+                reason = fix_merged_sfo(sfo_path, base_category or "gd")
+                if reason:
+                    problems.append(("sce_sys/param.sfo", reason))
+                else:
+                    print(f"  param.sfo: merged, category {base_category or 'gd'}")
 
             npbind = dump_np_files(mount, args.title, dest)
+            # These are encrypted in the package, so the appmeta copies are the
+            # only usable ones rather than merely the preferred ones.
+            for name in ("npbind.dat", "nptitle.dat"):
+                if name not in ciphertext:
+                    continue
+                staged = os.path.join(dest, "sce_sys", name)
+                if name == "npbind.dat" and npbind is None:
+                    problems.append((f"sce_sys/{name}",
+                                     "encrypted in the package and absent from "
+                                     "appmeta, so it is still ciphertext"))
+                elif not os.path.exists(staged):
+                    problems.append((f"sce_sys/{name}", "missing"))
             sets = trophy_set_ids(npbind)
             if sets:
                 written, trophy_problems = dump_trophies(
