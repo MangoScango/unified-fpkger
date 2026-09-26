@@ -463,8 +463,7 @@ fix_union_sfo() {
 # Deletes the redundant spelling where a union dump landed one case-insensitive
 # PFS path twice, keeping the patch's. Run from inside the dump directory.
 resolve_union_case() {
-  local patch=/mnt/sandbox/pfsmnt/$1-patch0
-  local base=/mnt/sandbox/pfsmnt/$1-app0
+  local remote=/mnt/sandbox/pfsmnt/$1-patch0
   local groups authoritative decisions verdict rel dropped=0
   groups=$(create_temp_file)
   find . -type f -printf '%P\n' | awk '
@@ -478,30 +477,20 @@ resolve_union_case() {
     return 0
   fi
 
-  echo "Resolving $(cut -f1 "$groups" | uniq | wc -l) case-duplicated path(s) against the console ..."
-  # The patch is listed first so its spelling wins for anything it ships; the rest
-  # of the tree only exists in the base.
+  echo "Resolving $(cut -f1 "$groups" | uniq | wc -l) case-duplicated path(s) against the patch ..."
   authoritative=$(create_temp_file)
-  local mount rank=0 seen=0
-  for mount in "$patch" "$base"; do
-    rank=$((rank + 1))
-    lftp_run "find $mount;" 2> /dev/null \
-      | sed -e "s|^$mount/||" -e 's|/$||' -e "s|^|$rank\t|" >> "$authoritative"
-    echo "  ${mount##*/}: $(( $(wc -l < "$authoritative") - seen )) entries"
-    seen=$(wc -l < "$authoritative")
-  done
+  lftp_run "find $remote;" 2> /dev/null | sed -e "s|^$remote/||" -e 's|/$||' \
+    > "$authoritative"
   if [[ ! -s $authoritative ]]; then
-    warning_message "Could not list \"$patch\" or \"$base\"; leaving the case duplicates in place."
+    warning_message "Could not list \"$remote\"; leaving the case duplicates in place."
     rm -f "$groups" "$authoritative"
     return 1
   fi
 
   decisions=$(create_temp_file)
   awk -F'\t' '
-    NR == FNR { if (!($2 in arank) || $1 < arank[$2]) arank[$2] = $1; next }
-    { key[++n] = $1; rel[n] = $2
-      if ($2 in arank && (!(($1) in krank) || arank[$2] < krank[$1])) {
-        keeper[$1] = $2; krank[$1] = arank[$2] } }
+    NR == FNR { auth[$0] = 1; next }
+    { key[++n] = $1; rel[n] = $2; if ($2 in auth) keeper[$1] = $2 }
     END { for (i = 1; i <= n; i++) {
             if (!(key[i] in keeper)) { print "?\t" rel[i]; continue }
             if (rel[i] != keeper[key[i]]) print "-\t" rel[i] } }' \
@@ -510,19 +499,13 @@ resolve_union_case() {
   while IFS=$'\t' read -r verdict rel; do
     case $verdict in
       '-') [[ $verbose ]] && echo "  dropping $rel"
-           [[ -e $rel ]] || { warning_message "already gone: \"$rel\""; continue; }
-           rm -f "$rel" && ((dropped++)) ;;
+           rm -f "$rel" && ((dropped++))
+           rmdir -p "$(dirname "$rel")" 2> /dev/null ;;
       '?') warning_message "The patch has neither spelling of \"$rel\"; keeping it." ;;
     esac
   done < "$decisions"
 
-  find . -type d -empty -delete 2> /dev/null
-  echo "Case duplicates: $(cut -f1 "$groups" | uniq | wc -l) path(s), $(wc -l < "$groups") copies, \
-$(grep -c '^-' "$decisions") to remove, $(grep -c '^?' "$decisions") unresolved; removed $dropped."
-  if [[ $debug ]]; then
-    debug_message "case-duplicate verdicts:"
-    sed 's/^/  /' "$decisions" >&2
-  fi
+  echo "Removed $dropped file(s) the console does not have under that name."
   rm -f "$groups" "$authoritative" "$decisions"
 }
 
