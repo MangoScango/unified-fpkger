@@ -395,12 +395,20 @@ def build_plan(app_manifest, patch_manifest):
 
 
 def group_runs(plan):
-    """Groups an offset-ordered plan into one entry per worthwhile transfer."""
+    """Groups an offset-ordered plan into one entry per worthwhile transfer.
+
+    A split is only taken where the next transfer can actually begin. Splitting
+    at an offset REST refuses would force transfer_start to rewind to the last
+    acceptable one, and that rewind averages a gigabyte, which costs far more
+    than reading through the gap the split was meant to avoid.
+    """
     runs, current = [], []
     for entry in plan:
-        if current and entry[1] - (current[-1][1] + current[-1][2]) > RESEEK_THRESHOLD:
-            runs.append(current)
-            current = []
+        if current:
+            gap = entry[1] - (current[-1][1] + current[-1][2])
+            if gap > RESEEK_THRESHOLD and reachable(entry[1]):
+                runs.append(current)
+                current = []
         current.append(entry)
     if current:
         runs.append(current)
@@ -443,13 +451,14 @@ def extract(remote, dest_root, plan, label, verbose=False, progress=True):
 
     ordered = sorted((e for e in plan if e[2] > 0), key=lambda entry: entry[1])
     if not ordered:
-        return 0, 0
+        return 0, 0, 0
     runs = group_runs(ordered)
     bar = Progress(sum(size for _d, _o, size in ordered), label, progress)
-    discarded = 0
+    discarded = rewound = 0
 
     for run in runs:
         pos = transfer_start(run[0][1])
+        rewound += run[0][1] - pos
         conn = remote.open_at(pos)
         try:
             for rel, offset, size in run:
@@ -477,7 +486,7 @@ def extract(remote, dest_root, plan, label, verbose=False, progress=True):
             remote.finish(conn)
 
     bar.finish()
-    return len(runs), discarded
+    return len(runs), discarded, rewound
 
 
 def replace_executables(mount, title, dest_root, layers, verbose=False):
@@ -818,14 +827,15 @@ def main():
 
         # The patch goes first so that nothing the base game writes can land on
         # top of a patched file.
-        if patch_plan:
-            runs, discarded = extract(patch, dest, patch_plan, "patch",
-                                      args.verbose)
-            print(f"  patch: {len(patch_plan)} file(s), {runs} run(s), "
-                  f"{discarded:,} bytes discarded")
-        runs, discarded = extract(app, dest, app_plan, "app", args.verbose)
-        print(f"  app:   {len(app_plan)} file(s), {runs} run(s), "
-              f"{discarded:,} bytes discarded")
+        for label, remote, layer_plan in (("patch", patch, patch_plan),
+                                          ("app", app, app_plan)):
+            if not layer_plan:
+                continue
+            runs, discarded, rewound = extract(remote, dest, layer_plan, label,
+                                               args.verbose)
+            note = f", {rewound:,} rewound" if rewound else ""
+            print(f"  {label}: {len(layer_plan)} file(s), {runs} run(s), "
+                  f"{discarded:,} bytes discarded{note}")
 
         # Checked before the executables are swapped, since the decrypted copies
         # deliberately no longer match the sizes the image recorded.
