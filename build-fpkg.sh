@@ -266,12 +266,15 @@ img_create() {
   img_tmp_init
   img_progress_start "$out"
   local log_file; log_file="$(mktemp)"
-  wine_run "$ORBIS_PUB_CMD" img_create --tmp_path "$IMG_TMP_WIN" "$@" \
-    2> >(tee -a "$log_file" >&2) | tee -a "$log_file" || true
+  wine_run "$ORBIS_PUB_CMD" img_create --tmp_path "$IMG_TMP_WIN" "$@" 2>&1 \
+    | tee -a "$log_file" >&2 || true
   img_progress_stop
   # The exit status is useless here - orbis-pub-cmd returns non-zero for warnings
-  # alone - but it prefixes real failures with [Error].
-  local errors; errors="$(tr -d '\000' < "$log_file" | grep '^\[Error\]' || true)"
+  # alone - but it prefixes real failures with [Error]. The pty leaves CSI escapes
+  # and CRs around those lines.
+  local errors
+  errors="$(tr -d '\000\r' < "$log_file" \
+    | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' | grep '^\[Error\]' || true)"
   rm -f "$log_file"
   [ -z "$errors" ] || die "img_create failed:
 $errors"
@@ -1134,10 +1137,15 @@ if [ -z "$UPDATE" ]; then
     sfo_edit -e VERSION 01.00 "$P"
   fi
   log "building pkg (orbis-pub-cmd img_create)"
-  img_create "$OUT_DIR" --oformat pkg --no_progress_bar \
-    "$(winpath "$GP4")" "$(winpath "$OUT_DIR")"
-  PKG="$(ls -t "$OUT_DIR"/*.pkg 2>/dev/null | head -1)"
+  APP_OUT="$WORK_DIR/apppkg_$(printf '%s' "$CONTENT_ID" | tr -c 'A-Za-z0-9_-' '_')"
+  rm -rf "$APP_OUT"; mkdir -p "$APP_OUT"
+  img_create "$APP_OUT" --oformat pkg --no_progress_bar \
+    "$(winpath "$GP4")" "$(winpath "$APP_OUT")"
+  PKG="$(ls -t "$APP_OUT"/*.pkg 2>/dev/null | head -1)"
   [ -n "$PKG" ] || die "no pkg produced"
+  mv "$PKG" "$OUT_DIR/" || die "could not move $PKG to $OUT_DIR"
+  PKG="$OUT_DIR/$(basename "$PKG")"
+  rmdir "$APP_OUT" 2>/dev/null
   rm -f "$GP4"
   log "app pkg: $PKG"
 
