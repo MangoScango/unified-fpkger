@@ -22,6 +22,29 @@ beep_interval=3
 # Path (directory or file) to C program "sfo" (https://github.com/hippie68/sfo)
 sfo_path=
 
+# The values above can also come from a .env file of KEY=VALUE lines, read from
+# the working directory and then from beside this script. Only unset keys are
+# filled, so the environment wins over both and options win over everything.
+for _f in "$PWD/.env" "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.env"; do
+  [[ -f $_f ]] || continue
+  while IFS= read -r _line || [[ $_line ]]; do
+    [[ ! $_line || $_line == '#'* ]] && continue
+    _key=${_line%%=*}
+    [[ $_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    [[ ${!_key:-} ]] || eval "export $_line"
+  done < "$_f"
+done
+unset _f _line _key
+ip=${FTPDUMP_IP:-$ip}
+port=${FTPDUMP_PORT:-$port}
+beep=${FTPDUMP_BEEP:-$beep}
+beep_time=${FTPDUMP_BEEP_TIME:-$beep_time}
+beep_interval=${FTPDUMP_BEEP_INTERVAL:-$beep_interval}
+sfo_path=${SFO_PATH:-$sfo_path}
+jobs=${FTPDUMP_JOBS:-}
+union_enabled=${FTPDUMP_UNION:-}
+pfs_extraction_enabled=${FTPDUMP_USE_PFS:-}
+
 # Functions: ###################################################################
 
 print_usage() {

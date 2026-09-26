@@ -12,3 +12,4 @@ sfo
 /.vscode
 /__pycache__
 /fpkgtmp/
+/.env

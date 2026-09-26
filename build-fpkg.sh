@@ -124,6 +124,13 @@
 #     --ps2-tid NNNNN    force the 5-digit PS2 serial for emu auth
 #                        (default: auto-derived from CONTENT_ID for PS2 titles)
 #     -o, --out DIR      output directory (default: cwd)
+#     --tmp-dir DIR      scratch for img_create's internal image, which needs
+#                        room for another copy of the title
+#                        (default: <cwd>/fpkgtmp)
+#
+#   Every option above has an environment variable behind it, and a .env file of
+#   KEY=VALUE lines sets those. ./.env is read first, then the one beside the
+#   script
 #
 #   By default, if the base dump dir is named "<foo>-app", the script looks for
 #   a sibling "<foo>-patch" and merges it automatically, and a sibling
@@ -134,6 +141,23 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Defaults for every ${VAR:-...} below, as KEY=VALUE lines. Only unset variables
+# are filled, so the environment wins over ./.env, which wins over the one beside
+# the script.
+load_env() {
+  local f line key
+  for f in "$PWD/.env" "$SELF_DIR/.env"; do
+    [ -f "$f" ] || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in ''|'#'*) continue ;; esac
+      key="${line%%=*}"
+      case "$key" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+      [ -n "${!key:-}" ] || eval "export $line"
+    done < "$f"
+  done
+}
+load_env
 
 # --- tools (override via env) ----------------------------------------------
 SDK_DIR="${SDK_DIR:-$SELF_DIR/PS4_Fake_PKG_Tools_3}"
@@ -274,7 +298,9 @@ sfo_edit() { "$SFO_TOOL" "$@" >/dev/null 2>&1 || true; }
 #         a path = explicit update dir.
 # DLC_DIRS: explicit --dlc dirs (repeatable). DLC_MODE: "" = auto-discover a
 # sibling "-dlc" dir; "none" = do not build DLC; "explicit" = use DLC_DIRS.
-CONTENT_ID="" UPDATE="" DUMP="" OUT_DIR="$PWD" KEYSTONE_MODE="retail" PS2_TID=""
+CONTENT_ID="${CONTENT_ID:-}" UPDATE="${UPDATE:-}" DUMP=""
+OUT_DIR="${OUT_DIR:-$PWD}" KEYSTONE_MODE="${KEYSTONE_MODE:-retail}"
+PS2_TID="${PS2_TID:-}"
 # sce_sys a backport patch carries; a directory here is taken whole. Anything not
 # listed falls through to the app volume underneath.
 #
@@ -282,9 +308,16 @@ CONTENT_ID="" UPDATE="" DUMP="" OUT_DIR="$PWD" KEYSTONE_MODE="retail" PS2_TID=""
 # changes it. npbind.dat holds the NP Communication ID the trophy system resolves
 # at startup. Trimming this list needs hardware to check.
 PATCH_SCE_SYS="${PATCH_SCE_SYS:-param.sfo icon0.png playgo-chunk.dat npbind.dat}"
-MODE="app-merge" BACKPORT=1 BACKPORT_TARGET_SDK="auto" BASE_PKG_IN=""
+MODE="${MODE:-app-merge}" BACKPORT="${BACKPORT:-1}"
+BACKPORT_TARGET_SDK="${BACKPORT_TARGET_SDK:-auto}" BASE_PKG_IN="${BASE_PKG_IN:-}"
 RESOLVED_SDK="" OBSERVED_SDK=""
-DLC_MODE="" ; declare -a DLC_DIRS=() DLC_ITEMS=() ARGS=()
+DLC_MODE="${DLC_MODE:-}" ; declare -a DLC_DIRS=() DLC_ITEMS=() ARGS=()
+# DLC="dir dir" is the environment's form of repeating --dlc.
+[ -z "${DLC:-}" ] || {
+  read -r -a DLC_DIRS <<< "$DLC"
+  DLC_DIRS=("${DLC_DIRS[@]%/}")
+  DLC_MODE="explicit"
+}
 while [ $# -gt 0 ]; do
   case "$1" in
     --content-id) CONTENT_ID="${2:?}"; shift 2 ;;
@@ -296,6 +329,7 @@ while [ $# -gt 0 ]; do
     --no-backport) BACKPORT=0; shift ;;
     --base-pkg)   BASE_PKG_IN="${2:?}"; shift 2 ;;
     --sdk)        BACKPORT_TARGET_SDK="${2:?}"; shift 2 ;;
+    --tmp-dir)    IMG_TMP_DIR="${2%/}"; shift 2 ;;
     --dlc)        DLC_DIRS+=("${2%/}"); DLC_MODE="explicit"; shift 2 ;;
     --no-dlc)     DLC_MODE="none"; shift ;;
     --keystone)   KEYSTONE_MODE="${2:?}"; shift 2 ;;

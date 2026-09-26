@@ -24,13 +24,27 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+for _f in "$PWD/.env" "$SELF_DIR/.env"; do
+  [ -f "$_f" ] || continue
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    case "$_line" in ''|'#'*) continue ;; esac
+    _key="${_line%%=*}"
+    case "$_key" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+    [ -n "${!_key:-}" ] || eval "export $_line"
+  done < "$_f"
+done
+unset _f _line _key
+
 BUILD_FPKG="${BUILD_FPKG:-$SELF_DIR/build-fpkg.sh}"
-JOBS=8
-DUMP_DIR="$PWD"
-PKG_DIR=""
-DUMP_ONLY=0
-DELETE_DUMPS=0
-HOST=""
+JOBS="${JOBS:-8}"
+DUMP_DIR="${DUMP_DIR:-$PWD}"
+# build-fpkg.sh calls this OUT_DIR and inherits it from the environment. The
+# --delete-dumps check near the end compares paths against it.
+PKG_DIR="${PKG_DIR:-${OUT_DIR:-}}"
+DUMP_ONLY="${DUMP_ONLY:-0}"
+DELETE_DUMPS="${DELETE_DUMPS:-0}"
+HOST="${HOST:-}"
 declare -a BUILD_ARGS=()
 
 die() { echo "error: $*" >&2; exit 1; }
