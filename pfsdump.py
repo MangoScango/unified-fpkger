@@ -131,6 +131,23 @@ def transfer_start(offset):
     return (offset >> 32 << 32) + 0x7FFFFFFF
 
 
+def close_session(ftp):
+    """Ends an FTP session, asking the server to release it.
+
+    A bare socket close leaves the console holding the session, and reconnecting
+    often enough during a long dump is a good way to run it out of them.
+    """
+    try:
+        ftp.quit()
+        return
+    except ftplib.all_errors:
+        pass
+    try:
+        ftp.close()
+    except ftplib.all_errors:
+        pass
+
+
 class FtpFile:
     """Random and sequential reads of one remote file.
 
@@ -153,7 +170,20 @@ class FtpFile:
         self.ftp.voidcmd("TYPE I")
 
     def open_at(self, offset):
-        return self.ftp.transfercmd(f"RETR {self.path}", rest=offset)
+        # One layer's control connection sits idle for as long as another layer
+        # takes to stream, which on a large patch is long enough for the console
+        # to drop it. A refused path is a different matter and is not retried.
+        try:
+            return self.ftp.transfercmd(f"RETR {self.path}", rest=offset)
+        except ftplib.error_perm:
+            raise
+        except ftplib.all_errors:
+            self._connect()
+            return self.ftp.transfercmd(f"RETR {self.path}", rest=offset)
+
+    def renew(self):
+        """Starts a fresh session, for when this one has been idle a long time."""
+        self._connect()
 
     def finish(self, conn):
         # Transfers are abandoned partway through, which leaves the control
@@ -180,10 +210,7 @@ class FtpFile:
 
     def close(self):
         if self.ftp is not None:
-            try:
-                self.ftp.close()
-            except ftplib.all_errors:
-                pass
+            close_session(self.ftp)
             self.ftp = None
 
 
@@ -191,18 +218,39 @@ class FtpMount:
     """Whole-file reads from the console's PFS mounts, which decrypt SELFs."""
 
     def __init__(self, host, port, timeout=60):
+        self.host, self.port, self.timeout = host, port, timeout
+        self.ftp = None
+        self._connect()
+
+    def _connect(self):
+        self.close()
         self.ftp = ftplib.FTP()
-        self.ftp.connect(host, port, timeout=timeout)
+        self.ftp.connect(self.host, self.port, timeout=self.timeout)
         self.ftp.login("anonymous", "")
         self.ftp.voidcmd("TYPE I")
+
+    def _retry(self, action):
+        """Runs action, once more on a fresh connection if the old one died.
+
+        This connection idles while whole images stream on another one, which is
+        long enough for the console to hang up.
+        """
+        try:
+            return action()
+        except ftplib.error_perm:
+            raise
+        except ftplib.all_errors:
+            self._connect()
+            return action()
 
     def listdir(self, path):
         """Base names of the entries in a remote directory."""
         try:
-            return sorted(name.rsplit("/", 1)[-1].rstrip("/")
-                          for name in self.ftp.nlst(path) if name.rstrip("/"))
+            names = self._retry(lambda: self.ftp.nlst(path))
         except ftplib.all_errors:
             return []
+        return sorted(name.rsplit("/", 1)[-1].rstrip("/")
+                      for name in names if name.rstrip("/"))
 
     def enable_decryption(self):
         """Turns server-side SELF decryption on. DECRYPT toggles, so this reads
@@ -227,7 +275,7 @@ class FtpMount:
         truncates it modulo 2**32.
         """
         try:
-            reply = self.ftp.sendcmd(f"MLST {remote}")
+            reply = self._retry(lambda: self.ftp.sendcmd(f"MLST {remote}"))
         except ftplib.all_errors:
             return None
         found = re.search(r"size=(\d+)", reply)
@@ -244,7 +292,7 @@ class FtpMount:
         """Reads remote to EOF. Its length is not known ahead of time, because
         the mount reports the encrypted size for files it decrypts.
         """
-        conn = self.ftp.transfercmd(f"RETR {remote}")
+        conn = self._retry(lambda: self.ftp.transfercmd(f"RETR {remote}"))
         written = 0
         try:
             with open(dest, "wb") as out:
@@ -260,10 +308,10 @@ class FtpMount:
         return written
 
     def close(self):
-        try:
-            self.ftp.close()
-        except ftplib.all_errors:
-            pass
+        if self.ftp is None:
+            return
+        close_session(self.ftp)
+        self.ftp = None
 
 
 class PfsImage:
@@ -469,6 +517,9 @@ def extract(remote, dest_root, plan, label, verbose=False, progress=True):
     runs = group_runs(ordered)
     bar = Progress(sum(size for _d, _o, size in ordered), label, progress)
     discarded = rewound = 0
+    # This layer's session has been idle since its metadata was read, which for
+    # the app means however long the patch took to stream.
+    remote.renew()
 
     for run in runs:
         pos = transfer_start(run[0][1])
