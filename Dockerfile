@@ -60,7 +60,8 @@ COPY --from=deps /out-pkgtools /opt/fpkger/PS4_Fake_PKG_Tools_3
 # ftpdump takes sfo from its own directory when sfo_path is unset, so they ship
 # side by side.
 COPY build-fpkg.sh dump-build.sh ftpdump.sh make_fself.py \
-     pkg-set-appver.py pkgsig.py backport-sdk.py ps4elf.py /opt/fpkger/
+     pkg-set-appver.py pkgsig.py backport-sdk.py ps4elf.py pfsdump.py \
+     /opt/fpkger/
 # The firmware dumps these are derived from are far too large to ship, so the
 # tables travel with the image instead. build-export-db.py regenerates them and
 # stays out.
@@ -78,13 +79,15 @@ RUN off=$((0x3681B)) \
        | dd of="$ORBIS_PUB_CMD" bs=1 seek=$off conv=notrunc status=none
 
 RUN chmod +x /opt/fpkger/build-fpkg.sh /opt/fpkger/dump-build.sh \
-        /opt/fpkger/ftpdump.sh /opt/fpkger/pkg-set-appver.py /opt/fpkger/sfo \
+        /opt/fpkger/ftpdump.sh /opt/fpkger/pkg-set-appver.py \
+        /opt/fpkger/pfsdump.py /opt/fpkger/sfo \
         /usr/local/bin/entrypoint.sh \
     && for t in build-fpkg dump-build ftpdump; do \
          ln -s "/opt/fpkger/$t.sh" "/usr/local/bin/$t.sh"; \
        done \
     && ln -s /opt/fpkger/sfo /usr/local/bin/sfo \
-    && ln -s /opt/fpkger/pkg-set-appver.py /usr/local/bin/pkg-set-appver.py
+    && ln -s /opt/fpkger/pkg-set-appver.py /usr/local/bin/pkg-set-appver.py \
+    && ln -s /opt/fpkger/pfsdump.py /usr/local/bin/pfsdump.py
 
 # No PUID/PGID default: unset means "run in place" (see entrypoint), which is
 # what a rootless `docker run` needs.

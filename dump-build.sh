@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # ----------------------------------------------------------------------------
 # dump-build.sh
-# Dump a running game off a console with ftpdump, then build a fake-pkg from it.
+# Dump a running game off a console, then build a fake-pkg from it.
 #
 # USAGE
 #   dump-build.sh [options] IP[:PORT] [build-fpkg options ...]
-#     -d, --dump-dir DIR    where ftpdump writes the raw dump (default: cwd)
+#     -d, --dump-dir DIR    where the raw dump is written (default: cwd)
 #     -o, --out DIR         where build-fpkg writes the pkg (default: cwd)
-#     -j, --jobs N          ftpdump parallel downloads (default: 8)
+#     -j, --jobs N          ftpdump parallel downloads (default: 8); the pfs
+#                           method is a single sequential stream and ignores it
+#         --method M        pfs (default) or ftp; see DUMP METHODS below
 #         --dump-only       stop after dumping
 #         --delete-dumps    remove the dumped <TITLEID>-{app,patch,dlc,keystone}
 #                           dirs once build-fpkg.sh has succeeded. Irreversible,
@@ -17,9 +19,17 @@
 #   Anything after IP[:PORT] is forwarded to build-fpkg.sh, e.g.
 #     dump-build.sh 192.168.1.50:1337 --out /mnt/pkgs --keystone kscreate
 #
-#   ftpdump is run as: <host> -a -d -k -p -r -j N -o DIR
-#   so app, patch, DLC and the original keystone are all dumped. Only the -app
-#   dir is handed to build-fpkg.sh; it finds the sibling -patch and -dlc itself.
+# DUMP METHODS
+#   pfs  pfsdump.py streams each layer's PFS image straight off the console and
+#        demultiplexes it, merging the patch into the app tree as it writes. One
+#        sequential transfer per layer instead of a request per file. It only
+#        produces merged trees, so a build that needs the layers apart
+#        (--remaster, --separate, --no-update) falls back to ftp.
+#   ftp  ftpdump.sh mirrors the loose files, run as:
+#          <host> -a -d -k -p -r -j N [--union] -o DIR
+#
+#   Either way only the -app dir is handed to build-fpkg.sh; it finds the
+#   sibling -patch and -dlc itself.
 # ----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -44,6 +54,7 @@ DUMP_DIR="${DUMP_DIR:-$PWD}"
 PKG_DIR="${PKG_DIR:-${OUT_DIR:-}}"
 DUMP_ONLY="${DUMP_ONLY:-0}"
 DELETE_DUMPS="${DELETE_DUMPS:-0}"
+DUMP_METHOD="${DUMP_METHOD:-pfs}"
 HOST="${HOST:-}"
 declare -a BUILD_ARGS=()
 
@@ -55,6 +66,7 @@ while [ $# -gt 0 ]; do
     -d|--dump-dir)   DUMP_DIR="${2:?}"; shift 2 ;;
     -o|--out)        PKG_DIR="${2:?}"; shift 2 ;;
     -j|--jobs)       JOBS="${2:?}"; shift 2 ;;
+    --method)        DUMP_METHOD="${2:?}"; shift 2 ;;
     --dump-only)     DUMP_ONLY=1; shift ;;
     --delete-dumps)  DELETE_DUMPS=1; shift ;;
     -h|--help)       awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"
@@ -71,7 +83,7 @@ done
 # build-fpkg.sh, which would reject them with a far less obvious message.
 for a in ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}; do
   case "$a" in
-    -d|--dump-dir|-j|--jobs|--dump-only|--delete-dumps)
+    -d|--dump-dir|-j|--jobs|--method|--dump-only|--delete-dumps)
       die "$a must come before the console address" ;;
   esac
 done
@@ -81,6 +93,11 @@ case "$JOBS" in ''|*[!0-9]*) die "--jobs must be a positive integer" ;; esac
 [ "$JOBS" -ge 1 ] || die "--jobs must be at least 1"
 [ -x "$BUILD_FPKG" ] || die "build-fpkg.sh not found or not executable: $BUILD_FPKG"
 
+case "$DUMP_METHOD" in
+  pfs|ftp) ;;
+  *) die "--method must be pfs or ftp" ;;
+esac
+
 FTPDUMP="${FTPDUMP:-}"
 if [ -z "$FTPDUMP" ]; then
   for c in "$SELF_DIR/ftpdump.sh" "$SELF_DIR/ftpdump"; do
@@ -88,7 +105,17 @@ if [ -z "$FTPDUMP" ]; then
   done
 fi
 [ -n "$FTPDUMP" ] || FTPDUMP="$(command -v ftpdump || true)"
-[ -n "$FTPDUMP" ] && [ -x "$FTPDUMP" ] || die "ftpdump not found (set FTPDUMP=/path/to/ftpdump.sh)"
+
+# An explicit PFSDUMP that is not there is a typo worth reporting, where merely
+# not finding one is a reason to use the other method.
+if [ -n "${PFSDUMP:-}" ]; then
+  [ -f "$PFSDUMP" ] || die "PFSDUMP is set but not a file: $PFSDUMP"
+else
+  PFSDUMP=""
+  for c in "$SELF_DIR/pfsdump.py" "$(command -v pfsdump.py || true)"; do
+    [ -n "$c" ] && [ -f "$c" ] && { PFSDUMP="$c"; break; }
+  done
+fi
 
 mkdir -p "$DUMP_DIR"
 DUMP_DIR="$(cd "$DUMP_DIR" && pwd)"
@@ -116,29 +143,53 @@ for a in ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}; do
     --remaster|--separate|--no-update) UNION=() ;;
   esac
 done
-[ "${#UNION[@]}" -gt 0 ] && log "merge build: dumping the app0-patch0 union"
 
-log "dumping $HOST -> $DUMP_DIR (jobs=$JOBS)"
+# pfsdump only ever writes a merged tree, so a build that needs the layers apart
+# has to go the mirroring route.
+if [ "$DUMP_METHOD" = pfs ] && [ "${#UNION[@]}" -eq 0 ]; then
+  log "build needs the layers apart: falling back to the ftp method"
+  DUMP_METHOD=ftp
+fi
+if [ "$DUMP_METHOD" = pfs ] && [ -z "$PFSDUMP" ]; then
+  log "pfsdump.py not found: falling back to the ftp method (set PFSDUMP=/path/to/pfsdump.py)"
+  DUMP_METHOD=ftp
+fi
+
+declare -a DUMP_CMD=()
+if [ "$DUMP_METHOD" = pfs ]; then
+  command -v python3 >/dev/null 2>&1 || die "python3 not found, needed by pfsdump.py"
+  DUMP_CMD=(python3 "$PFSDUMP" "$HOST" -o "$DUMP_DIR")
+  log "dumping $HOST -> $DUMP_DIR (pfs stream)"
+else
+  [ -n "$FTPDUMP" ] && [ -x "$FTPDUMP" ] \
+    || die "ftpdump not found (set FTPDUMP=/path/to/ftpdump.sh)"
+  DUMP_CMD=("$FTPDUMP" "$HOST" -a -d -k -p -r -j "$JOBS"
+            ${UNION[@]+"${UNION[@]}"} -o "$DUMP_DIR")
+  [ "${#UNION[@]}" -gt 0 ] && log "merge build: dumping the app0-patch0 union"
+  log "dumping $HOST -> $DUMP_DIR (ftp mirror, jobs=$JOBS)"
+fi
+
 rc=0
 if command -v script >/dev/null 2>&1; then
-  # A pty keeps ftpdump's progress display working while still capturing output.
-  SHELL=/bin/sh script -qefc \
-    "$(printf '%q' "$FTPDUMP") $(printf '%q' "$HOST") -a -d -k -p -r -j $JOBS ${UNION[*]} -o $(printf '%q' "$DUMP_DIR")" \
-    "$DUMP_LOG" || rc=$?
+  # A pty keeps the dumper's progress display working while still capturing it.
+  _quoted=""
+  for _a in "${DUMP_CMD[@]}"; do _quoted+="$(printf '%q' "$_a") "; done
+  SHELL=/bin/sh script -qefc "$_quoted" "$DUMP_LOG" || rc=$?
+  unset _quoted _a
 else
-  "$FTPDUMP" "$HOST" -a -d -k -p -r -j "$JOBS" ${UNION[@]+"${UNION[@]}"} \
-    -o "$DUMP_DIR" 2>&1 | tee "$DUMP_LOG" || true
+  "${DUMP_CMD[@]}" 2>&1 | tee "$DUMP_LOG" || true
   rc="${PIPESTATUS[0]}"
 fi
 
 if [ "$rc" -ne 0 ]; then
-  die "ftpdump failed (exit $rc); output kept at $DUMP_LOG"
+  die "$DUMP_METHOD dump failed (exit $rc); output kept at $DUMP_LOG"
 fi
 
-# ftpdump reports warnings/criticals without failing.
+# ftpdump tallies warnings/criticals without failing. pfsdump has no equivalent:
+# anything it could not resolve is listed and exits non-zero, caught above.
 if grep -qaE '[0-9]+ (warning|critical) message' "$DUMP_LOG"; then
   grep -aoE '[0-9]+ (warning|critical) message\(s\)' "$DUMP_LOG" | sort -u \
-    | while read -r m; do log "ftpdump reported $m"; done
+    | while read -r m; do log "the dump reported $m"; done
 fi
 
 # "Dumping CUSA12345 app data (123 MB):" names the title that was dumped.

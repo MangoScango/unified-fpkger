@@ -62,6 +62,12 @@ PKG_NAMELESS = {
 # npbind.dat holds these in a tag/length table; scanning for them is enough to
 # recover the order, which is what maps a set onto trophy<NN>.trp.
 NPWR_ID = re.compile(rb"NPWR[0-9]{5}_[0-9]{2}")
+
+PFSMNT = "/mnt/sandbox/pfsmnt"
+TITLE_MOUNT = re.compile(r"^([A-Z]{4}[0-9]{5})-app0$")
+# What ks_create produces from an all-zero passcode, so not the retail keystone.
+GENERATED_KEYSTONE = ("294a5ed06db170618f2eed8c424b9d82"
+                      "8879c080cc66fbc4864f69e974deb856")
 # Names the console decrypts on the way out of a PFS mount. Matching on the name
 # rather than sniffing every file's magic keeps this off the data path.
 EXECUTABLE_SUFFIXES = (".self", ".elf", ".sprx", ".prx")
@@ -189,6 +195,14 @@ class FtpMount:
         self.ftp.connect(host, port, timeout=timeout)
         self.ftp.login("anonymous", "")
         self.ftp.voidcmd("TYPE I")
+
+    def listdir(self, path):
+        """Base names of the entries in a remote directory."""
+        try:
+            return sorted(name.rsplit("/", 1)[-1].rstrip("/")
+                          for name in self.ftp.nlst(path) if name.rstrip("/"))
+        except ftplib.all_errors:
+            return []
 
     def enable_decryption(self):
         """Turns server-side SELF decryption on. DECRYPT toggles, so this reads
@@ -489,11 +503,12 @@ def extract(remote, dest_root, plan, label, verbose=False, progress=True):
     return len(runs), discarded, rewound
 
 
-def replace_executables(mount, title, dest_root, layers, verbose=False):
+def replace_executables(mount, dest_root, layers, verbose=False):
     """Overwrites the extracted SELFs with the mount's decrypted copies.
 
-    layers maps a layer name onto its plan, so each executable is re-fetched
-    from the layer it actually came from. Returns (replaced, [(path, reason)]).
+    layers maps a pfsmnt directory name onto the plan taken from it, so each
+    executable is re-fetched from the layer it actually came from. Returns
+    (replaced, [(path, reason)]).
     """
     replaced = 0
     problems = []
@@ -502,7 +517,7 @@ def replace_executables(mount, title, dest_root, layers, verbose=False):
             if size == 0 or not is_executable(rel):
                 continue
             local = os.path.join(dest_root, rel)
-            remote = f"/mnt/sandbox/pfsmnt/{title}-{layer}/{rel}"
+            remote = f"{PFSMNT}/{layer}/{rel}"
             if verbose:
                 print(f"  {layer}: {rel}", file=sys.stderr)
             staged = local + ".decrypted"
@@ -596,15 +611,13 @@ def write_pkg_sce_sys(entries, dest_root, verbose=False):
     return len(entries.files)
 
 
-def find_pkg(host, port, title, kind):
-    """Opens the app or patch package, wherever the console keeps it.
+def open_first(host, port, paths):
+    """Opens the first of paths that can actually be read.
 
-    Games installed to external storage live under /mnt/ext0. Opening a
-    connection proves nothing about the path, so each candidate is probed with a
-    read before being accepted.
+    Opening a connection proves nothing about the path, so each candidate is
+    probed before being accepted.
     """
-    for base in ("/user", "/mnt/ext0/user"):
-        path = f"{base}/{kind}/{title}/{kind}.pkg"
+    for path in paths:
         remote = FtpFile(host, port, path)
         try:
             remote.read(0, 4)
@@ -613,6 +626,51 @@ def find_pkg(host, port, title, kind):
             continue
         return remote, path
     return None, None
+
+
+def find_pkg(host, port, title, kind):
+    """Opens the app or patch package. External installs live under /mnt/ext0."""
+    return open_first(host, port, [f"{base}/{kind}/{title}/{kind}.pkg"
+                                   for base in ("/user", "/mnt/ext0/user")])
+
+
+def find_ac_pkg(host, port, title, label):
+    """Opens an add-on package by its entitlement label."""
+    return open_first(host, port, [f"{base}/addcont/{title}/{label}/ac.pkg"
+                                   for base in ("/user", "/mnt/ext0/user")])
+
+
+def discover_title(mount):
+    """The title ID of the running game, per its app0 mount."""
+    found = [match.group(1) for match in
+             (TITLE_MOUNT.match(name) for name in mount.listdir(PFSMNT)) if match]
+    if not found:
+        return None, []
+    return found[0], found
+
+
+def find_dlc_mounts(mount, title):
+    """The add-on content mounts belonging to a title.
+
+    Their directory name is the add-on's content ID, whose last 16 characters
+    are the entitlement label the package is filed under.
+    """
+    return [name for name in mount.listdir(PFSMNT)
+            if name.endswith("-ac") and title in name]
+
+
+def entitlement_label(ac_mount):
+    return ac_mount[:-len("-ac")][-16:]
+
+
+def keystone_is_generated(path):
+    """Whether a keystone is the one ks_create derives from an empty passcode."""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0x20)
+            return handle.read(0x20).hex() == GENERATED_KEYSTONE
+    except OSError:
+        return False
 
 
 def sfo_tool():
@@ -759,14 +817,78 @@ def verify(dest_root, plan):
 
 
 def nest_path(title, layer):
-    return f"/mnt/sandbox/pfsmnt/{title}-{layer}-nest/pfs_image.dat"
+    return f"{PFSMNT}/{title}-{layer}-nest/pfs_image.dat"
+
+
+def ac_nest_path(ac_mount):
+    return f"{PFSMNT}/{ac_mount}-nest/pfs_image.dat"
+
+
+def dump_dlc(host, port, mount, title, out_dir, ac_mounts, decrypt=True,
+             verbose=False):
+    """Streams each add-on's image into <title>-dlc/<content-id>-ac.
+
+    Add-ons sit on nothing, so unlike the app tree there is no layer to merge
+    and no spelling to reconcile.
+    """
+    root = os.path.join(out_dir, f"{title}-dlc")
+    problems = []
+    done = 0
+    for ac in ac_mounts:
+        dest = os.path.join(root, ac)
+        remote = FtpFile(host, port, ac_nest_path(ac))
+        try:
+            plan = PfsImage(remote).manifest()
+            os.makedirs(dest, exist_ok=True)
+            runs, discarded, rewound = extract(remote, dest, plan, ac, verbose)
+        except Unsupported as err:
+            problems.append((ac, f"unsupported image: {err}"))
+            remote.close()
+            continue
+        except ftplib.all_errors as err:
+            problems.append((ac, f"could not read {ac_nest_path(ac)}: {err}"))
+            remote.close()
+            continue
+        finally:
+            remote.close()
+
+        note = f", {rewound:,} rewound" if rewound else ""
+        print(f"  dlc {ac}: {len(plan)} file(s), {runs} run(s), "
+              f"{discarded:,} bytes discarded{note}")
+
+        bad = verify(dest, plan)
+        if bad:
+            problems.append((ac, f"{len(bad)} file(s) did not match the plan"))
+            continue
+
+        if decrypt:
+            replaced, issues = replace_executables(mount, dest, {ac: plan}, verbose)
+            problems += issues
+            if replaced:
+                print(f"    decrypted {replaced} executable(s)")
+
+        label = entitlement_label(ac)
+        pkg, pkg_path = find_ac_pkg(host, port, title, label)
+        if pkg is None:
+            problems.append((ac, f"no ac.pkg for label {label}; "
+                                 "sce_sys metadata will be missing"))
+            continue
+        try:
+            entries = PkgEntries(pkg)
+        finally:
+            pkg.close()
+        written = write_pkg_sce_sys(entries, dest, verbose)
+        print(f"    sce_sys: {written} entries from {pkg_path}")
+        done += 1
+    return done, problems
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Dump a PS4 title's app+patch tree by streaming its PFS images.")
     parser.add_argument("host", help="console address, optionally HOST:PORT")
-    parser.add_argument("title", help="title ID, e.g. CUSA01760")
+    parser.add_argument("title", nargs="?",
+                        help="title ID; defaults to the running game")
     parser.add_argument("-o", "--output-dir", default=".",
                         help="directory to create <TITLE>-app in (default: .)")
     parser.add_argument("-p", "--port", type=int, default=2121)
@@ -775,6 +897,8 @@ def main():
     parser.add_argument("--no-decrypt", action="store_true",
                         help="leave the executables as the encrypted SELFs the "
                              "image stores")
+    parser.add_argument("--no-dlc", action="store_true",
+                        help="skip installed add-on content")
     parser.add_argument("--manifest", action="store_true",
                         help="print the merged write plan and exit")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -786,7 +910,24 @@ def main():
         host, _, spec = host.partition(":")
         port = int(spec)
 
-    app = FtpFile(host, port, nest_path(args.title, "app0"))
+    probe = FtpMount(host, port)
+    try:
+        title = args.title
+        if not title:
+            title, candidates = discover_title(probe)
+            if not title:
+                print("Could not find a mounted app0; is the game running?",
+                      file=sys.stderr)
+                return 1
+            if len(candidates) > 1:
+                print(f"Several titles are mounted ({', '.join(candidates)}); "
+                      f"using {title}.", file=sys.stderr)
+            print(f"Running game: {title}")
+        ac_mounts = [] if args.no_dlc else find_dlc_mounts(probe, title)
+    finally:
+        probe.close()
+
+    app = FtpFile(host, port, nest_path(title, "app0"))
     patch = None
     try:
         app_image = PfsImage(app)
@@ -795,10 +936,10 @@ def main():
         patch_manifest = []
         if not args.no_patch:
             try:
-                patch = FtpFile(host, port, nest_path(args.title, "patch0"))
+                patch = FtpFile(host, port, nest_path(title, "patch0"))
                 patch_manifest = PfsImage(patch).manifest()
             except ftplib.all_errors:
-                print(f"No patch image for {args.title}; dumping the base game only.")
+                print(f"No patch image for {title}; dumping the base game only.")
                 if patch is not None:
                     patch.close()
                     patch = None
@@ -808,7 +949,10 @@ def main():
         metadata = app.metadata_bytes + (patch.metadata_bytes if patch else 0)
         total = sum(size for _d, _o, size in patch_plan + app_plan)
 
-        print(f"{args.title}: {len(app_manifest)} base file(s), "
+        # Phrased the way ftpdump.sh phrases it, because dump-build.sh reads the
+        # title back out of this line.
+        print(f"Dumping {title} app data ({total // 1000000} MB):")
+        print(f"  {len(app_manifest)} base file(s), "
               f"{len(patch_manifest)} patch file(s), {superseded} superseded")
         print(f"  merged tree: {len(patch_plan) + len(app_plan)} file(s), "
               f"{total:,} bytes; metadata cost {metadata / 1048576:.1f} MiB")
@@ -822,7 +966,7 @@ def main():
                 print(f"app\t{offset}\t{size}\t{rel}")
             return 0
 
-        dest = os.path.join(args.output_dir, f"{args.title}-app")
+        dest = os.path.join(args.output_dir, f"{title}-app")
         os.makedirs(dest, exist_ok=True)
 
         # The patch goes first so that nothing the base game writes can land on
@@ -860,13 +1004,17 @@ def main():
                           "decryption; check the executables before building",
                           file=sys.stderr)
                 replaced, problems = replace_executables(
-                    mount, args.title, dest,
-                    {"patch0": patch_plan, "app0": app_plan}, args.verbose)
+                    mount, dest, {f"{title}-patch0": patch_plan,
+                                  f"{title}-app0": app_plan}, args.verbose)
                 print(f"  decrypted {replaced} executable(s) via the PFS mounts")
                 if replaced:
                     damaged = [rel for rel, _o, _s in patch_plan + app_plan
                                if is_executable(rel)
                                and elf_truncated(os.path.join(dest, rel))]
+                    keystone = os.path.join(dest, "sce_sys", "keystone")
+                    if keystone_is_generated(keystone):
+                        print("  warning: keystone is not the retail one",
+                              file=sys.stderr)
                     problems += [(rel, "decrypted executable is truncated")
                                  for rel in damaged]
 
@@ -878,7 +1026,7 @@ def main():
             for kind in ("app", "patch"):
                 if kind == "patch" and not patch_manifest:
                     continue
-                pkg, pkg_path = find_pkg(host, port, args.title, kind)
+                pkg, pkg_path = find_pkg(host, port, title, kind)
                 if pkg is None:
                     problems.append((f"{kind}.pkg", "not found on the console"))
                     continue
@@ -911,7 +1059,7 @@ def main():
                 else:
                     print(f"  param.sfo: merged, category {base_category or 'gd'}")
 
-            npbind = dump_np_files(mount, args.title, dest)
+            npbind = dump_np_files(mount, title, dest)
             # These are encrypted in the package, so the appmeta copies are the
             # only usable ones rather than merely the preferred ones.
             for name in ("npbind.dat", "nptitle.dat"):
@@ -935,6 +1083,16 @@ def main():
                 print("  no appmeta for this title; no np files or trophies")
             else:
                 print("  npbind.dat names no trophy sets")
+
+            if ac_mounts:
+                print(f"Dumping {title} DLC data ({len(ac_mounts)} add-on(s)):")
+                done, dlc_problems = dump_dlc(
+                    host, port, mount, title, args.output_dir, ac_mounts,
+                    decrypt=not args.no_decrypt, verbose=args.verbose)
+                print(f"  {done} of {len(ac_mounts)} add-on(s) dumped")
+                problems += dlc_problems
+            elif not args.no_dlc:
+                print(f"No DLC data found for {title}.")
         finally:
             mount.close()
 
