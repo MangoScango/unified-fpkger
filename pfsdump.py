@@ -1060,7 +1060,7 @@ def main():
                 print(f"  decrypted {replaced} executable(s) via the PFS mounts")
                 if replaced:
                     damaged = [rel for rel, _o, _s in patch_plan + app_plan
-                               if is_executable(rel)
+                               if _s > 0 and is_executable(rel)
                                and elf_truncated(os.path.join(dest, rel))]
                     keystone = os.path.join(dest, "sce_sys", "keystone")
                     if keystone_is_generated(keystone):
