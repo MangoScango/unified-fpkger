@@ -771,6 +771,13 @@ def sfo_query(path, key):
                           text=True, check=False)
     return done.stdout.strip() if done.returncode == 0 else None
 
+def sfo_delete(path, key):
+    tool = sfo_tool()
+    if tool is None:
+        return None
+    done = subprocess.run([tool, path, "-d", key], capture_output=True,
+                          text=True, check=False)
+    return done.stdout.strip() if done.returncode == 0 else None
 
 def dump_np_files(mount, title, dest_root):
     """Takes npbind.dat and nptitle.dat from the console's appmeta.
@@ -1105,12 +1112,15 @@ def main():
                         f"{kind}.pkg",
                         "unnamed entries skipped: "
                         + ", ".join(f"0x{i:x}" for i in entries.unnamed)))
+                sfo_path = os.path.join(dest, "sce_sys", "param.sfo")
                 if kind == "app":
-                    base_category = sfo_query(
-                        os.path.join(dest, "sce_sys", "param.sfo"), "category")
+                    base_category = sfo_query(sfo_path, "category")
+                    remaster_type = sfo_query(sfo_path, "remaster_type")
+                    if remaster_type:
+                        print(f"  param.sfo: clearing remaster flag {remaster_type}")
+                        sfo_delete(sfo_path, "remaster_type")
 
             if patch_manifest:
-                sfo_path = os.path.join(dest, "sce_sys", "param.sfo")
                 reason = fix_merged_sfo(sfo_path, base_category or "gd")
                 if reason:
                     problems.append(("sce_sys/param.sfo", reason))
