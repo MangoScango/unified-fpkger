@@ -803,48 +803,55 @@ def trophy_set_ids(npbind):
     return ordered
 
 
-def dump_trophies(mount, dest_root, npbind, verbose=False):
-    """Writes each trophy set as sce_sys/trophy/trophy<NN>.trp.
+def replace_encrypted_trophies(mount, dest_root, npbind, verbose=False):
+    """Swaps any encrypted TRP the package shipped for the console's plain copy.
 
-    The console keeps a decrypted TRP per set under /user/trophy/conf, so these
-    are taken from there rather than decrypted from the PKG's encrypted copies.
-    Returns (written, [(name, reason)]).
+    The trophy files already exist, written from the package's sce_sys. A TRP
+    that is not plaintext gets replaced from /user/trophy/conf, where the nth
+    trophy file maps to the nth trophy set named in npbind.dat. Returns
+    (replaced, [(name, reason)]).
     """
-    ids = trophy_set_ids(npbind)
-    if not ids:
+    trophy_dir = os.path.join(dest_root, "sce_sys", "trophy")
+    files = sorted(name for name in os.listdir(trophy_dir)
+                   if re.fullmatch(r"trophy\d\d\.trp", name)) \
+        if os.path.isdir(trophy_dir) else []
+    if not files:
         return 0, []
 
-    trophy_dir = os.path.join(dest_root, "sce_sys", "trophy")
-    os.makedirs(trophy_dir, exist_ok=True)
-    written = 0
+    ids = trophy_set_ids(npbind)
+    replaced = 0
     problems = []
-    for index, npwr in enumerate(ids):
-        name = f"trophy{index:02d}.trp"
+    for index, name in enumerate(files):
+        path = os.path.join(trophy_dir, name)
+        with open(path, "rb") as handle:
+            if handle.read(3) == TRP_MAGIC:
+                continue
+
+        if index >= len(ids):
+            problems.append((name, "is encrypted and npbind.dat names no set "
+                                   "for it"))
+            continue
+        npwr = ids[index]
         remote = f"/user/trophy/conf/{npwr}/TROPHY.TRP"
-        dest = os.path.join(trophy_dir, name)
         if verbose:
-            print(f"  {npwr} -> sce_sys/trophy/{name}", file=sys.stderr)
-        expected = mount.size(remote)
-        got = mount.try_download(remote, dest)
+            print(f"  {name} encrypted, replacing from {npwr}", file=sys.stderr)
+        got = mount.try_download(remote, path)
         if got is None:
             problems.append((name, f"{npwr} has no TROPHY.TRP on the console"))
             continue
-        if expected is not None and got != expected:
-            problems.append((name, f"got {got} of {expected} bytes"))
-            continue
-        with open(dest, "rb") as handle:
+        with open(path, "rb") as handle:
             header = handle.read(0x18)
         if header[:3] != TRP_MAGIC:
             problems.append((name, f"{npwr}'s TROPHY.TRP is not a plain TRP"))
             continue
         # A TRP records its own length, which catches a short read without
-        # having to trust the server's listing.
+        # trusting the server's listing.
         declared = struct.unpack_from(">Q", header, 0x08)[0]
         if declared != got:
             problems.append((name, f"TRP declares {declared} bytes, got {got}"))
             continue
-        written += 1
-    return written, problems
+        replaced += 1
+    return replaced, problems
 
 
 def verify(dest_root, plan):
@@ -1123,17 +1130,12 @@ def main():
                                      "appmeta, so it is still ciphertext"))
                 elif not os.path.exists(staged):
                     problems.append((f"sce_sys/{name}", "missing"))
-            sets = trophy_set_ids(npbind)
-            if sets:
-                written, trophy_problems = dump_trophies(
-                    mount, dest, npbind, args.verbose)
-                print(f"  wrote {written} of {len(sets)} trophy set(s) "
+            replaced, trophy_problems = replace_encrypted_trophies(
+                mount, dest, npbind, args.verbose)
+            problems += trophy_problems
+            if replaced:
+                print(f"  replaced {replaced} encrypted trophy file(s) "
                       f"from /user/trophy/conf")
-                problems += trophy_problems
-            elif npbind is None:
-                print("  no appmeta for this title; no np files or trophies")
-            else:
-                print("  npbind.dat names no trophy sets")
 
             if ac_mounts:
                 print(f"Dumping {title} DLC data ({len(ac_mounts)} add-on(s)):")
