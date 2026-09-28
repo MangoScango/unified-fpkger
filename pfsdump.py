@@ -28,6 +28,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 BLOCK_SIG_SIZE = 40
@@ -41,6 +42,7 @@ INODE_COMPRESSED = 0x1
 INODE_MODE_DIR = 0x4000
 
 ELF_MAGIC = b"\x7fELF"
+SELF_MAGIC = b"\x4f\x15\x3d\x1d"
 TRP_MAGIC = b"\xdc\xa2\x4d"
 PKG_MAGIC = 0x7F434E54
 PKG_ENTRY_SIZE = 32
@@ -77,6 +79,7 @@ EXECUTABLE_NAMES = ("eboot.bin",)
 # cheaper to read and discard than to seek past.
 RESEEK_THRESHOLD = 8 << 20
 CHUNK = 1 << 20
+STREAM_RETRIES = 2
 
 
 class Unsupported(Exception):
@@ -95,16 +98,20 @@ def elf_truncated(path):
     short download cannot be caught by comparing sizes.
     """
     size = os.path.getsize(path)
+    if size < 0x40:
+        return True
     with open(path, "rb") as handle:
         head = handle.read(0x40)
         if head[:4] != ELF_MAGIC:
             return True
         ph_offset = struct.unpack_from("<Q", head, 0x20)[0]
         ph_size, ph_count = struct.unpack_from("<HH", head, 0x36)
-        if ph_offset + ph_size * ph_count > size:
+        if ph_size < 0x38 or ph_offset + ph_size * ph_count > size:
             return True
         handle.seek(ph_offset)
         table = handle.read(ph_size * ph_count)
+        if len(table) != ph_size * ph_count:
+            return True
         for i in range(ph_count):
             at = i * ph_size
             offset = struct.unpack_from("<Q", table, at + 0x08)[0]
@@ -532,57 +539,205 @@ class Progress:
                   f"({rate:.0f} MiB/s){' ' * 12}", file=sys.stderr)
 
 
+def recover_from_loose(host, port, loose_root, rel, dest, expected_size,
+                       allow_decrypted=True):
+    """Fetches one file through its mounted path into dest.
+
+    Returns (success, reason). Regular files must match the PFS manifest size;
+    executables may differ only when decrypted output is allowed and complete.
+    """
+    directory = os.path.dirname(dest) or "."
+    fd, staged = tempfile.mkstemp(
+        prefix=f".{os.path.basename(dest)}.", suffix=".loose", dir=directory)
+    os.close(fd)
+    mount = None
+    try:
+        mount = FtpMount(host, port)
+        written = mount.download(f"{loose_root}/{rel}", staged)
+        if is_executable(rel):
+            with open(staged, "rb") as handle:
+                magic = handle.read(4)
+            if magic == ELF_MAGIC:
+                complete_elf = not elf_truncated(staged)
+                valid = allow_decrypted and complete_elf
+                if not allow_decrypted:
+                    invalid_reason = "loose mount returned a decrypted ELF"
+                else:
+                    invalid_reason = "loose mount returned an incomplete ELF"
+            else:
+                valid = magic == SELF_MAGIC and written == expected_size
+                invalid_reason = (
+                    f"loose mount returned executable magic {magic.hex()} "
+                    f"and {written} of {expected_size} bytes")
+        else:
+            valid = written == expected_size
+            invalid_reason = f"loose mount returned {written} of {expected_size} bytes"
+        if not valid:
+            os.unlink(staged)
+            return False, invalid_reason
+        os.replace(staged, dest)
+        return True, ""
+    except (OSError, EOFError, ftplib.Error) as err:
+        if os.path.exists(staged):
+            os.unlink(staged)
+        return False, str(err)
+    finally:
+        if mount is not None:
+            mount.close()
+
+
+def open_stream_at(remote, target, rest_workaround):
+    """Opens the image stream positioned at target.
+
+    A server with the REST sign-bit bug may require starting earlier and
+    discarding up to target. Returns (socket, bytes_discarded).
+    """
+    start = transfer_start(target, rest_workaround)
+    remote.renew()
+    conn = remote.open_at(start)
+    discarded = 0
+    try:
+        while start < target:
+            chunk = conn.recv(min(CHUNK, target - start))
+            if not chunk:
+                raise OSError(f"transfer ended while seeking to {target}")
+            start += len(chunk)
+            discarded += len(chunk)
+    except (OSError, EOFError, ftplib.Error):
+        conn.close()
+        raise
+    return conn, discarded
+
+
 def extract(remote, dest_root, plan, label, verbose=False, progress=True,
-            rest_workaround=False):
-    """Writes every entry in plan, demultiplexing sequential transfers."""
-    # Blanked files carry no extent, so they are created rather than streamed.
+            rest_workaround=False, loose_source=None,
+            allow_decrypted_fallback=True):
+    """Writes every entry in plan, resuming short image transfers as needed.
+
+    loose_source is (host, port, mount root). If the image cannot finish a file
+    after STREAM_RETRIES resumptions, that file is fetched through the loose
+    mount. Failure of both sources is returned as a warning, not raised.
+    """
     for rel, _offset, size in plan:
         if size == 0:
             path = os.path.join(dest_root, rel)
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             open(path, "wb").close()
 
-    ordered = sorted((e for e in plan if e[2] > 0), key=lambda entry: entry[1])
+    ordered = sorted((entry for entry in plan if entry[2] > 0),
+                     key=lambda entry: entry[1])
     if not ordered:
-        return 0, 0, 0
+        return 0, 0, 0, 0, []
+
     runs = group_runs(ordered, rest_workaround)
-    bar = Progress(sum(size for _d, _o, size in ordered), label, progress)
-    discarded = rewound = 0
-    # This layer's session has been idle since its metadata was read, which for
-    # the app means however long the patch took to stream.
-    remote.renew()
+    bar = Progress(sum(size for _rel, _offset, size in ordered), label, progress)
+    discarded = rewound = recovered = 0
+    unresolved = []
 
     for run in runs:
-        pos = transfer_start(run[0][1], rest_workaround)
-        rewound += run[0][1] - pos
-        conn = remote.open_at(pos)
+        conn = None
+        pos = None
         try:
             for rel, offset, size in run:
-                while pos < offset:
-                    chunk = conn.recv(min(CHUNK, offset - pos))
-                    if not chunk:
-                        raise IOError(f"transfer ended at {pos}, expected {offset}")
-                    pos += len(chunk)
-                    discarded += len(chunk)
                 path = os.path.join(dest_root, rel)
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 if verbose:
                     print(f"  {rel}", file=sys.stderr)
+
+                # Preserve the sequential stream between files. If it ended in
+                # alignment slack, reopen directly at this file instead.
+                if conn is not None:
+                    try:
+                        while pos < offset:
+                            chunk = conn.recv(min(CHUNK, offset - pos))
+                            if not chunk:
+                                raise OSError("image stream ended between files")
+                            pos += len(chunk)
+                            discarded += len(chunk)
+                    except (OSError, EOFError, ftplib.Error):
+                        conn.close()
+                        conn = None
+
+                written = 0
+                failures = 0
                 with open(path, "wb") as out:
-                    remaining = size
-                    while remaining:
-                        chunk = conn.recv(min(CHUNK, remaining))
+                    while written < size:
+                        if conn is None:
+                            target = offset + written
+                            try:
+                                conn, skipped = open_stream_at(
+                                    remote, target, rest_workaround)
+                                pos = target
+                                discarded += skipped
+                                rewound += skipped
+                            except (OSError, EOFError, ftplib.Error) as err:
+                                failure_reason = str(err)
+                                failures += 1
+                                if failures <= STREAM_RETRIES:
+                                    print(f"  warning: {label} could not resume "
+                                          f"{rel} at {target:,}; retry "
+                                          f"{failures}/{STREAM_RETRIES}: {err}",
+                                          file=sys.stderr)
+                                    continue
+                                break
+
+                        try:
+                            chunk = conn.recv(min(CHUNK, size - written))
+                        except (OSError, EOFError) as err:
+                            chunk = b""
+                            failure_reason = str(err)
+                        else:
+                            failure_reason = "unexpected end of stream"
                         if not chunk:
-                            raise IOError(f"transfer ended inside {rel}")
+                            conn.close()
+                            conn = None
+                            failures += 1
+                            if failures <= STREAM_RETRIES:
+                                print(f"  warning: {label} stream ended inside "
+                                      f"{rel} at {written:,}/{size:,}; retry "
+                                      f"{failures}/{STREAM_RETRIES}",
+                                      file=sys.stderr)
+                                continue
+                            break
+
                         out.write(chunk)
-                        remaining -= len(chunk)
+                        written += len(chunk)
                         pos += len(chunk)
                         bar.advance(len(chunk))
+
+                if written == size:
+                    continue
+
+                if conn is not None:
+                    conn.close()
+                    conn = None
+                if loose_source is not None:
+                    host, port, loose_root = loose_source
+                    print(f"  warning: {label} image could not finish {rel}; "
+                          f"trying {loose_root}/{rel}", file=sys.stderr)
+                    ok, reason = recover_from_loose(
+                        host, port, loose_root, rel, path, size,
+                        allow_decrypted=allow_decrypted_fallback)
+                    if ok:
+                        recovered += 1
+                        bar.advance(size - written)
+                        print(f"  recovered {rel} from the loose mount",
+                              file=sys.stderr)
+                        continue
+                else:
+                    reason = failure_reason
+
+                if os.path.exists(path):
+                    os.unlink(path)
+                unresolved.append((rel, reason or failure_reason))
+                print(f"  warning: could not recover {rel}: "
+                      f"{reason or failure_reason}; file omitted", file=sys.stderr)
         finally:
-            remote.finish(conn)
+            if conn is not None:
+                remote.finish(conn)
 
     bar.finish()
-    return len(runs), discarded, rewound
+    return len(runs), discarded, rewound, recovered, unresolved
 
 
 def replace_executables(mount, dest_root, layers, verbose=False):
@@ -599,6 +754,8 @@ def replace_executables(mount, dest_root, layers, verbose=False):
             if size == 0 or not is_executable(rel):
                 continue
             local = os.path.join(dest_root, rel)
+            if os.path.isfile(local) and not elf_truncated(local):
+                continue
             remote = f"{PFSMNT}/{layer}/{rel}"
             if verbose:
                 print(f"  {layer}: {rel}", file=sys.stderr)
@@ -947,9 +1104,11 @@ def dump_dlc(host, port, mount, title, out_dir, ac_mounts, decrypt=True,
                 if layer_rest_workaround is not None:
                     rest_workaround = layer_rest_workaround
             os.makedirs(dest, exist_ok=True)
-            runs, discarded, rewound = extract(
+            runs, discarded, rewound, recovered, unresolved = extract(
                 remote, dest, plan, ac, verbose,
-                rest_workaround=bool(layer_rest_workaround))
+                rest_workaround=bool(layer_rest_workaround),
+                loose_source=(host, port, f"{PFSMNT}/{ac}"),
+                allow_decrypted_fallback=decrypt)
         except Unsupported as err:
             problems.append((ac, f"unsupported image: {err}"))
             remote.close()
@@ -962,16 +1121,26 @@ def dump_dlc(host, port, mount, title, out_dir, ac_mounts, decrypt=True,
             remote.close()
 
         note = f", {rewound:,} rewound" if rewound else ""
+        if recovered:
+            note += f", {recovered} recovered from loose mount"
         print(f"  dlc {ac}: {len(plan)} file(s), {runs} run(s), "
               f"{discarded:,} bytes discarded{note}")
 
+        unresolved_paths = {rel for rel, _reason in unresolved}
         bad = verify(dest, plan)
-        if bad:
-            problems.append((ac, f"{len(bad)} file(s) did not match the plan"))
+        unexpected = [item for item in bad if item[0] not in unresolved_paths]
+        if unexpected:
+            problems.append((ac, f"{len(unexpected)} file(s) did not match the plan"))
             continue
+        if unresolved:
+            print(f"    warning: {len(unresolved)} file(s) omitted after both "
+                  f"image and loose extraction failed", file=sys.stderr)
 
         if decrypt:
-            replaced, issues = replace_executables(mount, dest, {ac: plan}, verbose)
+            available = [entry for entry in plan
+                         if entry[0] not in unresolved_paths]
+            replaced, issues = replace_executables(
+                mount, dest, {ac: available}, verbose)
             problems += issues
             if replaced:
                 print(f"    decrypted {replaced} executable(s)")
@@ -1095,30 +1264,51 @@ def main():
             print("  note: FTP server has the REST sign-bit bug; "
                   "applying workaround")
 
-        # The patch goes first so that nothing the base game writes can land on
-        # top of a patched file.
-        for label, remote, layer_plan in (("patch", patch, patch_plan),
-                                          ("app", app, app_plan)):
+        stream_unresolved = []
+        # Patch data is written first, then the base fills everything the patch
+        # did not supersede. Each layer falls back only to its own loose mount.
+        layers = (
+            ("patch", patch, patch_plan, f"{PFSMNT}/{title}-patch0"),
+            ("app", app, app_plan, f"{PFSMNT}/{title}-app0"),
+        )
+        for label, remote, layer_plan, loose_root in layers:
             if not layer_plan:
                 continue
-            runs, discarded, rewound = extract(remote, dest, layer_plan, label,
-                                               args.verbose,
-                                               rest_workaround=rest_bug)
+            runs, discarded, rewound, recovered, unresolved = extract(
+                remote, dest, layer_plan, label, args.verbose,
+                rest_workaround=rest_bug,
+                loose_source=(host, port, loose_root),
+                allow_decrypted_fallback=not args.no_decrypt)
+            stream_unresolved.extend(unresolved)
             note = f", {rewound:,} rewound" if rewound else ""
+            if recovered:
+                note += f", {recovered} recovered from loose mount"
             print(f"  {label}: {len(layer_plan)} file(s), {runs} run(s), "
                   f"{discarded:,} bytes discarded{note}")
 
-        # Checked before the executables are swapped, since the decrypted copies
-        # deliberately no longer match the sizes the image recorded.
+        unresolved_paths = {rel for rel, _reason in stream_unresolved}
         bad = verify(dest, patch_plan + app_plan)
-        if bad:
-            print(f"{len(bad)} file(s) did not match the plan:", file=sys.stderr)
-            for rel, expected, actual in bad[:20]:
+        unexpected = [item for item in bad if item[0] not in unresolved_paths]
+        if unexpected:
+            print(f"{len(unexpected)} file(s) did not match the plan:",
+                  file=sys.stderr)
+            for rel, expected, actual in unexpected[:20]:
                 got = "missing" if actual is None else f"{actual} bytes"
                 print(f"  {rel}: expected {expected} bytes, got {got}",
                       file=sys.stderr)
             return 1
-        print(f"  verified {len(patch_plan) + len(app_plan)} file(s) against the plan")
+        if stream_unresolved:
+            print(f"  warning: {len(stream_unresolved)} file(s) omitted after "
+                  f"both image and loose extraction failed", file=sys.stderr)
+        if stream_unresolved:
+            checked_paths = {rel for rel, _expected, _actual in bad}
+            verified = len(patch_plan) + len(app_plan) - len(
+                checked_paths | unresolved_paths)
+            print(f"  verified {verified} of "
+                  f"{len(patch_plan) + len(app_plan)} file(s) against the plan")
+        else:
+            print(f"  verified {len(patch_plan) + len(app_plan)} file(s) "
+                  f"against the plan")
 
         problems = []
         mount = FtpMount(host, port)
@@ -1130,13 +1320,18 @@ def main():
                     print("  warning: the server did not confirm SELF "
                           "decryption; check the executables before building",
                           file=sys.stderr)
+                available_patch = [entry for entry in patch_plan
+                                   if entry[0] not in unresolved_paths]
+                available_app = [entry for entry in app_plan
+                                 if entry[0] not in unresolved_paths]
                 replaced, problems = replace_executables(
-                    mount, dest, {f"{title}-patch0": patch_plan,
-                                  f"{title}-app0": app_plan}, args.verbose)
+                    mount, dest, {f"{title}-patch0": available_patch,
+                                  f"{title}-app0": available_app}, args.verbose)
                 print(f"  decrypted {replaced} executable(s) via the PFS mounts")
                 if replaced:
-                    damaged = [rel for rel, _o, _s in patch_plan + app_plan
-                               if _s > 0 and is_executable(rel)
+                    damaged = [rel for rel, _o, size
+                               in available_patch + available_app
+                               if size > 0 and is_executable(rel)
                                and elf_truncated(os.path.join(dest, rel))]
                     keystone = os.path.join(dest, "sce_sys", "keystone")
                     if keystone_is_generated(keystone):
