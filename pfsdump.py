@@ -21,6 +21,7 @@ entries rather than in the PFS image.
 """
 
 import argparse
+import collections
 import ftplib
 import os
 import re
@@ -84,6 +85,17 @@ STREAM_RETRIES = 2
 
 class Unsupported(Exception):
     """The image uses a PFS feature this reader deliberately does not handle."""
+
+
+# The console returns this in a 550 reply when a path exists in the PFS tree but
+# has no backing data, i.e. content the user chose not to install. It is ENOTSUP
+# (95), distinct from a missing path or a transfer error, and reproducibly so.
+NOT_INSTALLED_CODE = "0x0000005f"
+
+
+def is_not_installed_error(err):
+    """Whether a 550 reply means the file's data was never downloaded."""
+    return isinstance(err, ftplib.error_perm) and NOT_INSTALLED_CODE in str(err)
 
 
 def is_executable(path):
@@ -609,6 +621,49 @@ def open_stream_at(remote, target, rest_workaround):
     return conn, discarded
 
 
+def summarize_skips(skipped, plan):
+    """Collapses skipped paths, folding fully-skipped directories.
+
+    A directory is reported as one line when every planned file under it (at any
+    depth) was skipped; otherwise its skipped files are listed individually.
+    Returns a sorted list of display strings.
+    """
+    skipped = set(skipped)
+    if not skipped:
+        return []
+    planned_in = collections.defaultdict(int)
+    skipped_in = collections.defaultdict(int)
+    for rel, _offset, _size in plan:
+        for parent in _ancestors(rel):
+            planned_in[parent] += 1
+    for rel in skipped:
+        for parent in _ancestors(rel):
+            skipped_in[parent] += 1
+
+    # A directory fully collapses when none of its planned files survived. Take
+    # the highest such directory so nested fully-skipped trees fold into one.
+    collapsed = set()
+    for directory, planned in planned_in.items():
+        if skipped_in.get(directory) == planned:
+            collapsed.add(directory)
+    roots = {d for d in collapsed
+             if not any(parent in collapsed for parent in _ancestors(d))}
+
+    lines = [f"{directory}/ (entire directory, "
+             f"{planned_in[directory]} file(s))" for directory in roots]
+    for rel in skipped:
+        if not any(parent in roots for parent in _ancestors(rel)):
+            lines.append(rel)
+    return sorted(lines)
+
+
+def _ancestors(rel):
+    """Yields each directory prefix of a relative path, deepest last."""
+    parts = rel.split("/")[:-1]
+    for depth in range(1, len(parts) + 1):
+        yield "/".join(parts[:depth])
+
+
 def extract(remote, dest_root, plan, label, verbose=False, progress=True,
             rest_workaround=False, loose_source=None,
             allow_decrypted_fallback=True):
@@ -627,12 +682,13 @@ def extract(remote, dest_root, plan, label, verbose=False, progress=True,
     ordered = sorted((entry for entry in plan if entry[2] > 0),
                      key=lambda entry: entry[1])
     if not ordered:
-        return 0, 0, 0, 0, []
+        return 0, 0, 0, 0, [], []
 
     runs = group_runs(ordered, rest_workaround)
     bar = Progress(sum(size for _rel, _offset, size in ordered), label, progress)
     discarded = rewound = recovered = 0
     unresolved = []
+    skipped_not_installed = []
 
     for run in runs:
         conn = None
@@ -660,6 +716,7 @@ def extract(remote, dest_root, plan, label, verbose=False, progress=True,
 
                 written = 0
                 failures = 0
+                not_installed = False
                 with open(path, "wb") as out:
                     while written < size:
                         if conn is None:
@@ -670,6 +727,22 @@ def extract(remote, dest_root, plan, label, verbose=False, progress=True,
                                 pos = target
                                 discarded += skipped
                                 rewound += skipped
+                            except ftplib.error_perm as err:
+                                # Content the console never downloaded reports
+                                # this at the file's own start. Retrying and the
+                                # loose fallback would only repeat it, so skip.
+                                if written == 0 and is_not_installed_error(err):
+                                    not_installed = True
+                                    break
+                                failure_reason = str(err)
+                                failures += 1
+                                if failures <= STREAM_RETRIES:
+                                    print(f"  warning: {label} could not resume "
+                                          f"{rel} at {target:,}; retry "
+                                          f"{failures}/{STREAM_RETRIES}: {err}",
+                                          file=sys.stderr)
+                                    continue
+                                break
                             except (OSError, EOFError, ftplib.Error) as err:
                                 failure_reason = str(err)
                                 failures += 1
@@ -708,6 +781,13 @@ def extract(remote, dest_root, plan, label, verbose=False, progress=True,
                 if written == size:
                     continue
 
+                # The file left a zero-byte placeholder; drop it either way.
+                if os.path.exists(path):
+                    os.unlink(path)
+                if not_installed:
+                    skipped_not_installed.append(rel)
+                    continue
+
                 if conn is not None:
                     conn.close()
                     conn = None
@@ -727,8 +807,6 @@ def extract(remote, dest_root, plan, label, verbose=False, progress=True,
                 else:
                     reason = failure_reason
 
-                if os.path.exists(path):
-                    os.unlink(path)
                 unresolved.append((rel, reason or failure_reason))
                 print(f"  warning: could not recover {rel}: "
                       f"{reason or failure_reason}; file omitted", file=sys.stderr)
@@ -737,7 +815,7 @@ def extract(remote, dest_root, plan, label, verbose=False, progress=True,
                 remote.finish(conn)
 
     bar.finish()
-    return len(runs), discarded, rewound, recovered, unresolved
+    return len(runs), discarded, rewound, recovered, unresolved, skipped_not_installed
 
 
 def replace_executables(mount, dest_root, layers, verbose=False):
@@ -1086,6 +1164,8 @@ def dump_dlc(host, port, mount, title, out_dir, ac_mounts, decrypt=True,
     """
     root = os.path.join(out_dir, f"{title}-dlc")
     problems = []
+    all_skipped = []
+    skip_total = 0
     done = 0
     for ac in ac_mounts:
         dest = os.path.join(root, ac)
@@ -1104,7 +1184,8 @@ def dump_dlc(host, port, mount, title, out_dir, ac_mounts, decrypt=True,
                 if layer_rest_workaround is not None:
                     rest_workaround = layer_rest_workaround
             os.makedirs(dest, exist_ok=True)
-            runs, discarded, rewound, recovered, unresolved = extract(
+            (runs, discarded, rewound, recovered, unresolved,
+             skipped) = extract(
                 remote, dest, plan, ac, verbose,
                 rest_workaround=bool(layer_rest_workaround),
                 loose_source=(host, port, f"{PFSMNT}/{ac}"),
@@ -1123,10 +1204,16 @@ def dump_dlc(host, port, mount, title, out_dir, ac_mounts, decrypt=True,
         note = f", {rewound:,} rewound" if rewound else ""
         if recovered:
             note += f", {recovered} recovered from loose mount"
+        if skipped:
+            note += f", {len(skipped)} not installed"
+            skip_total += len(skipped)
         print(f"  dlc {ac}: {len(plan)} file(s), {runs} run(s), "
               f"{discarded:,} bytes discarded{note}")
+        for line in summarize_skips(skipped, plan):
+            all_skipped.append(f"{ac}/{line}")
 
-        unresolved_paths = {rel for rel, _reason in unresolved}
+        skipped_paths = set(skipped)
+        unresolved_paths = {rel for rel, _reason in unresolved} | skipped_paths
         bad = verify(dest, plan)
         unexpected = [item for item in bad if item[0] not in unresolved_paths]
         if unexpected:
@@ -1158,7 +1245,7 @@ def dump_dlc(host, port, mount, title, out_dir, ac_mounts, decrypt=True,
         written = write_pkg_sce_sys(entries, dest, verbose)
         print(f"    sce_sys: {written} entries from {pkg_path}")
         done += 1
-    return done, problems
+    return done, problems, all_skipped, skip_total
 
 
 def main():
@@ -1265,28 +1352,38 @@ def main():
                   "applying workaround")
 
         stream_unresolved = []
+        skip_summary = []
+        skip_count = 0
         # Patch data is written first, then the base fills everything the patch
         # did not supersede. Each layer falls back only to its own loose mount.
         layers = (
             ("patch", patch, patch_plan, f"{PFSMNT}/{title}-patch0"),
             ("app", app, app_plan, f"{PFSMNT}/{title}-app0"),
         )
+        skipped_paths = set()
         for label, remote, layer_plan, loose_root in layers:
             if not layer_plan:
                 continue
-            runs, discarded, rewound, recovered, unresolved = extract(
+            (runs, discarded, rewound, recovered, unresolved,
+             skipped) = extract(
                 remote, dest, layer_plan, label, args.verbose,
                 rest_workaround=rest_bug,
                 loose_source=(host, port, loose_root),
                 allow_decrypted_fallback=not args.no_decrypt)
             stream_unresolved.extend(unresolved)
+            skipped_paths.update(skipped)
+            skip_count += len(skipped)
+            for line in summarize_skips(skipped, layer_plan):
+                skip_summary.append(line)
             note = f", {rewound:,} rewound" if rewound else ""
             if recovered:
                 note += f", {recovered} recovered from loose mount"
+            if skipped:
+                note += f", {len(skipped)} not installed"
             print(f"  {label}: {len(layer_plan)} file(s), {runs} run(s), "
                   f"{discarded:,} bytes discarded{note}")
 
-        unresolved_paths = {rel for rel, _reason in stream_unresolved}
+        unresolved_paths = {rel for rel, _reason in stream_unresolved} | skipped_paths
         bad = verify(dest, patch_plan + app_plan)
         unexpected = [item for item in bad if item[0] not in unresolved_paths]
         if unexpected:
@@ -1406,16 +1503,24 @@ def main():
 
             if ac_mounts:
                 print(f"Dumping {title} DLC data ({len(ac_mounts)} add-on(s)):")
-                done, dlc_problems = dump_dlc(
+                done, dlc_problems, dlc_skipped, dlc_skip_count = dump_dlc(
                     host, port, mount, title, args.output_dir, ac_mounts,
                     decrypt=not args.no_decrypt, verbose=args.verbose,
                     rest_workaround=rest_bug)
                 print(f"  {done} of {len(ac_mounts)} add-on(s) dumped")
                 problems += dlc_problems
+                skip_summary.extend(dlc_skipped)
+                skip_count += dlc_skip_count
             elif not args.no_dlc:
                 print(f"No DLC data found for {title}.")
         finally:
             mount.close()
+
+        if skip_summary:
+            print(f"\n{skip_count} uninstalled file(s) skipped "
+                  f"(content not present on the console):")
+            for line in skip_summary:
+                print(f"  {line}")
 
         if problems:
             print(f"{len(problems)} item(s) could not be resolved:",
