@@ -115,20 +115,50 @@ def elf_truncated(path):
 
 
 def reachable(offset):
-    """Whether the server will accept offset in a REST command.
+    """Whether the server will accept this offset in a REST command.
 
-    Its bounds check reads the low 32 bits as a signed int, so any offset whose
-    low word has the top bit set is refused even though the seek itself is
-    64-bit correct.
+    A buggy FTP server reads the low 32 bits as a signed int and refuses any
+    offset whose low word has its top bit set. detect_rest_bug() detects this.
     """
     return (offset & 0xFFFFFFFF) < 0x80000000
 
 
-def transfer_start(offset):
-    """The highest acceptable REST offset from which offset can be reached."""
-    if reachable(offset):
+def transfer_start(offset, rest_workaround):
+    """The highest REST offset from which a transfer will actually reach offset.
+
+    On a buggy server, snap back to the last acceptable offset in the window.
+    On a fixed server, start exactly where we want to.
+    """
+    if not rest_workaround or reachable(offset):
         return offset
     return (offset >> 32 << 32) + 0x7FFFFFFF
+
+
+def detect_rest_bug(host, port, path, image_extent):
+    """Detects servers that reject REST offsets with the int32 sign bit set.
+
+    Returns None when the image is too small to probe or the probe could not
+    establish an answer. The workaround is only enabled after a definite 550 at
+    an offset known to be inside the image.
+    """
+    probe_offset = 0x80000000
+    if image_extent <= probe_offset:
+        return None
+    ftp = ftplib.FTP()
+    try:
+        ftp.connect(host, port, timeout=20)
+        ftp.login("anonymous", "")
+        ftp.voidcmd("TYPE I")
+        conn = ftp.transfercmd(f"RETR {path}", rest=probe_offset)
+        data = conn.recv(4)
+        conn.close()
+        return False if data else None
+    except ftplib.error_perm:
+        return True
+    except ftplib.all_errors:
+        return None
+    finally:
+        close_session(ftp)
 
 
 def close_session(ftp):
@@ -137,15 +167,15 @@ def close_session(ftp):
     A bare socket close leaves the console holding the session, and reconnecting
     often enough during a long dump is a good way to run it out of them.
     """
+    if getattr(ftp, "sock", None) is None:
+        ftp.close()
+        return
     try:
         ftp.quit()
         return
     except ftplib.all_errors:
         pass
-    try:
-        ftp.close()
-    except ftplib.all_errors:
-        pass
+    ftp.close()
 
 
 class FtpFile:
@@ -456,19 +486,19 @@ def build_plan(app_manifest, patch_manifest):
     return patch_plan, app_plan, len(app_manifest) - len(app_plan), recased
 
 
-def group_runs(plan):
+def group_runs(plan, rest_workaround=False):
     """Groups an offset-ordered plan into one entry per worthwhile transfer.
 
-    A split is only taken where the next transfer can actually begin. Splitting
-    at an offset REST refuses would force transfer_start to rewind to the last
-    acceptable one, and that rewind averages a gigabyte, which costs far more
-    than reading through the gap the split was meant to avoid.
+    A split is only taken where the next transfer can actually begin. On a
+    buggy server, splitting at a forbidden offset forces transfer_start to
+    rewind; streaming through the gap is cheaper than the rewind.
     """
     runs, current = [], []
     for entry in plan:
         if current:
             gap = entry[1] - (current[-1][1] + current[-1][2])
-            if gap > RESEEK_THRESHOLD and reachable(entry[1]):
+            start_ok = not rest_workaround or reachable(entry[1])
+            if gap > RESEEK_THRESHOLD and start_ok:
                 runs.append(current)
                 current = []
         current.append(entry)
@@ -502,7 +532,8 @@ class Progress:
                   f"({rate:.0f} MiB/s){' ' * 12}", file=sys.stderr)
 
 
-def extract(remote, dest_root, plan, label, verbose=False, progress=True):
+def extract(remote, dest_root, plan, label, verbose=False, progress=True,
+            rest_workaround=False):
     """Writes every entry in plan, demultiplexing sequential transfers."""
     # Blanked files carry no extent, so they are created rather than streamed.
     for rel, _offset, size in plan:
@@ -514,7 +545,7 @@ def extract(remote, dest_root, plan, label, verbose=False, progress=True):
     ordered = sorted((e for e in plan if e[2] > 0), key=lambda entry: entry[1])
     if not ordered:
         return 0, 0, 0
-    runs = group_runs(ordered)
+    runs = group_runs(ordered, rest_workaround)
     bar = Progress(sum(size for _d, _o, size in ordered), label, progress)
     discarded = rewound = 0
     # This layer's session has been idle since its metadata was read, which for
@@ -522,7 +553,7 @@ def extract(remote, dest_root, plan, label, verbose=False, progress=True):
     remote.renew()
 
     for run in runs:
-        pos = transfer_start(run[0][1])
+        pos = transfer_start(run[0][1], rest_workaround)
         rewound += run[0][1] - pos
         conn = remote.open_at(pos)
         try:
@@ -890,7 +921,7 @@ def ac_nest_path(ac_mount):
 
 
 def dump_dlc(host, port, mount, title, out_dir, ac_mounts, decrypt=True,
-             verbose=False):
+             verbose=False, rest_workaround=False):
     """Streams each add-on's image into <title>-dlc/<content-id>-ac.
 
     Add-ons sit on nothing, so unlike the app tree there is no layer to merge
@@ -904,8 +935,21 @@ def dump_dlc(host, port, mount, title, out_dir, ac_mounts, decrypt=True,
         remote = FtpFile(host, port, ac_nest_path(ac))
         try:
             plan = PfsImage(remote).manifest()
+            layer_rest_workaround = rest_workaround
+            if layer_rest_workaround is None:
+                extent = max((offset + size for _rel, offset, size in plan),
+                             default=0)
+                layer_rest_workaround = detect_rest_bug(
+                    host, port, ac_nest_path(ac), extent)
+                if layer_rest_workaround:
+                    print("    FTP server has the REST sign-bit bug; "
+                          "applying workaround")
+                if layer_rest_workaround is not None:
+                    rest_workaround = layer_rest_workaround
             os.makedirs(dest, exist_ok=True)
-            runs, discarded, rewound = extract(remote, dest, plan, ac, verbose)
+            runs, discarded, rewound = extract(
+                remote, dest, plan, ac, verbose,
+                rest_workaround=bool(layer_rest_workaround))
         except Unsupported as err:
             problems.append((ac, f"unsupported image: {err}"))
             remote.close()
@@ -1034,6 +1078,23 @@ def main():
         dest = os.path.join(args.output_dir, f"{title}-app")
         os.makedirs(dest, exist_ok=True)
 
+        # Probe whichever image reaches furthest into its PFS. A small patch is
+        # not evidence either way because the failing 2 GiB offset lies outside
+        # it. The capability is server-wide, so one conclusive probe covers all
+        # layers.
+        probes = [(nest_path(title, "app0"), app_manifest)]
+        if patch_manifest:
+            probes.append((nest_path(title, "patch0"), patch_manifest))
+        probe_path, probe_manifest = max(
+            probes, key=lambda item: max(
+                (offset + size for _rel, offset, size in item[1]), default=0))
+        probe_extent = max(
+            (offset + size for _rel, offset, size in probe_manifest), default=0)
+        rest_bug = detect_rest_bug(host, port, probe_path, probe_extent)
+        if rest_bug:
+            print("  note: FTP server has the REST sign-bit bug; "
+                  "applying workaround")
+
         # The patch goes first so that nothing the base game writes can land on
         # top of a patched file.
         for label, remote, layer_plan in (("patch", patch, patch_plan),
@@ -1041,7 +1102,8 @@ def main():
             if not layer_plan:
                 continue
             runs, discarded, rewound = extract(remote, dest, layer_plan, label,
-                                               args.verbose)
+                                               args.verbose,
+                                               rest_workaround=rest_bug)
             note = f", {rewound:,} rewound" if rewound else ""
             print(f"  {label}: {len(layer_plan)} file(s), {runs} run(s), "
                   f"{discarded:,} bytes discarded{note}")
@@ -1151,7 +1213,8 @@ def main():
                 print(f"Dumping {title} DLC data ({len(ac_mounts)} add-on(s)):")
                 done, dlc_problems = dump_dlc(
                     host, port, mount, title, args.output_dir, ac_mounts,
-                    decrypt=not args.no_decrypt, verbose=args.verbose)
+                    decrypt=not args.no_decrypt, verbose=args.verbose,
+                    rest_workaround=rest_bug)
                 print(f"  {done} of {len(ac_mounts)} add-on(s) dumped")
                 problems += dlc_problems
             elif not args.no_dlc:

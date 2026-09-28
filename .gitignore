@@ -13,3 +13,5 @@ sfo
 /__pycache__
 /fpkgtmp/
 /.env
+/drakmor
+*.gp5
