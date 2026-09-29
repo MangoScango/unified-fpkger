@@ -16,9 +16,9 @@ Executables are a special case: the PFS image holds the signed, encrypted SELF,
 so each one is re-fetched afterwards through the console's PFS mount, which
 decrypts on the fly.
 
-PS5 titles are detected from the image itself. They have no patch layer and
-carry sce_sys inside the image, so only the app image is streamed and none of
-the PKG, param.sfo, np or trophy handling applies.
+PS5 titles are detected from the image itself. They have no patch layer, so
+only the app image is streamed; sce_sys is then completed from app.pkg's entry
+container, the console's appmeta and its trophy and UDS conf directories.
 """
 
 import argparse
@@ -49,6 +49,11 @@ PS5_SELF_MAGIC = b"\x54\x14\xf5\xee"
 SELF_MAGICS = (SELF_MAGIC, PS5_SELF_MAGIC)
 TRP_MAGIC = b"\xdc\xa2\x4d"
 PKG_MAGIC = 0x7F434E54
+FIH_MAGIC = b"\x7fFIH"
+FIH_CNT_OFFSET = 0x58
+# TROPHY.UCP and uds.ucp share this header, with the file's length as a
+# big-endian u64 at 0x08.
+UCP_MAGIC = b"\xb2\x28\xc6\x0a"
 PKG_ENTRY_SIZE = 32
 PKG_ENTRY_NAMES = 0x200
 PKG_ENTRY_ENCRYPTED = 0x80000000
@@ -70,6 +75,8 @@ PKG_NAMELESS = {
 NPWR_ID = re.compile(rb"NPWR[0-9]{5}_[0-9]{2}")
 
 PFSMNT = "/mnt/sandbox/pfsmnt"
+# Internal storage first, then extended storage.
+PKG_ROOTS = ("/user", "/mnt/ext0/user", "/mnt/ext1/user")
 TITLE_MOUNT = re.compile(r"^([A-Z]{4}[0-9]{5})-app0$")
 # What ks_create produces from an all-zero passcode, so not the retail keystone.
 GENERATED_KEYSTONE = ("294a5ed06db170618f2eed8c424b9d82"
@@ -332,6 +339,22 @@ class FtpMount:
             return []
         return sorted(name.rsplit("/", 1)[-1].rstrip("/")
                       for name in names if name.rstrip("/"))
+
+    def walk(self, path, prefix=""):
+        """Yields (relative path, size) for every file below a remote directory.
+
+        Unreadable directories yield nothing.
+        """
+        try:
+            entries = self._retry(lambda: list(self.ftp.mlsd(path)))
+        except ftplib.all_errors:
+            return
+        for name, facts in sorted(entries):
+            kind = facts.get("type")
+            if kind == "dir":
+                yield from self.walk(f"{path}/{name}", f"{prefix}{name}/")
+            elif kind == "file":
+                yield prefix + name, int(facts.get("size", 0))
 
     def enable_decryption(self):
         """Turns server-side SELF decryption on.
@@ -1013,12 +1036,18 @@ class PkgEntries:
     """
 
     def __init__(self, remote):
-        header = remote.read(0, 0x40)
+        header = remote.read(0, 0x60)
+        # A PS5 package wraps the same entry container in a FIH header, and
+        # every offset inside the container is relative to where it starts.
+        base = 0
+        if header[:4] == FIH_MAGIC:
+            base = struct.unpack_from("<Q", header, FIH_CNT_OFFSET)[0]
+            header = remote.read(base, 0x40)
         magic = struct.unpack_from(">I", header, 0)[0]
         if magic != PKG_MAGIC:
-            raise Unsupported(f"not a PS4 package (magic 0x{magic:08x})")
+            raise Unsupported(f"not a PS4 or PS5 package (magic 0x{magic:08x})")
         count = struct.unpack_from(">I", header, 0x10)[0]
-        table_offset = struct.unpack_from(">I", header, 0x18)[0]
+        table_offset = base + struct.unpack_from(">I", header, 0x18)[0]
 
         table = remote.read(table_offset, count * PKG_ENTRY_SIZE)
         raw = []
@@ -1030,7 +1059,7 @@ class PkgEntries:
         # gives its exact extent.
         span_start = min(row[4] for row in raw if row[5])
         span_end = max(row[4] + row[5] for row in raw if row[5])
-        blob = remote.read(span_start, span_end - span_start)
+        blob = remote.read(base + span_start, span_end - span_start)
 
         names = b""
         for entry_id, _name_offset, _f1, _f2, data_offset, size in raw:
@@ -1093,15 +1122,15 @@ def open_first(host, port, paths):
 
 
 def find_pkg(host, port, title, kind):
-    """Opens the app or patch package. External installs live under /mnt/ext0."""
+    """Opens the app or patch package, wherever the title is installed."""
     return open_first(host, port, [f"{base}/{kind}/{title}/{kind}.pkg"
-                                   for base in ("/user", "/mnt/ext0/user")])
+                                   for base in PKG_ROOTS])
 
 
 def find_ac_pkg(host, port, title, label):
     """Opens an add-on package by its entitlement label."""
     return open_first(host, port, [f"{base}/addcont/{title}/{label}/ac.pkg"
-                                   for base in ("/user", "/mnt/ext0/user")])
+                                   for base in PKG_ROOTS])
 
 
 def discover_title(mount):
@@ -1307,8 +1336,8 @@ def dump_dlc(host, port, mount, title, out_dir, ac_mounts, decrypt=True,
     """Streams each add-on's image into <title>-dlc/<content-id>-ac.
 
     Add-ons sit on nothing, so unlike the app tree there is no layer to merge
-    and no spelling to reconcile. sce_sys_from_pkg is False on PS5, where
-    sce_sys is part of the image itself.
+    and no spelling to reconcile. sce_sys_from_pkg=False skips the ac.pkg
+    step, which has not been worked out for PS5 add-ons.
     """
     root = os.path.join(out_dir, f"{title}-dlc")
     problems = []
@@ -1470,6 +1499,117 @@ def dump_ps4_metadata(host, port, mount, title, dest, has_patch,
     if replaced:
         print(f"  replaced {replaced} encrypted trophy file(s) "
               f"from /user/trophy/conf")
+    return problems
+
+
+def ucp_complete(path):
+    """Whether a file is a plaintext UCP as long as its header says."""
+    try:
+        with open(path, "rb") as handle:
+            header = handle.read(0x10)
+        size = os.path.getsize(path)
+    except OSError:
+        return False
+    return (header[:4] == UCP_MAGIC
+            and struct.unpack_from(">Q", header, 0x08)[0] == size)
+
+
+def dump_ps5_metadata(host, port, mount, title, dest, verbose=False):
+    """Fills in the parts of sce_sys a PS5 image leaves out.
+
+    The image carries only a few sce_sys files; param.json, the artwork and
+    the np and trophy files live in app.pkg's entry container. Those entries
+    fill whatever the image lacks, then the console's appmeta overwrites them
+    because several are encrypted in the package. Trophy and UDS files come
+    from the console's conf directories, the nth set named in npbind.dat
+    becoming trophy<NN>.ucp and uds<NN>.ucp. Returns [(item, reason)].
+    """
+    problems = []
+    sce_sys = os.path.join(dest, "sce_sys")
+    os.makedirs(sce_sys, exist_ok=True)
+    plaintext = set()
+
+    ciphertext = {}
+    pkg, pkg_path = find_pkg(host, port, title, "app")
+    if pkg is None:
+        problems.append(("app.pkg", "not found on the console"))
+    else:
+        try:
+            entries = PkgEntries(pkg)
+        finally:
+            pkg.close()
+        ciphertext = entries.encrypted
+        written = 0
+        for name, data in entries.files.items():
+            path = os.path.join(sce_sys, name)
+            if os.path.exists(path):
+                continue
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if verbose:
+                print(f"  sce_sys/{name}", file=sys.stderr)
+            with open(path, "wb") as out:
+                out.write(data)
+            written += 1
+        print(f"  sce_sys: {written} entr{'y' if written == 1 else 'ies'} "
+              f"from {pkg_path}")
+        if entries.unnamed:
+            # Neither the name table nor the id convention names these, so
+            # there is no sce_sys path to give them.
+            print("    unnamed entries skipped: "
+                  + ", ".join(f"0x{i:x}" for i in entries.unnamed))
+
+    copied = 0
+    for root in (f"/user/appmeta/{title}", f"/system_data/priv/appmeta/{title}"):
+        for rel, _size in mount.walk(root):
+            path = os.path.join(sce_sys, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if mount.try_download(f"{root}/{rel}", path) is None:
+                problems.append((f"sce_sys/{rel}", f"could not copy from {root}"))
+                continue
+            if verbose:
+                print(f"  sce_sys/{rel} from {root}", file=sys.stderr)
+            plaintext.add(rel)
+            copied += 1
+    print(f"  sce_sys: {copied} file(s) from appmeta")
+
+    def npbind(kind):
+        for sub in (kind, "trophy2" if kind == "uds" else "uds"):
+            path = os.path.join(sce_sys, sub, "npbind.dat")
+            if sub + "/npbind.dat" in plaintext:
+                with open(path, "rb") as handle:
+                    return handle.read()
+        return None
+
+    fetched = 0
+    for kind, conf, remote_name, local_fmt in (
+            ("trophy2", "/user/trophy2/nobackup/conf", "TROPHY.UCP",
+             "trophy2/trophy{:02d}.ucp"),
+            ("uds", "/user/np_uds/nobackup/conf", "uds.ucp", "uds/uds{:02d}.ucp")):
+        for index, npwr in enumerate(trophy_set_ids(npbind(kind))):
+            rel = local_fmt.format(index)
+            path = os.path.join(sce_sys, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            got = mount.try_download(f"{conf}/{npwr}/{remote_name}", path)
+            if got is None:
+                if rel in ciphertext:
+                    problems.append((f"sce_sys/{rel}",
+                                     f"{npwr} has no {remote_name} on the console"))
+                continue
+            if not ucp_complete(path):
+                problems.append((f"sce_sys/{rel}",
+                                 f"{npwr}'s {remote_name} is not a complete UCP"))
+                continue
+            if verbose:
+                print(f"  sce_sys/{rel} from {npwr}", file=sys.stderr)
+            plaintext.add(rel)
+            fetched += 1
+    if fetched:
+        print(f"  sce_sys: {fetched} trophy/UDS file(s) from the console's conf")
+
+    for name in sorted(set(ciphertext) - plaintext):
+        problems.append((f"sce_sys/{name}",
+                         "encrypted in the package and no plaintext copy was "
+                         "found on the console"))
     return problems
 
 
@@ -1667,7 +1807,8 @@ def main():
                                  for rel in damaged]
 
             if ps5:
-                print("  sce_sys: part of the image (PS5)")
+                problems += dump_ps5_metadata(
+                    host, port, mount, title, dest, args.verbose)
             else:
                 problems += dump_ps4_metadata(
                     host, port, mount, title, dest, bool(patch_manifest),
