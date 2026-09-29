@@ -59,8 +59,7 @@ COPY --from=deps /out-sfo      /opt/fpkger/sfo
 COPY --from=deps /out-pkgtools /opt/fpkger/PS4_Fake_PKG_Tools_3
 # ftpdump takes sfo from its own directory when sfo_path is unset, so they ship
 # side by side.
-COPY build-fpkg.sh dump-build.sh ftpdump.sh make_fself.py \
-     pkg-set-appver.py pkgsig.py backport-sdk.py ps4elf.py pfsdump.py \
+COPY *.sh *.py 
      /opt/fpkger/
 # The firmware dumps these are derived from are far too large to ship, so the
 # tables travel with the image instead. build-export-db.py regenerates them and
@@ -68,6 +67,7 @@ COPY build-fpkg.sh dump-build.sh ftpdump.sh make_fself.py \
 COPY docs/fw-levels.csv docs/fw-exports.csv docs/fw-export-gaps.csv \
      /opt/fpkger/docs/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY /drakmor /opt/fpkger/drakmor
 
 # 0x3681B is the JZ guarding orbis-pub-cmd's "app volume must carry
 # APP_VER == 01.00" test (VA 0x43741B). EB makes it unconditional, letting a
