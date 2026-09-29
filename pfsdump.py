@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dumps a PS4 title's app+patch tree by streaming the console's PFS images.
+"""Dumps a PS4 or PS5 title's tree by streaming the console's PFS images.
 
 The console exposes each layer's decrypted inner PFS image at
 /mnt/sandbox/pfsmnt/<title>-{app0,patch0}-nest/pfs_image.dat. Rather than
@@ -16,8 +16,9 @@ Executables are a special case: the PFS image holds the signed, encrypted SELF,
 so each one is re-fetched afterwards through the console's PFS mount, which
 decrypts on the fly.
 
-Not yet handled, and still ftpdump.sh's job: sce_sys, which lives in the PKG
-entries rather than in the PFS image.
+PS5 titles are detected from the image itself. They have no patch layer and
+carry sce_sys inside the image, so only the app image is streamed and none of
+the PKG, param.sfo, np or trophy handling applies.
 """
 
 import argparse
@@ -44,6 +45,8 @@ INODE_MODE_DIR = 0x4000
 
 ELF_MAGIC = b"\x7fELF"
 SELF_MAGIC = b"\x4f\x15\x3d\x1d"
+PS5_SELF_MAGIC = b"\x54\x14\xf5\xee"
+SELF_MAGICS = (SELF_MAGIC, PS5_SELF_MAGIC)
 TRP_MAGIC = b"\xdc\xa2\x4d"
 PKG_MAGIC = 0x7F434E54
 PKG_ENTRY_SIZE = 32
@@ -81,6 +84,15 @@ EXECUTABLE_NAMES = ("eboot.bin",)
 RESEEK_THRESHOLD = 8 << 20
 CHUNK = 1 << 20
 STREAM_RETRIES = 2
+
+# How far back from the end of a PS5 image to look for its superblock. The
+# metadata after it is the inode table plus directories, a few MiB on the titles
+# seen so far; this leaves room for titles with millions of files.
+V2_SUPERBLOCK_SCAN_LIMIT = 2 << 30
+V2_SCAN_CHUNK = 8 << 20
+# Directories spread wider than this are fetched one by one instead of in a
+# single read covering all of them.
+DIRECTORY_SPAN_LIMIT = 256 << 20
 
 
 class Unsupported(Exception):
@@ -234,6 +246,21 @@ class FtpFile:
         """Starts a fresh session, for when this one has been idle a long time."""
         self._connect()
 
+    def size(self):
+        """The file's size from a listing of its directory, or None.
+
+        MLSD is the one source every server tested gets right; SIZE wraps on
+        PS4 and MLST reports the wrong entry on PS5.
+        """
+        parent, _, name = self.path.rpartition("/")
+        try:
+            for entry, facts in self.ftp.mlsd(parent or "/"):
+                if entry == name and "size" in facts:
+                    return int(facts["size"])
+        except ftplib.all_errors:
+            return None
+        return None
+
     def finish(self, conn):
         # Transfers are abandoned partway through, which leaves the control
         # connection out of step; reconnecting beats negotiating an abort.
@@ -269,6 +296,7 @@ class FtpMount:
     def __init__(self, host, port, timeout=60):
         self.host, self.port, self.timeout = host, port, timeout
         self.ftp = None
+        self.decrypting = False
         self._connect()
 
     def _connect(self):
@@ -277,6 +305,10 @@ class FtpMount:
         self.ftp.connect(self.host, self.port, timeout=self.timeout)
         self.ftp.login("anonymous", "")
         self.ftp.voidcmd("TYPE I")
+        # The PS5 server keeps SELF mode per session, so a reconnect would
+        # otherwise quietly start handing out encrypted executables.
+        if self.decrypting:
+            self._drive_toggle(self.decrypt_verb)
 
     def _retry(self, action):
         """Runs action, once more on a fresh connection if the old one died.
@@ -302,21 +334,34 @@ class FtpMount:
                       for name in names if name.rstrip("/"))
 
     def enable_decryption(self):
-        """Turns server-side SELF decryption on. DECRYPT toggles, so this reads
-        the state back and sends it again if the first reply reported it off.
+        """Turns server-side SELF decryption on.
 
-        Returns False when the server has no DECRYPT command, which may mean it
-        always decrypts or that it never does.
+        The PS4 server calls this DECRYPT and the PS5 one SELF; both toggle, so
+        the reply is read back and the command sent again if it reported off.
+        Returns False when neither command confirms decryption, which may mean
+        the server always decrypts or that it never does.
         """
+        for verb in ("DECRYPT", "SELF"):
+            state = self._drive_toggle(verb)
+            if state is None:
+                continue
+            if state:
+                self.decrypt_verb = verb
+                self.decrypting = True
+            return state
+        return False
+
+    def _drive_toggle(self, verb):
+        """Sends verb until its reply reports enabled. None if unrecognised."""
         for _attempt in (1, 2):
             try:
-                reply = self.ftp.sendcmd("DECRYPT")
+                reply = self.ftp.sendcmd(verb).lower()
             except ftplib.all_errors:
-                return False
-            if "decryption enabled" in reply:
+                return None
+            if "enabled" in reply:
                 return True
-            if "decryption disabled" not in reply:
-                return False
+            if "disabled" not in reply:
+                return None
         return False
 
     def size(self, remote):
@@ -364,27 +409,87 @@ class FtpMount:
 
 
 class PfsImage:
-    """The directory tree and data extents of an unsigned, decrypted PFS image."""
+    """The directory tree and data extents of an unsigned, decrypted PFS image.
+
+    Handles both layouts the consoles mount. PS4 images (version 1) start with
+    the superblock and address data through per-inode block lists. PS5 images
+    (version 2) put file data first and the superblock near the end, and each
+    inode gives its data as one contiguous byte range.
+
+    self.inodes holds (mode, size, offset, span, flags), with offset and span in
+    bytes; span is how much of the image the inode's data occupies.
+    """
 
     def __init__(self, remote):
         self.remote = remote
-        self._read_superblock()
-        self._read_inodes()
-        self._read_directory_blocks()
-
-    def _read_superblock(self):
-        hdr = self.remote.read(0, 0x400)
+        self._dir_cache = {}
+        hdr = remote.read(0, 0x400)
         version, magic = struct.unpack_from("<qq", hdr, 0)
-        if version != 1 or magic != PFS_MAGIC:
-            raise Unsupported(f"not a PFS superblock (version {version}, magic {magic})")
+        if version == 1 and magic == PFS_MAGIC:
+            self.version = 1
+            self.image_size = None
+            self._load(hdr, 0)
+        else:
+            self.version = 2
+            self.image_size = remote.size()
+            if self.image_size is None:
+                raise Unsupported("no PFS superblock at offset 0 and the "
+                                  "image size is unknown, so the tail cannot "
+                                  "be searched")
+            self._load_from_tail()
+
+    def _load_from_tail(self):
+        """Finds the version 2 superblock by searching back from the end.
+
+        Candidates are tried highest first and must survive a full metadata
+        load, which rejects a chance match inside file data.
+        """
+        needle = struct.pack("<qq", 2, PFS_MAGIC)
+        end = self.image_size
+        floor = max(0, end - V2_SUPERBLOCK_SCAN_LIMIT)
+        reasons = []
+        while end > floor:
+            start = max(floor, end - V2_SCAN_CHUNK)
+            # Overlap so a needle straddling two chunks is still seen.
+            chunk = self.remote.read(start, min(end + len(needle), self.image_size)
+                                     - start)
+            # Matches starting at or past end were tried with the previous chunk.
+            hit = min(len(chunk), end - start + len(needle) - 1)
+            while True:
+                hit = chunk.rfind(needle, 0, hit)
+                if hit < 0:
+                    break
+                at = start + hit
+                if at + 0x400 > self.image_size:
+                    continue
+                try:
+                    self._load(self.remote.read(at, 0x400), at)
+                    return
+                except Unsupported as err:
+                    reasons.append(f"{at:,}: {err}")
+            end = start
+        detail = f"; rejected {'; '.join(reasons[:3])}" if reasons else ""
+        raise Unsupported(f"no version 2 superblock in the last "
+                          f"{(self.image_size - floor) >> 20:,} MiB{detail}")
+
+    def _load(self, hdr, base):
+        self._dir_cache = {}
+        self.superblock_offset = base
         self.mode = struct.unpack_from("<H", hdr, 0x1C)[0]
         if self.mode & MODE_ENCRYPTED:
             raise Unsupported("image is encrypted; this reader has no key handling")
         if self.mode & MODE_SIGNED:
             raise Unsupported("image uses signed inodes; only unsigned are handled")
         self.block_size = struct.unpack_from("<I", hdr, 0x20)[0]
+        bs = self.block_size
+        if bs < 0x1000 or bs > 1 << 20 or bs & (bs - 1):
+            raise Unsupported(f"implausible block size {bs}")
         self.inode_count, _ndblock, self.inode_block_count = \
             struct.unpack_from("<qqq", hdr, 0x30)
+        per_block = bs // DINODE_D32_SIZE
+        if not 0 < self.inode_count <= self.inode_block_count * per_block:
+            raise Unsupported(f"{self.inode_count} inodes do not fit in "
+                              f"{self.inode_block_count} block(s)")
 
         # The inode table follows the superblock, past whatever indirect blocks
         # the header's own inode claims.
@@ -392,62 +497,99 @@ class PfsImage:
         indirect = sum(
             1 for i in range(5)
             if struct.unpack_from("<q", hdr, ib_base + i * BLOCK_SIG_SIZE + 32)[0] > 0)
-        self.inode_table_offset = self.block_size * (1 + indirect)
+        self.inode_table_offset = base + bs * (1 + indirect)
+        table_end = self.inode_table_offset + bs * self.inode_block_count
+        if self.image_size is not None and table_end > self.image_size:
+            raise Unsupported("inode table runs past the end of the image")
+
+        self._read_inodes()
+        if not self.inodes[0][0] & INODE_MODE_DIR:
+            raise Unsupported("inode 0 is not a directory")
+        self._read_directory_blocks()
+        self.uroot = next((i for kind, name, i in self.dirents(0)
+                           if kind == DIRENT_DIR and name == "uroot"), None)
+        if self.uroot is None:
+            raise Unsupported("image has no uroot directory")
 
     def _read_inodes(self):
+        bs = self.block_size
         table = self.remote.read(self.inode_table_offset,
-                                 self.block_size * self.inode_block_count)
-        per_block = self.block_size // DINODE_D32_SIZE
+                                 bs * self.inode_block_count)
+        per_block = bs // DINODE_D32_SIZE
         self.inodes = []
         for block in range(self.inode_block_count):
             for slot in range(per_block):
                 if len(self.inodes) >= self.inode_count:
                     break
-                off = block * self.block_size + slot * DINODE_D32_SIZE
+                off = block * bs + slot * DINODE_D32_SIZE
                 mode = struct.unpack_from("<H", table, off)[0]
                 flags = struct.unpack_from("<I", table, off + 0x04)[0]
                 size = struct.unpack_from("<q", table, off + 0x08)[0]
+                index = len(self.inodes)
+                if self.version == 2:
+                    offset = struct.unpack_from("<Q", table, off + 0x60)[0]
+                    self.inodes.append((mode, size, offset, size, flags))
+                    continue
                 blocks = struct.unpack_from("<I", table, off + 0x60)[0]
                 direct = struct.unpack_from("<12i", table, off + 0x64)
-                index = len(self.inodes)
                 if flags & INODE_COMPRESSED:
                     raise Unsupported(f"inode {index} is PFSC-compressed")
                 if not mode & INODE_MODE_DIR and blocks > 1 and direct[1] != -1:
                     raise Unsupported(f"inode {index} has a non-contiguous block list")
-                self.inodes.append((mode, size, blocks, direct[0]))
+                self.inodes.append((mode, size, direct[0] * bs,
+                                    max(blocks, 1) * bs, flags))
 
     def _read_directory_blocks(self):
-        extents = [(start, start + max(blocks, 1))
-                   for mode, _size, blocks, start in self.inodes
-                   if mode & INODE_MODE_DIR]
-        self.dir_first = min(start for start, _end in extents)
-        last = max(end for _start, end in extents)
-        self.dir_blocks = self.remote.read(
-            self.dir_first * self.block_size,
-            (last - self.dir_first) * self.block_size)
+        """Reads every directory's data in one transfer when that is cheap.
+
+        The directories normally sit together, but nothing requires it; a
+        spread-out image is read one directory at a time instead.
+        """
+        extents = [(offset, offset + span)
+                   for mode, _size, offset, span, _flags in self.inodes
+                   if mode & INODE_MODE_DIR and span > 0]
+        if self.image_size is not None:
+            extents = [(lo, hi) for lo, hi in extents if hi <= self.image_size]
+        if not extents:
+            raise Unsupported("image has no readable directories")
+        self.dir_first = min(lo for lo, _hi in extents)
+        last = max(hi for _lo, hi in extents)
+        if last - self.dir_first <= DIRECTORY_SPAN_LIMIT:
+            self.dir_blocks = self.remote.read(self.dir_first, last - self.dir_first)
+        else:
+            self.dir_blocks = None
+
+    def _directory_data(self, index):
+        mode, _size, offset, span, _flags = self.inodes[index]
+        if not mode & INODE_MODE_DIR:
+            raise Unsupported(f"inode {index} is listed as a directory but is not one")
+        if self.image_size is not None and offset + span > self.image_size:
+            raise Unsupported(f"directory inode {index} lies outside the image")
+        if self.dir_blocks is not None:
+            at = offset - self.dir_first
+            if 0 <= at and at + span <= len(self.dir_blocks):
+                return self.dir_blocks[at:at + span]
+        if index not in self._dir_cache:
+            self._dir_cache[index] = self.remote.read(offset, span)
+        return self._dir_cache[index]
 
     def dirents(self, index):
-        _mode, _size, blocks, start = self.inodes[index]
-        for block in range(start, start + max(blocks, 1)):
-            base = (block - self.dir_first) * self.block_size
-            pos = 0
-            while pos < self.block_size:
+        data = self._directory_data(index)
+        bs = self.block_size
+        for base in range(0, len(data), bs):
+            end = min(base + bs, len(data))
+            pos = base
+            while pos + 16 <= end:
                 inode, kind, name_len, ent_size = struct.unpack_from(
-                    "<IiiI", self.dir_blocks, base + pos)
+                    "<IiiI", data, pos)
                 if ent_size == 0:
                     break
-                raw = self.dir_blocks[base + pos + 16:base + pos + 16 + name_len]
-                yield kind, raw.split(b"\0")[0].decode("ascii"), inode
+                raw = data[pos + 16:pos + 16 + name_len]
+                yield kind, raw.split(b"\0")[0].decode("utf-8"), inode
                 pos += ent_size
 
     def manifest(self):
         """Returns [(path, offset, size)] for every file below uroot."""
-        try:
-            uroot = next(i for kind, name, i in self.dirents(0)
-                         if kind == DIRENT_DIR and name == "uroot")
-        except StopIteration:
-            raise Unsupported("image has no uroot directory") from None
-
         entries = []
 
         def walk(index, prefix):
@@ -455,10 +597,15 @@ class PfsImage:
                 if kind == DIRENT_DIR:
                     walk(child, prefix + name + "/")
                 elif kind == DIRENT_FILE:
-                    _mode, size, _blocks, start = self.inodes[child]
-                    entries.append((prefix + name, start * self.block_size, size))
+                    _mode, size, offset, _span, flags = self.inodes[child]
+                    if flags & INODE_COMPRESSED:
+                        raise Unsupported(f"{prefix + name} is PFSC-compressed")
+                    if (self.image_size is not None
+                            and offset + size > self.image_size):
+                        raise Unsupported(f"{prefix + name} lies outside the image")
+                    entries.append((prefix + name, offset, size))
 
-        walk(uroot, "")
+        walk(self.uroot, "")
         return entries
 
 
@@ -577,7 +724,7 @@ def recover_from_loose(host, port, loose_root, rel, dest, expected_size,
                 else:
                     invalid_reason = "loose mount returned an incomplete ELF"
             else:
-                valid = magic == SELF_MAGIC and written == expected_size
+                valid = magic in SELF_MAGICS and written == expected_size
                 invalid_reason = (
                     f"loose mount returned executable magic {magic.hex()} "
                     f"and {written} of {expected_size} bytes")
@@ -1156,11 +1303,12 @@ def ac_nest_path(ac_mount):
 
 
 def dump_dlc(host, port, mount, title, out_dir, ac_mounts, decrypt=True,
-             verbose=False, rest_workaround=False):
+             verbose=False, rest_workaround=False, sce_sys_from_pkg=True):
     """Streams each add-on's image into <title>-dlc/<content-id>-ac.
 
     Add-ons sit on nothing, so unlike the app tree there is no layer to merge
-    and no spelling to reconcile.
+    and no spelling to reconcile. sce_sys_from_pkg is False on PS5, where
+    sce_sys is part of the image itself.
     """
     root = os.path.join(out_dir, f"{title}-dlc")
     problems = []
@@ -1232,6 +1380,9 @@ def dump_dlc(host, port, mount, title, out_dir, ac_mounts, decrypt=True,
             if replaced:
                 print(f"    decrypted {replaced} executable(s)")
 
+        if not sce_sys_from_pkg:
+            done += 1
+            continue
         label = entitlement_label(ac)
         pkg, pkg_path = find_ac_pkg(host, port, title, label)
         if pkg is None:
@@ -1248,9 +1399,83 @@ def dump_dlc(host, port, mount, title, out_dir, ac_mounts, decrypt=True,
     return done, problems, all_skipped, skip_total
 
 
+def dump_ps4_metadata(host, port, mount, title, dest, has_patch,
+                      verbose=False):
+    """Writes sce_sys from the app and patch PKGs and fixes up the result.
+
+    Covers the merged param.sfo, the np files and the trophy files. Returns
+    [(item, reason)] for whatever could not be resolved.
+    """
+    problems = []
+    # sce_sys comes from the package entries, not the PFS image. The app
+    # goes down first and the patch over it, matching how the layers
+    # supersede each other everywhere else.
+    base_category = None
+    ciphertext = {}
+    for kind in ("app", "patch"):
+        if kind == "patch" and not has_patch:
+            continue
+        pkg, pkg_path = find_pkg(host, port, title, kind)
+        if pkg is None:
+            problems.append((f"{kind}.pkg", "not found on the console"))
+            continue
+        try:
+            entries = PkgEntries(pkg)
+        finally:
+            pkg.close()
+        written = write_pkg_sce_sys(entries, dest, verbose)
+        ciphertext.update(entries.encrypted)
+        print(f"  sce_sys: {written} entr{'y' if written == 1 else 'ies'} "
+              f"from {pkg_path}")
+        if entries.encrypted:
+            listed = ", ".join(
+                f"{n} (key{k})" for n, k in sorted(entries.encrypted.items()))
+            print(f"    encrypted entries written as-is: {listed}")
+        if entries.unnamed:
+            problems.append((
+                f"{kind}.pkg",
+                "unnamed entries skipped: "
+                + ", ".join(f"0x{i:x}" for i in entries.unnamed)))
+        sfo_path = os.path.join(dest, "sce_sys", "param.sfo")
+        if kind == "app":
+            base_category = sfo_query(sfo_path, "category")
+            remaster_type = sfo_query(sfo_path, "remaster_type")
+            if remaster_type:
+                print(f"  param.sfo: clearing remaster flag {remaster_type}")
+                sfo_delete(sfo_path, "remaster_type")
+
+    if has_patch:
+        reason = fix_merged_sfo(sfo_path, base_category or "gd")
+        if reason:
+            problems.append(("sce_sys/param.sfo", reason))
+        else:
+            print(f"  param.sfo: merged, category {base_category or 'gd'}")
+
+    npbind = dump_np_files(mount, title, dest)
+    # These are encrypted in the package, so the appmeta copies are the
+    # only usable ones rather than merely the preferred ones.
+    for name in ("npbind.dat", "nptitle.dat"):
+        if name not in ciphertext:
+            continue
+        staged = os.path.join(dest, "sce_sys", name)
+        if name == "npbind.dat" and npbind is None:
+            problems.append((f"sce_sys/{name}",
+                             "encrypted in the package and absent from "
+                             "appmeta, so it is still ciphertext"))
+        elif not os.path.exists(staged):
+            problems.append((f"sce_sys/{name}", "missing"))
+    replaced, trophy_problems = replace_encrypted_trophies(
+        mount, dest, npbind, verbose)
+    problems += trophy_problems
+    if replaced:
+        print(f"  replaced {replaced} encrypted trophy file(s) "
+              f"from /user/trophy/conf")
+    return problems
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Dump a PS4 title's app+patch tree by streaming its PFS images.")
+        description="Dump a PS4 or PS5 title's tree by streaming its PFS images.")
     parser.add_argument("host", help="console address, optionally HOST:PORT")
     parser.add_argument("title", nargs="?",
                         help="title ID; defaults to the running game")
@@ -1297,9 +1522,13 @@ def main():
     try:
         app_image = PfsImage(app)
         app_manifest = app_image.manifest()
+        # A PS5 update replaces the whole image, so there is no patch layer.
+        ps5 = app_image.version == 2
+        if ps5:
+            print(f"  PS5 image: superblock at {app_image.superblock_offset:,}")
 
         patch_manifest = []
-        if not args.no_patch:
+        if not args.no_patch and not ps5:
             try:
                 patch = FtpFile(host, port, nest_path(title, "patch0"))
                 patch_manifest = PfsImage(patch).manifest()
@@ -1437,76 +1666,19 @@ def main():
                     problems += [(rel, "decrypted executable is truncated")
                                  for rel in damaged]
 
-            # sce_sys comes from the package entries, not the PFS image. The app
-            # goes down first and the patch over it, matching how the layers
-            # supersede each other everywhere else.
-            base_category = None
-            ciphertext = {}
-            for kind in ("app", "patch"):
-                if kind == "patch" and not patch_manifest:
-                    continue
-                pkg, pkg_path = find_pkg(host, port, title, kind)
-                if pkg is None:
-                    problems.append((f"{kind}.pkg", "not found on the console"))
-                    continue
-                try:
-                    entries = PkgEntries(pkg)
-                finally:
-                    pkg.close()
-                written = write_pkg_sce_sys(entries, dest, args.verbose)
-                ciphertext.update(entries.encrypted)
-                print(f"  sce_sys: {written} entr{'y' if written == 1 else 'ies'} "
-                      f"from {pkg_path}")
-                if entries.encrypted:
-                    listed = ", ".join(
-                        f"{n} (key{k})" for n, k in sorted(entries.encrypted.items()))
-                    print(f"    encrypted entries written as-is: {listed}")
-                if entries.unnamed:
-                    problems.append((
-                        f"{kind}.pkg",
-                        "unnamed entries skipped: "
-                        + ", ".join(f"0x{i:x}" for i in entries.unnamed)))
-                sfo_path = os.path.join(dest, "sce_sys", "param.sfo")
-                if kind == "app":
-                    base_category = sfo_query(sfo_path, "category")
-                    remaster_type = sfo_query(sfo_path, "remaster_type")
-                    if remaster_type:
-                        print(f"  param.sfo: clearing remaster flag {remaster_type}")
-                        sfo_delete(sfo_path, "remaster_type")
-
-            if patch_manifest:
-                reason = fix_merged_sfo(sfo_path, base_category or "gd")
-                if reason:
-                    problems.append(("sce_sys/param.sfo", reason))
-                else:
-                    print(f"  param.sfo: merged, category {base_category or 'gd'}")
-
-            npbind = dump_np_files(mount, title, dest)
-            # These are encrypted in the package, so the appmeta copies are the
-            # only usable ones rather than merely the preferred ones.
-            for name in ("npbind.dat", "nptitle.dat"):
-                if name not in ciphertext:
-                    continue
-                staged = os.path.join(dest, "sce_sys", name)
-                if name == "npbind.dat" and npbind is None:
-                    problems.append((f"sce_sys/{name}",
-                                     "encrypted in the package and absent from "
-                                     "appmeta, so it is still ciphertext"))
-                elif not os.path.exists(staged):
-                    problems.append((f"sce_sys/{name}", "missing"))
-            replaced, trophy_problems = replace_encrypted_trophies(
-                mount, dest, npbind, args.verbose)
-            problems += trophy_problems
-            if replaced:
-                print(f"  replaced {replaced} encrypted trophy file(s) "
-                      f"from /user/trophy/conf")
+            if ps5:
+                print("  sce_sys: part of the image (PS5)")
+            else:
+                problems += dump_ps4_metadata(
+                    host, port, mount, title, dest, bool(patch_manifest),
+                    args.verbose)
 
             if ac_mounts:
                 print(f"Dumping {title} DLC data ({len(ac_mounts)} add-on(s)):")
                 done, dlc_problems, dlc_skipped, dlc_skip_count = dump_dlc(
                     host, port, mount, title, args.output_dir, ac_mounts,
                     decrypt=not args.no_decrypt, verbose=args.verbose,
-                    rest_workaround=rest_bug)
+                    rest_workaround=rest_bug, sce_sys_from_pkg=not ps5)
                 print(f"  {done} of {len(ac_mounts)} add-on(s) dumped")
                 problems += dlc_problems
                 skip_summary.extend(dlc_skipped)
