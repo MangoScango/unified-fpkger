@@ -78,6 +78,7 @@ case "${1:-idle}" in
     trap 'exit 0' TERM INT
     sleep infinity & wait $! || true
     exit 0 ;;
+  web)           shift; set -- python3 /opt/fpkger/web/server.py ${@+"$@"} ;;
   bash|sh|shell) shift; set -- bash ${@+"$@"} ;;
   *)             set -- build-fpkg.sh ${@+"$@"} ;;
 esac

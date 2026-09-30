@@ -1,11 +1,17 @@
-# On-demand job (builds, then exits) — use `docker compose run`, passing
-# build-fpkg.sh args after the service name:
+# Web UI, left running:
+#
+#   docker compose up -d        then open http://<server>:8080/
+#
+# One-off terminal jobs still work, with build-fpkg.sh args after the service:
 #
 #   docker compose run --rm fpkger --out /work/out /work/CUSA28863-app
-#   docker compose run --rm fpkger --no-dlc --out /work/out /work/CUSA13632-app
 services:
   fpkger:
-    image: ghcr.io/mangoscango/unified-fpkger:latest 
+    image: ghcr.io/mangoscango/unified-fpkger:latest
+    command: web
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
     # Make sure your workdir has enough space for 2x the game you want to dump/pack
     # SSD is preferable if you can afford it
     working_dir: /work
@@ -16,6 +22,10 @@ services:
       # For Unraid. 99:100 = nobody:users
       PUID: 99
       PGID: 100
+      # The UI can only browse and write under these, colon-separated.
+      WEB_ROOTS: /work:/ps4dumps
+      # Without it, anyone who can reach the port can run dumps and builds.
+      # WEB_PASSWORD: change-me
     volumes:
-      -/mnt/user/cache:/work
-      -/mnt/user/ps4dumps:/ps4dumps
+      - /mnt/user/cache:/work
+      - /mnt/user/ps4dumps:/ps4dumps

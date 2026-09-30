@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1
 #
-#   docker run --rm -e PUID=99 -e PGID=100 -v /mnt/user/ps4dumps:/work \
-#       unified-fpkger --out /work/out /work/CUSA28863-app
+#   Web UI (the default):
+#     docker run -d -p 8080:8080 -e WEB_PASSWORD=... -v /mnt/user/ps4dumps:/work unified-fpkger
+#   One-off build from the terminal:
+#     docker run --rm -e PUID=99 -e PGID=100 -v /mnt/user/ps4dumps:/work \
+#         unified-fpkger --out /work/out /work/CUSA28863-app
 
 FROM debian:trixie-slim AS deps
 
@@ -68,6 +71,7 @@ COPY docs/fw-levels.csv docs/fw-exports.csv docs/fw-export-gaps.csv \
      /opt/fpkger/docs/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY drakmor /opt/fpkger/drakmor
+COPY web /opt/fpkger/web
 
 # 0x3681B is the JZ guarding orbis-pub-cmd's "app volume must carry
 # APP_VER == 01.00" test (VA 0x43741B). EB makes it unconditional, letting a
@@ -79,6 +83,7 @@ RUN off=$((0x3681B)) \
        | dd of="$ORBIS_PUB_CMD" bs=1 seek=$off conv=notrunc status=none
 
 RUN chmod +x /opt/fpkger/build-fpkg.sh /opt/fpkger/dump-build.sh \
+        /opt/fpkger/build-ps5.sh \
         /opt/fpkger/ftpdump.sh /opt/fpkger/pkg-set-appver.py \
         /opt/fpkger/pfsdump.py /opt/fpkger/sfo \
         /usr/local/bin/entrypoint.sh \
@@ -95,5 +100,6 @@ RUN chmod +x /opt/fpkger/build-fpkg.sh /opt/fpkger/dump-build.sh \
 RUN printf '%s\n' '[ -f /tmp/fpkger-env.sh ] && . /tmp/fpkger-env.sh' >> /etc/bash.bashrc
 
 WORKDIR /work
+EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["idle"]
+CMD ["web"]

@@ -14,3 +14,4 @@ sfo
 /fpkgtmp/
 /.env
 *.gp5
+*.pyc
