@@ -14,6 +14,8 @@ Configuration comes from the environment, or a .env beside the tools:
                 (default: the working directory)
   WEB_PASSWORD  when set, every request needs HTTP basic auth with it
   WEB_LOG_DIR   where job logs go (default <first root>/fpkger-logs)
+  SCAN_DIR      folder the Build tab scans for dumps (default: DUMP_DIR)
+  SCAN_DEPTH    how many folders down that scan looks (default 3)
 """
 
 import base64
@@ -45,6 +47,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.environ.get("FPKGER_DIR") or os.path.dirname(HERE)
 sys.path.insert(0, TOOLS)
 import pfsdump  # noqa: E402
+
+sys.path.insert(0, HERE)
+import dumpscan  # noqa: E402
 
 PFSDUMP = os.path.join(TOOLS, "pfsdump.py")
 FTPDUMP = os.environ.get("FTPDUMP") or os.path.join(TOOLS, "ftpdump.sh")
@@ -481,11 +486,21 @@ def build_step(job, spec, src, platform):
                           ("update_dir", "--update"), ("dlc_dir", "--dlc")):
             if opts.get(key):
                 argv += [flag, opts[key]]
-        if opts["no_update"]:
-            argv.append("--no-update")
-        if opts["no_dlc"]:
-            argv.append("--no-dlc")
-        argv += ["--out", out_dir, src]
+        layers = spec.get("layers")
+        if layers is not None:
+            # From a scan: every layer is named, so build-fpkg's sibling
+            # lookup is turned off. Named add-ons still build under --no-dlc,
+            # which only stops it looking for a -dlc folder.
+            if not layers["update"]:
+                argv.append("--no-update")
+            argv += ["--no-dlc", "--out", out_dir]
+            argv += [p for p in (layers["base"], layers["update"], *layers["addons"]) if p]
+        else:
+            if opts["no_update"]:
+                argv.append("--no-update")
+            if opts["no_dlc"]:
+                argv.append("--no-dlc")
+            argv += ["--out", out_dir, src]
     else:
         opts = spec["ps5"]
         package = os.path.join(out_dir, ps5_package_name(src, opts["name"]) + ".pkg")
@@ -667,6 +682,107 @@ def build_job(kind, params):
     return Job(kind, spec, summary)
 
 
+# Options that name one title's files or identity, so cannot be shared.
+PER_TITLE_OPTIONS = {
+    "content_id": "content ID override", "ps2_tid": "PS2 serial override",
+    "base_pkg": "existing base package", "ps5_name": "package name",
+    "reference_pkg": "reference package",
+}
+MAX_BATCH = 200
+SCAN_DEPTH = int(setting("SCAN_DEPTH", "4"))
+SCAN_LIMIT = 2000
+ICON_MAX_BYTES = 8 << 20
+
+
+def scanned_tree(path, label, platform, role, title_id=None):
+    """A folder the scan offered, re-read here: the page's word is not trusted."""
+    real = resolve_path(path, label)
+    meta = dumpscan.read_meta(real)
+    if meta is None:
+        raise BadRequest(f"{label} has no sce_sys/param.sfo or param.json: {real}")
+    if meta["platform"] != platform or meta["role"] != role:
+        raise BadRequest(f"{label} is a {meta['platform'].upper()} {meta['kind']}, "
+                         f"not a {platform.upper()} {role}: {real}")
+    if title_id and meta["title_id"] and meta["title_id"] != title_id:
+        raise BadRequest(f"{label} is for {meta['title_id']}, not {title_id}: {real}")
+    return meta
+
+
+def unit_layers(source, params):
+    """(platform, layers, title) for one selected scan unit.
+
+    layers is {"base", "update", "addons"}: folders handed to build-fpkg by
+    name, so it builds what the param files say rather than guessing siblings.
+    """
+    if not isinstance(source, dict):
+        raise BadRequest("each source must be an object")
+    base, update = source.get("base") or None, source.get("update") or None
+    addons = source.get("addons") or []
+    if not isinstance(addons, list) or not all(isinstance(a, str) for a in addons):
+        raise BadRequest("addons must be a list of folders")
+    if not all(isinstance(p, (str, type(None))) for p in (base, update)):
+        raise BadRequest("base and update must be folders")
+    if base and os.path.isfile(os.path.join(resolve_path(base, "base dump"),
+                                            "sce_sys", "param.json")):
+        meta = scanned_tree(base, "dump", "ps5", "base")
+        if update or addons:
+            raise BadRequest("PS5 dumps are built on their own")
+        return "ps5", {"base": meta["path"]}, meta["title"] or meta["title_id"]
+    meta = scanned_tree(base, "base dump", "ps4", "base") if base else None
+    title_id = meta["title_id"] if meta else None
+    if params.get("no_update"):
+        update = None
+    if params.get("build_no_dlc"):
+        addons = []
+    update_meta = scanned_tree(update, "update", "ps4", "update", title_id) if update else None
+    addon_metas = [scanned_tree(a, "add-on", "ps4", "addon", title_id) for a in addons]
+    if not meta and not addon_metas:
+        raise BadRequest("nothing to build: an update needs its base dump")
+    if not meta and update_meta:
+        raise BadRequest("an update cannot be built without its base dump")
+    if len({a["path"] for a in addon_metas}) != len(addon_metas):
+        raise BadRequest("the same add-on is selected twice")
+    lead = meta or addon_metas[0]
+    title = lead["title"] or lead["title_id"] or os.path.basename(lead["path"])
+    return "ps4", {"base": meta["path"] if meta else None,
+                   "update": update_meta["path"] if update_meta else None,
+                   "addons": [a["path"] for a in addon_metas]}, title
+
+
+def build_jobs(params, sources):
+    """One build Job per selected scan unit, all sharing params.
+
+    Every unit is validated before any job exists, so a bad one queues none.
+    """
+    if not isinstance(params, dict):
+        raise BadRequest("params must be an object")
+    if not isinstance(sources, list) or not sources:
+        raise BadRequest("choose at least one dump to build")
+    if len(sources) > MAX_BATCH:
+        raise BadRequest(f"at most {MAX_BATCH} dumps per submission")
+    if len(sources) > 1:
+        shared = [label for key, label in PER_TITLE_OPTIONS.items()
+                  if str(params.get(key) or "").strip()]
+        if shared:
+            raise BadRequest(f"these options are for a single dump: {', '.join(shared)}; "
+                             "clear them or select one dump")
+    units = [unit_layers(s, params) for s in sources]
+    used = [p for _pl, layers, _t in units for p in
+            [layers.get("base"), layers.get("update"), *layers.get("addons", [])] if p]
+    if len(set(used)) != len(used):
+        raise BadRequest("the same folder is part of more than one selected build")
+    out_dir = resolve_path(params.get("out_dir"), "output directory", create=True)
+    options = {p: (ps4_spec(params, with_sources=False) if p == "ps4" else ps5_spec(params))
+               for p in {pl for pl, _l, _t in units}}
+    jobs = []
+    for platform, layers, title in units:
+        spec = {"source_dir": layers["base"] or layers["addons"][0],
+                "platform": platform, "out_dir": out_dir, "layers": layers,
+                platform: options[platform]}
+        jobs.append(Job("build", spec, f"Build {title} ({platform.upper()})"))
+    return jobs
+
+
 # --- queue -----------------------------------------------------------------------
 
 JOBS = {}
@@ -756,6 +872,7 @@ def config():
     defaults = {
         "host": setting("HOST"),
         "dump_dir": usable_path(setting("DUMP_DIR"), ROOTS[0]),
+        "scan_dir": usable_path(setting("SCAN_DIR") or setting("DUMP_DIR"), ROOTS[0]),
         "out_dir": usable_path(setting("PKG_DIR") or setting("OUT_DIR"),
                                os.path.join(ROOTS[0], "out")),
         "mode": setting("MODE", "app-merge"),
@@ -787,12 +904,12 @@ class Handler(BaseHTTPRequestHandler):
         if os.environ.get("WEB_ACCESS_LOG"):
             super().log_message(fmt, *args)
 
-    def _send(self, status, body, content_type="application/json"):
+    def _send(self, status, body, content_type="application/json", cache="no-store"):
         data = body if isinstance(body, bytes) else json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
@@ -836,6 +953,25 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/platform":
                 src = resolve_path(arg("path"), "dump folder")
                 self._send(HTTPStatus.OK, {"platform": source_platform(src)})
+            elif url.path == "/api/scan":
+                root = resolve_path(arg("path"), "scan folder")
+                depth = int_in({"d": arg("depth")}, "d", 0, 8, SCAN_DEPTH, "scan depth")
+                units, found, truncated = dumpscan.scan(root, depth, SCAN_LIMIT)
+                self._send(HTTPStatus.OK, {"path": root, "depth": depth, "units": units,
+                                           "found": found, "truncated": truncated,
+                                           "limit": SCAN_LIMIT})
+            elif url.path == "/api/icon":
+                src = resolve_path(arg("path"), "dump folder")
+                icon = os.path.join(src, "sce_sys", "icon0.png")
+                if not inside_roots(os.path.realpath(icon)) or not os.path.isfile(icon):
+                    return self._error(HTTPStatus.NOT_FOUND, "no icon")
+                if os.path.getsize(icon) > ICON_MAX_BYTES:
+                    return self._error(HTTPStatus.NOT_FOUND, "icon too large")
+                with open(icon, "rb") as handle:
+                    data = handle.read()
+                if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                    return self._error(HTTPStatus.NOT_FOUND, "icon is not a PNG")
+                self._send(HTTPStatus.OK, data, "image/png", "private, max-age=300")
             elif url.path == "/api/titles":
                 host, port = parse_host(arg("host"))
                 try:
@@ -885,6 +1021,11 @@ class Handler(BaseHTTPRequestHandler):
                 job = build_job(body.get("kind"), body.get("params"))
                 submit(job)
                 self._send(HTTPStatus.CREATED, job.summary_dict())
+            elif url.path == "/api/jobs/batch":
+                jobs = build_jobs(body.get("params"), body.get("sources"))
+                for job in jobs:
+                    submit(job)
+                self._send(HTTPStatus.CREATED, {"jobs": [j.summary_dict() for j in jobs]})
             elif m := re.fullmatch(r"/api/jobs/(\d+)/cancel", url.path):
                 job = JOBS.get(int(m.group(1)))
                 if job is None:

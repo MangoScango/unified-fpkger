@@ -65,6 +65,38 @@
   #picker-list button { width: 100%; text-align: left; border: 0; border-radius: 0; background: none;
     border-bottom: 1px solid var(--line); }
   #picker-path { font: 12.5px ui-monospace, monospace; word-break: break-all; }
+  .scan-tools { display: flex; gap: 6px; margin: 10px 0 4px; flex-wrap: wrap; }
+  .scan-tools input[type=search] { flex: 1; min-width: 160px; padding: 6px 8px; font: inherit; color: var(--text);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 4px; }
+  .scan-tools select { width: auto; }
+  #dumps { list-style: none; margin: 6px 0 0; padding: 0; max-height: 55vh; overflow: auto;
+    border: 1px solid var(--line); border-radius: 6px; }
+  #dumps li { border-bottom: 1px solid var(--line); }
+  #dumps li:last-child { border-bottom: 0; }
+  label.dump { display: grid; grid-template-columns: auto 56px 1fr; gap: 10px; align-items: start;
+    margin: 0; padding: 8px 10px; color: var(--text); font-size: 14px; cursor: pointer; }
+  label.dump:hover { background: #252933; }
+  label.dump:has(input:checked) { background: #1f2d44; }
+  label.dump:has(input:disabled) { cursor: default; opacity: .6; }
+  label.dump input { margin-top: 4px; }
+  .dump-icon { width: 56px; height: 56px; border-radius: 6px; object-fit: cover; background: var(--bg);
+    border: 1px solid var(--line); display: grid; place-items: center; color: var(--muted); font-size: 11px; }
+  .dump-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .dump-title { font-weight: 600; overflow-wrap: anywhere; }
+  .tags { display: flex; flex-wrap: wrap; gap: 4px; }
+  .tag { font-size: 11.5px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line); color: var(--muted); }
+  .tag.ps4 { color: #8ab4ff; border-color: #3f6db3; } .tag.ps5 { color: #e6e8ec; border-color: #8a8f9c; }
+  .dump-id, .dump-path { font: 12px ui-monospace, monospace; color: var(--muted); overflow-wrap: anywhere; }
+  .layers { padding: 0 10px 8px calc(10px + 13px + 10px + 56px + 10px); display: flex; flex-direction: column; gap: 4px; }
+  label.layer { display: flex; gap: 8px; align-items: center; margin: 0; }
+  label.layer select { flex: 1; min-width: 0; font-size: 12.5px; padding: 3px 6px; }
+  .layer-head { font-size: 13px; color: var(--muted); }
+  label.check.addon { margin: 2px 0; font-size: 13px; align-items: flex-start; }
+  label.check.addon input { margin-top: 3px; }
+  @media (max-width: 520px) { .layers { padding-left: 10px; } }
+  form[data-kind=build].multi [data-single] { opacity: .6; }
+  form[data-kind=build].multi [data-single]::after { content: "One dump only"; display: block;
+    font-size: 11.5px; color: var(--warn); }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 </style>
 </head>
@@ -94,23 +126,31 @@
   <div role="tabpanel" id="panel-build" aria-labelledby="tab-build" hidden>
     <form data-kind="build">
       <fieldset>
-        <legend>Source</legend>
-        <label>Dump folder (the <code>-app</code> directory)
-          <span class="row"><input type="text" name="source_dir" required>
-          <button type="button" data-browse="source_dir">Browse</button></span></label>
-        <label>Platform
-          <select name="platform">
-            <option value="auto">Detect from the dump</option>
-            <option value="ps4">PS4 (build-fpkg)</option>
-            <option value="ps5">PS5 (build-ps5)</option>
-          </select></label>
-        <p class="hint" data-platform-hint aria-live="polite">Detection picks PS5 when the dump has sce_sys/param.json.</p>
+        <legend>Dumps</legend>
+        <label>Scan folder
+          <span class="row"><input type="text" name="scan_dir" required>
+          <button type="button" data-browse="scan_dir">Browse</button>
+          <button type="button" id="scan-run">Scan</button></span></label>
+        <p class="hint">Finds every <code>sce_sys/param.sfo</code> and <code>param.json</code> a few
+          folders down and groups them by what they declare: each base game collects the updates
+          and add-ons carrying its title ID, wherever they are and whatever they are named.</p>
+        <div class="scan-tools" id="scan-tools" hidden>
+          <input type="search" id="scan-filter" placeholder="Filter by title, ID or folder" aria-label="Filter dumps">
+          <select id="scan-platform" aria-label="Show platform">
+            <option value="">All</option><option value="ps4">PS4</option><option value="ps5">PS5</option>
+          </select>
+          <button type="button" id="scan-all">Select shown</button>
+          <button type="button" id="scan-none">Clear</button>
+        </div>
+        <p class="hint" id="scan-status" role="status" aria-live="polite"></p>
+        <ul id="dumps" aria-label="Dumps found" hidden></ul>
+        <p class="hint" id="scan-selected" aria-live="polite"></p>
       </fieldset>
       <div data-use="t-out"></div>
       <div data-use="t-ps4" data-platform="ps4"></div>
-      <div data-use="t-ps4-sources" data-platform="ps4"></div>
       <div data-use="t-ps5" data-platform="ps5"></div>
-      <button class="primary" type="submit">Start build</button>
+      <p class="hint" id="single-hint" hidden>Options marked "one dump only" are off while several dumps are selected.</p>
+      <button class="primary" type="submit" id="build-submit" disabled>Build selected</button>
       <p class="status" role="status"></p>
     </form>
   </div>
@@ -222,9 +262,9 @@
       <summary>Advanced</summary>
       <label>Backport target SDK (<code>auto</code> or e.g. <code>0x08500001</code>)
         <input type="text" name="sdk"></label>
-      <label>Content ID override <input type="text" name="content_id" autocomplete="off"></label>
-      <label>PS2 serial override (5 digits) <input type="text" name="ps2_tid" inputmode="numeric"></label>
-      <label>Existing base package (build only the backport patch)
+      <label data-single>Content ID override <input type="text" name="content_id" autocomplete="off"></label>
+      <label data-single>PS2 serial override (5 digits) <input type="text" name="ps2_tid" inputmode="numeric"></label>
+      <label data-single>Existing base package (build only the backport patch)
         <span class="row"><input type="text" name="base_pkg">
         <button type="button" data-browse="base_pkg" data-files="pkg">Browse</button></span></label>
       <label>Scratch folder for img_create
@@ -234,23 +274,10 @@
   </fieldset>
 </template>
 
-<template id="t-ps4-sources">
-  <fieldset>
-    <legend>PS4 layers</legend>
-    <p class="hint">Left empty, sibling <code>-patch</code> and <code>-dlc</code> folders are found automatically.</p>
-    <label>Update folder
-      <span class="row"><input type="text" name="update_dir">
-      <button type="button" data-browse="update_dir">Browse</button></span></label>
-    <label>DLC folder
-      <span class="row"><input type="text" name="dlc_dir">
-      <button type="button" data-browse="dlc_dir">Browse</button></span></label>
-  </fieldset>
-</template>
-
 <template id="t-ps5">
   <fieldset>
     <legend>PS5 build (build-ps5)</legend>
-    <label>Package name (default: the content ID)
+    <label data-single>Package name (default: the content ID)
       <input type="text" name="ps5_name" autocomplete="off"></label>
     <div class="grid2">
       <label>Compression level (-4 to 9)
@@ -262,7 +289,7 @@
     <details>
       <summary>Advanced</summary>
       <label>Passcode (32 hex digits) <input type="text" name="passcode" autocomplete="off"></label>
-      <label>Reference package (builds a patch against it)
+      <label data-single>Reference package (builds a patch against it)
         <span class="row"><input type="text" name="reference_pkg">
         <button type="button" data-browse="reference_pkg" data-files="pkg">Browse</button></span></label>
       <label>Temporary folder
@@ -307,6 +334,7 @@ function selectTab(tab, focus = true) {
   }
   if (focus) tab.focus();
   history.replaceState(null, "", "#" + tab.id.slice(4));
+  tab.dispatchEvent(new Event("tabselect"));
 }
 tabs.forEach((tab, i) => {
   tab.addEventListener("click", () => selectTab(tab));
@@ -320,31 +348,216 @@ tabs.forEach((tab, i) => {
 const initial = tabs.find(t => "#" + t.id.slice(4) === location.hash);
 if (initial) selectTab(initial, false);
 
-// The Build tab only shows the options for the chosen platform.
+// The Build tab scans a folder for dumps and builds the ones ticked.
 const buildForm = $("form[data-kind=build]");
-const detectedHint = $("[data-platform-hint]", buildForm);
-let detected = "";
-function syncPlatform() {
-  const chosen = buildForm.elements.platform.value;
-  const p = chosen === "auto" ? detected : chosen;
-  for (const el of $$("[data-platform]", buildForm)) el.hidden = Boolean(p) && el.dataset.platform !== p;
+const scanInput = buildForm.elements.scan_dir;
+const SCAN_KEY = "fpkger.scan_dir";
+let units = [];                 // the last scan's results, one per buildable title
+const selected = new Set();     // ids of ticked units, kept across rescans
+const choices = new Map();      // id -> {update, addons: Set}, kept across rescans
+let scanToken = 0, scanned = false;
+
+const el = (tag, props = {}, ...kids) => {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...kids.filter(k => k !== null && k !== undefined && k !== ""));
+  return node;
+};
+const tag = (text, cls = "") => el("span", {className: "tag " + cls, textContent: text});
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+// Newest update and every add-on, unless already chosen before a rescan.
+function choiceFor(u) {
+  const old = choices.get(u.id);
+  const updates = new Set(u.updates.map(t => t.path));
+  const addons = new Set(u.addons.map(t => t.path));
+  const c = {
+    update: old && (old.update === "" || updates.has(old.update)) ? old.update : (u.updates[0]?.path || ""),
+    addons: old ? new Set([...old.addons].filter(p => addons.has(p))) : addons,
+  };
+  choices.set(u.id, c);
+  return c;
 }
-async function detectPlatform() {
-  const path = buildForm.elements.source_dir.value.trim();
-  detected = "";
-  detectedHint.textContent = "Detection picks PS5 when the dump has sce_sys/param.json.";
-  if (path) {
-    try {
-      detected = (await api("/api/platform?path=" + encodeURIComponent(path))).platform;
-      detectedHint.textContent = `Detected: ${detected.toUpperCase()}.`;
-    } catch (err) {
-      detectedHint.textContent = err.message;
+
+function pick(u, on) {
+  on ? selected.add(u.id) : selected.delete(u.id);
+  const box = $(`#dumps li[data-id="${CSS.escape(u.id)}"] input.pick`);
+  if (box) box.checked = on;
+  syncSelection();
+}
+
+function layerControls(u, c) {
+  if (u.platform !== "ps4" || (!u.updates.length && !u.addons.length)) return null;
+  const wrap = el("div", {className: "layers"});
+  if (u.base && u.updates.length) {
+    const select = el("select", {ariaLabel: `Update for ${u.title || u.title_id}`});
+    for (const t of u.updates) {
+      const bits = [t.version ? "v" + t.version : "update", t.fw ? "FW " + t.fw : "", t.path];
+      select.add(new Option(bits.filter(Boolean).join(" · "), t.path));
     }
+    select.add(new Option("No update", ""));
+    select.value = c.update;
+    select.addEventListener("change", () => { c.update = select.value; pick(u, true); });
+    wrap.append(el("label", {className: "layer"}, "Update", select));
+  } else if (u.updates.length) {
+    wrap.append(el("span", {className: "hint",
+      textContent: "Update found: " + u.updates.map(t => t.path).join(", ")}));
   }
-  syncPlatform();
+  if (u.addons.length) {
+    const group = el("div", {role: "group", className: "addon-list", ariaLabel: `Add-ons for ${u.title || u.title_id}`},
+      el("span", {className: "layer-head", textContent: plural(u.addons.length, "add-on")}));
+    for (const t of u.addons) {
+      const box = el("input", {type: "checkbox", checked: c.addons.has(t.path)});
+      box.addEventListener("change", () => {
+        box.checked ? c.addons.add(t.path) : c.addons.delete(t.path);
+        pick(u, true);
+      });
+      group.append(el("label", {className: "check addon"}, box,
+        el("span", {}, el("span", {textContent: t.title || t.content_id || t.path}),
+          el("span", {className: "dump-path", textContent: " " + t.path}))));
+    }
+    wrap.append(group);
+  }
+  return wrap;
 }
-buildForm.elements.platform.addEventListener("change", syncPlatform);
-buildForm.elements.source_dir.addEventListener("change", detectPlatform);
+
+function unitRow(u) {
+  const c = choiceFor(u);
+  const box = el("input", {type: "checkbox", className: "pick", checked: selected.has(u.id),
+                           disabled: !u.buildable});
+  box.addEventListener("change", () => pick(u, box.checked));
+  const placeholder = () =>
+    el("span", {className: "dump-icon", textContent: u.platform.toUpperCase(), ariaHidden: "true"});
+  let icon = placeholder();
+  if (u.icon) {
+    icon = el("img", {className: "dump-icon", alt: "", loading: "lazy", width: 56, height: 56,
+                      src: "/api/icon?path=" + encodeURIComponent(u.icon)});
+    icon.addEventListener("error", () => icon.replaceWith(placeholder()), {once: true});
+  }
+  const tags = el("span", {className: "tags"},
+    tag(u.platform.toUpperCase(), u.platform), tag(u.kind),
+    u.version ? tag("v" + u.version) : null,
+    u.fw ? tag("FW " + u.fw) : null,
+    u.sdk ? tag("SDK " + u.sdk) : null,
+    u.updates.length ? tag(plural(u.updates.length, "update")) : null,
+    u.addons.length ? tag(plural(u.addons.length, "add-on")) : null);
+  const ids = [u.title_id, u.content_id].filter(Boolean).join(" · ");
+  const body = el("span", {className: "dump-body"},
+    el("span", {className: "dump-title", textContent: u.title || u.title_id || u.id}),
+    tags,
+    ids ? el("span", {className: "dump-id", textContent: ids}) : null,
+    el("span", {className: "dump-path", textContent: u.base ? u.base.path : "No base dump found"}),
+    ...u.notes.map(n => el("span", {className: "hint warn", textContent: n})));
+  const li = el("li", {}, el("label", {className: "dump"}, box, icon, body), layerControls(u, c));
+  li.dataset.id = u.id;
+  li.dataset.platform = u.platform;
+  li.dataset.search = [u.title, u.title_id, u.content_id,
+    ...[u.base, ...u.updates, ...u.addons].filter(Boolean).flatMap(t => [t.path, t.title, t.content_id])]
+    .filter(Boolean).join(" ").toLowerCase();
+  return li;
+}
+
+function applyFilter() {
+  const words = $("#scan-filter").value.toLowerCase().split(/\s+/).filter(Boolean);
+  const platform = $("#scan-platform").value;
+  for (const li of $$("#dumps li[data-id]"))
+    li.hidden = (platform && li.dataset.platform !== platform) ||
+      !words.every(w => li.dataset.search.includes(w));
+}
+
+function chosenUnits() {
+  return units.filter(u => selected.has(u.id));
+}
+
+function syncSelection() {
+  const chosen = chosenUnits();
+  const platforms = new Set(chosen.map(u => u.platform));
+  // Only the fieldsets for the selected dumps' platforms are shown; with
+  // nothing selected, both are, so the options can be set up first.
+  for (const node of $$("[data-platform]", buildForm))
+    node.hidden = platforms.size > 0 && !platforms.has(node.dataset.platform);
+  const multi = chosen.length > 1;
+  buildForm.classList.toggle("multi", multi);
+  $("#single-hint").hidden = !multi;
+  for (const input of $$("[data-single] input, [data-single] button", buildForm)) input.disabled = multi;
+  const hiddenCount = chosen.filter(u => $(`#dumps li[data-id="${CSS.escape(u.id)}"]`)?.hidden).length;
+  $("#scan-selected").textContent = chosen.length
+    ? `${chosen.length} selected` + (hiddenCount ? `, ${hiddenCount} hidden by the filter` : "") + "."
+    : "";
+  const submit = $("#build-submit");
+  submit.disabled = !chosen.length;
+  submit.textContent = chosen.length > 1 ? `Build ${chosen.length} titles` : "Build selected";
+}
+
+// What the server needs to build each selected unit.
+function selectedSources() {
+  return chosenUnits().map(u => {
+    const c = choices.get(u.id);
+    return {base: u.base?.path || null, update: c.update || null, addons: [...c.addons]};
+  });
+}
+
+async function runScan() {
+  const path = scanInput.value.trim();
+  const status = $("#scan-status");
+  if (!path) { status.textContent = "Choose a folder to scan."; return; }
+  const token = ++scanToken;
+  scanned = true;
+  localStorage.setItem(SCAN_KEY, path);
+  status.className = "hint";
+  status.textContent = "Scanning...";
+  $("#scan-run").disabled = true;
+  try {
+    const data = await api("/api/scan?path=" + encodeURIComponent(path));
+    if (token !== scanToken) return;
+    units = data.units;
+    const ids = new Set(units.filter(u => u.buildable).map(u => u.id));
+    for (const id of [...selected]) if (!ids.has(id)) selected.delete(id);
+    const list = $("#dumps");
+    list.replaceChildren(...units.map(unitRow));
+    list.hidden = !units.length;
+    $("#scan-tools").hidden = !units.length;
+    applyFilter();
+    const count = new Map();
+    for (const u of units) count.set(u.platform, (count.get(u.platform) || 0) + 1);
+    const split = [...count].map(([p, n]) => `${n} ${p.toUpperCase()}`).join(", ");
+    status.textContent = units.length
+      ? `${plural(units.length, "title")} (${split}) from ${plural(data.found, "param file")} in ${data.path}.` +
+        (data.truncated ? ` Stopped at ${data.limit}; scan a narrower folder to see the rest.` : "")
+      : `No param.sfo or param.json within ${plural(data.depth, "folder")} of ${data.path}.`;
+  } catch (err) {
+    if (token !== scanToken) return;
+    status.className = "hint error";
+    status.textContent = err.message;
+  } finally {
+    if (token === scanToken) $("#scan-run").disabled = false;
+    syncSelection();
+  }
+}
+
+function ensureScanned() {
+  if (!scanned && scanInput.value.trim()) runScan();
+}
+
+$("#tab-build").addEventListener("tabselect", ensureScanned);
+$("#scan-run").addEventListener("click", runScan);
+scanInput.addEventListener("change", runScan);
+scanInput.addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); runScan(); }
+});
+$("#scan-filter").addEventListener("input", () => { applyFilter(); syncSelection(); });
+$("#scan-platform").addEventListener("change", () => { applyFilter(); syncSelection(); });
+$("#scan-all").addEventListener("click", () => {
+  for (const li of $$("#dumps li[data-id]:not([hidden])")) {
+    const box = $("input.pick", li);
+    if (!box.disabled) { box.checked = true; selected.add(li.dataset.id); }
+  }
+  syncSelection();
+});
+$("#scan-none").addEventListener("click", () => {
+  selected.clear();
+  for (const box of $$("#dumps input.pick")) box.checked = false;
+  syncSelection();
+});
 
 function fill(defaults) {
   for (const form of $$("form")) {
@@ -355,13 +568,16 @@ function fill(defaults) {
       else if (el.tagName !== "SELECT" || [...el.options].some(o => o.value === value)) el.value = value ?? "";
     }
   }
-  syncPlatform();
+  const lastScan = localStorage.getItem(SCAN_KEY);
+  if (lastScan) scanInput.value = lastScan;
+  syncSelection();
 }
 
 function params(form) {
   const out = {};
   for (const el of form.elements) {
-    if (!el.name) continue;
+    // Disabled fields are the per-dump options while several are selected.
+    if (!el.name || el.disabled) continue;
     out[el.name] = el.type === "checkbox" ? el.checked : el.value.trim();
   }
   return out;
@@ -378,15 +594,26 @@ for (const form of $$("form")) {
     status.className = "status";
     status.textContent = "Submitting...";
     try {
-      const job = await api("/api/jobs", {kind: form.dataset.kind, params: p});
-      status.textContent = `Queued job #${job.id}.`;
-      showJob(job.id);
+      if (form === buildForm) {
+        const sources = selectedSources();
+        const {jobs} = await api("/api/jobs/batch", {params: p, sources});
+        const ids = jobs.map(j => "#" + j.id);
+        status.textContent = jobs.length > 1
+          ? `Queued ${jobs.length} jobs, ${ids[0]} to ${ids[ids.length - 1]}.`
+          : `Queued job ${ids[0]}.`;
+        showJob(jobs[0].id);
+      } else {
+        const job = await api("/api/jobs", {kind: form.dataset.kind, params: p});
+        status.textContent = `Queued job #${job.id}.`;
+        showJob(job.id);
+      }
       refreshJobs();
     } catch (err) {
       status.className = "status error";
       status.textContent = err.message;
     } finally {
       button.disabled = false;
+      if (form === buildForm) syncSelection();
     }
   });
 }
@@ -567,6 +794,7 @@ $("#job-cancel").addEventListener("click", async () => {
   } catch (err) {
     $("#roots").textContent = err.message;
   }
+  if (!$("#panel-build").hidden) ensureScanned();
   refreshJobs();
   setInterval(refreshJobs, 5000);
 })();
