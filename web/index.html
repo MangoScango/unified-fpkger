@@ -104,7 +104,7 @@
             <option value="ps4">PS4 (build-fpkg)</option>
             <option value="ps5">PS5 (build-ps5)</option>
           </select></label>
-        <p class="hint">Detection picks PS5 when the dump has <code>sce_sys/param.json</code>.</p>
+        <p class="hint" data-platform-hint aria-live="polite">Detection picks PS5 when the dump has sce_sys/param.json.</p>
       </fieldset>
       <div data-use="t-out"></div>
       <div data-use="t-ps4" data-platform="ps4"></div>
@@ -322,11 +322,29 @@ if (initial) selectTab(initial, false);
 
 // The Build tab only shows the options for the chosen platform.
 const buildForm = $("form[data-kind=build]");
+const detectedHint = $("[data-platform-hint]", buildForm);
+let detected = "";
 function syncPlatform() {
-  const p = buildForm.elements.platform.value;
-  for (const el of $$("[data-platform]", buildForm)) el.hidden = p !== "auto" && el.dataset.platform !== p;
+  const chosen = buildForm.elements.platform.value;
+  const p = chosen === "auto" ? detected : chosen;
+  for (const el of $$("[data-platform]", buildForm)) el.hidden = Boolean(p) && el.dataset.platform !== p;
+}
+async function detectPlatform() {
+  const path = buildForm.elements.source_dir.value.trim();
+  detected = "";
+  detectedHint.textContent = "Detection picks PS5 when the dump has sce_sys/param.json.";
+  if (path) {
+    try {
+      detected = (await api("/api/platform?path=" + encodeURIComponent(path))).platform;
+      detectedHint.textContent = `Detected: ${detected.toUpperCase()}.`;
+    } catch (err) {
+      detectedHint.textContent = err.message;
+    }
+  }
+  syncPlatform();
 }
 buildForm.elements.platform.addEventListener("change", syncPlatform);
+buildForm.elements.source_dir.addEventListener("change", detectPlatform);
 
 function fill(defaults) {
   for (const form of $$("form")) {
@@ -426,7 +444,7 @@ async function pickerLoad(path) {
       const target = data.absolute ? d : join(d);
       entry(d.replace(/\/$/, "") + "/", () => pickerLoad(target));
     }
-    for (const f of data.files) entry(f, () => { pickTarget.value = join(f); picker.close(); });
+    for (const f of data.files) entry(f, () => pickDone(join(f)));
   } catch (err) {
     $("#picker-error").textContent = err.message;
   }
@@ -443,7 +461,12 @@ document.addEventListener("click", e => {
   pickerLoad(pickFiles && start.endsWith(".pkg") ? start.replace(/\/[^/]*$/, "") : start);
 });
 $("#picker-cancel").addEventListener("click", () => picker.close());
-$("#picker-select").addEventListener("click", () => { pickTarget.value = pickPath; picker.close(); });
+function pickDone(value) {
+  pickTarget.value = value;
+  pickTarget.dispatchEvent(new Event("change", {bubbles: true}));
+  picker.close();
+}
+$("#picker-select").addEventListener("click", () => pickDone(pickPath));
 
 // Jobs list and the live log of the selected job.
 let current = null, since = 0, pollTimer = null;

@@ -507,11 +507,12 @@ def execute(job):
         title, _platform = probe(job, spec["host"], spec["port"], spec["title"])
         dump_step(job, spec, title, "pfs")
     elif job.kind == "build":
-        src = spec["source_dir"]
-        platform = spec["platform"] if spec["platform"] != "auto" else source_platform(src)
-        build_step(job, spec, src, platform)
+        build_step(job, spec, spec["source_dir"], spec["platform"])
     else:
         title, platform = probe(job, spec["host"], spec["port"], spec["title"])
+        if platform in spec["option_problems"]:
+            raise JobError(f"{platform.upper()} build options: "
+                           f"{spec['option_problems'][platform]}")
         method = "pfs"
         if platform == "ps4":
             ps4 = spec["ps4"]
@@ -607,18 +608,35 @@ def build_job(kind, params):
         spec["platform"] = params.get("platform") or "auto"
         if spec["platform"] not in ("auto", "ps4", "ps5"):
             raise BadRequest(f"unknown platform: {spec['platform']}")
+        if spec["platform"] == "auto":
+            spec["platform"] = source_platform(spec["source_dir"])
         spec["out_dir"] = resolve_path(params.get("out_dir"), "output directory", create=True)
-        spec["ps4"] = ps4_spec(params, with_sources=True)
-        spec["ps5"] = ps5_spec(params)
-        summary = f"Build {os.path.basename(spec['source_dir'])}"
+        # The form carries both platforms' options; only the one that will
+        # build is checked, so a stale field for the other cannot block it.
+        if spec["platform"] == "ps4":
+            spec["ps4"] = ps4_spec(params, with_sources=True)
+        else:
+            spec["ps5"] = ps5_spec(params)
+        summary = (f"Build {os.path.basename(spec['source_dir'])} "
+                   f"({spec['platform'].upper()})")
     elif kind == "dump-build":
         console_spec(params, spec)
         dump_spec(params, spec)
         spec["out_dir"] = resolve_path(params.get("out_dir"), "output directory", create=True)
         spec["jobs"] = int_in(params, "jobs", 1, 64, 8, "ftp jobs")
         spec["delete_dumps"] = bool(params.get("delete_dumps"))
-        spec["ps4"] = ps4_spec(params, with_sources=False)
-        spec["ps5"] = ps5_spec(params)
+        # The platform is only known once the console is asked, so a problem
+        # with one platform's options is held until then rather than refused.
+        problems = {}
+        for platform, parse in (("ps4", lambda: ps4_spec(params, with_sources=False)),
+                                ("ps5", lambda: ps5_spec(params))):
+            try:
+                spec[platform] = parse()
+            except BadRequest as err:
+                problems[platform] = str(err)
+        if len(problems) == 2:
+            raise BadRequest("; ".join(f"{p.upper()}: {e}" for p, e in problems.items()))
+        spec["option_problems"] = problems
         summary = f"Dump+Build {spec['title'] or 'running game'} from {spec['host']}"
     else:
         raise BadRequest(f"unknown job kind: {kind}")
@@ -699,11 +717,23 @@ def list_dir(path, want_files):
             "roots": ROOTS, "absolute": False}
 
 
+def usable_path(value, fallback=""):
+    """value if the UI could accept it, else fallback.
+
+    A .env written for terminal use can name host paths this container or
+    WEB_ROOTS cannot reach, which would only turn into a refused submission.
+    """
+    if value and os.path.isabs(value) and inside_roots(os.path.realpath(value)):
+        return value
+    return fallback
+
+
 def config():
     defaults = {
         "host": setting("HOST"),
-        "dump_dir": setting("DUMP_DIR", ROOTS[0]),
-        "out_dir": setting("PKG_DIR") or setting("OUT_DIR") or os.path.join(ROOTS[0], "out"),
+        "dump_dir": usable_path(setting("DUMP_DIR"), ROOTS[0]),
+        "out_dir": usable_path(setting("PKG_DIR") or setting("OUT_DIR"),
+                               os.path.join(ROOTS[0], "out")),
         "mode": setting("MODE", "app-merge"),
         "backport": setting("BACKPORT", "1") != "0",
         "sdk": setting("BACKPORT_TARGET_SDK", "auto"),
@@ -712,9 +742,9 @@ def config():
         "build_no_dlc": setting("DLC_MODE") == "none",
         "content_id": setting("CONTENT_ID"),
         "ps2_tid": setting("PS2_TID"),
-        "tmp_dir": setting("IMG_TMP_DIR"),
+        "tmp_dir": usable_path(setting("IMG_TMP_DIR")),
         "jobs": setting("JOBS", "8"),
-        "ps5_temp_dir": setting("LIBPROSPERO_TEMP_DIR"),
+        "ps5_temp_dir": usable_path(setting("LIBPROSPERO_TEMP_DIR")),
         "passcode": "0" * 32,
         "compression_level": "7",
         "chunk_count": "100",
@@ -779,6 +809,9 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/browse":
                 files = arg("files")
                 self._send(HTTPStatus.OK, list_dir(arg("path"), f".{files}" if files else ""))
+            elif url.path == "/api/platform":
+                src = resolve_path(arg("path"), "dump folder")
+                self._send(HTTPStatus.OK, {"platform": source_platform(src)})
             elif url.path == "/api/titles":
                 host, port = parse_host(arg("host"))
                 try:
