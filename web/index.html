@@ -104,7 +104,7 @@
             <option value="ps4">PS4 (build-fpkg)</option>
             <option value="ps5">PS5 (build-ps5)</option>
           </select></label>
-        <p class="hint" data-platform-hint aria-live="polite">Detection reads sce_sys/param.json (PS5) or param.sfo (PS4).</p>
+        <p class="hint" data-platform-hint aria-live="polite">Detection reads sce_sys/param.sfo (PS4), then param.json (PS5).</p>
       </fieldset>
       <div data-use="t-out"></div>
       <div data-use="t-ps4" data-platform="ps4"></div>
@@ -334,13 +334,15 @@ function syncPlatform() {
 async function detectPlatform() {
   const path = buildForm.elements.source_dir.value.trim();
   detected = "";
-  detectedHint.textContent = "Detection reads sce_sys/param.json (PS5) or param.sfo (PS4).";
+  detectedHint.className = "hint";
+  detectedHint.textContent = "Detection reads sce_sys/param.sfo (PS4), then param.json (PS5).";
   if (path) {
     try {
       const result = await api("/api/platform?path=" + encodeURIComponent(path));
       detected = result.platform;
       detectedHint.textContent = `Detected: ${detected.toUpperCase()} (${result.reason}).`;
     } catch (err) {
+      detectedHint.className = "hint warn";
       detectedHint.textContent = err.message;
     }
   }

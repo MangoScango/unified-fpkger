@@ -436,52 +436,35 @@ def dump_step(job, spec, title, method):
     return app_dir
 
 
-TITLE_IN_NAME_RE = re.compile(r"([A-Z]{4})[0-9]{5}")
-LAYER_DIR_RE = re.compile(r"^([A-Z]{4}[0-9]{5})-(app|patch|dlc)$")
-TITLE_PREFIX_PLATFORM = {"PPSA": "ps5", "CUSA": "ps4"}
-
-
-def read_head(path, length):
-    try:
-        with open(path, "rb") as handle:
-            return handle.read(length)
-    except OSError:
-        return b""
-
-
 def tree_platform(tree):
-    """(platform, reason) from a tree's own files, or None if they are silent.
+    """(platform, reason) from a tree's own sce_sys, or None if it has neither.
 
-    param.json is PS5-only and param.sfo PS4-only. An encrypted eboot.bin
-    also tells them apart by its SELF magic; a decrypted one is a plain ELF
-    either way.
+    param.sfo goes first: late PS4 titles can also carry a param.json, but
+    only as a partial copy, whereas no PS5 title carries a param.sfo.
     """
     sce_sys = os.path.join(tree, "sce_sys")
+    try:
+        with open(os.path.join(sce_sys, "param.sfo"), "rb") as handle:
+            if handle.read(4) == b"\0PSF":
+                return "ps4", "sce_sys/param.sfo"
+    except OSError:
+        pass
     if os.path.isfile(os.path.join(sce_sys, "param.json")):
         return "ps5", "sce_sys/param.json"
-    if read_head(os.path.join(sce_sys, "param.sfo"), 4) == b"\0PSF":
-        return "ps4", "sce_sys/param.sfo"
-    magic = read_head(os.path.join(tree, "eboot.bin"), 4)
-    if magic == pfsdump.PS5_SELF_MAGIC:
-        return "ps5", "PS5 SELF eboot.bin"
-    if magic == pfsdump.SELF_MAGIC:
-        return "ps4", "PS4 SELF eboot.bin"
     return None
 
 
 def source_platform(src):
-    """(platform, reason) for a dump folder.
+    """(platform, reason) for a dump folder, or BadRequest.
 
-    The folder's own metadata decides when it has any. PS5 add-on dumps have
-    no param.json and PS4 add-on containers no param.sfo, so after that come
-    the add-ons inside a container, the <TITLE>-app dump beside a <TITLE>-dlc
-    one, and finally the title ID in the folder names. Anything still unknown
-    goes to build-fpkg.sh, which does its own identification of PS4 trees.
+    A PS4 add-on container has no sce_sys of its own, so its add-ons are
+    asked instead. Every real dump has one or the other file, so a folder
+    with neither is refused rather than guessed at: it is an incomplete dump
+    or the wrong folder.
     """
     found = tree_platform(src)
     if found:
         return found
-
     try:
         children = sorted(e.path for e in os.scandir(src) if e.is_dir())
     except OSError:
@@ -490,22 +473,8 @@ def source_platform(src):
         found = tree_platform(child)
         if found:
             return found[0], f"{os.path.basename(child)}/{found[1]}"
-
-    parent = os.path.dirname(src)
-    for layer_dir, base in ((src, parent), (parent, os.path.dirname(parent))):
-        match = LAYER_DIR_RE.match(os.path.basename(layer_dir))
-        if match and match.group(2) == "dlc":
-            app = os.path.join(base, f"{match.group(1)}-app")
-            found = tree_platform(app)
-            if found:
-                return found[0], f"{os.path.basename(app)}/{found[1]}"
-
-    for name in (os.path.basename(src), os.path.basename(parent)):
-        match = TITLE_IN_NAME_RE.search(name)
-        if match and match.group(1) in TITLE_PREFIX_PLATFORM:
-            return (TITLE_PREFIX_PLATFORM[match.group(1)],
-                    f"title ID {match.group(0)} in the folder name")
-    return "ps4", "no PS5 metadata found"
+    raise BadRequest(f"no sce_sys/param.sfo or sce_sys/param.json in {src}; "
+                     "is the dump complete? Choose the platform to build anyway")
 
 
 def ps5_package_name(src, requested):
