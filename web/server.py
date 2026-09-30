@@ -436,15 +436,76 @@ def dump_step(job, spec, title, method):
     return app_dir
 
 
-def source_platform(src):
-    """'ps5' when the tree carries PS5 metadata, else 'ps4'.
+TITLE_IN_NAME_RE = re.compile(r"([A-Z]{4})[0-9]{5}")
+LAYER_DIR_RE = re.compile(r"^([A-Z]{4}[0-9]{5})-(app|patch|dlc)$")
+TITLE_PREFIX_PLATFORM = {"PPSA": "ps5", "CUSA": "ps4"}
 
-    build-fpkg.sh does its own identification of PS4 trees, including add-on
-    containers with no param.sfo at all, so anything not PS5 goes to it.
+
+def read_head(path, length):
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(length)
+    except OSError:
+        return b""
+
+
+def tree_platform(tree):
+    """(platform, reason) from a tree's own files, or None if they are silent.
+
+    param.json is PS5-only and param.sfo PS4-only. An encrypted eboot.bin
+    also tells them apart by its SELF magic; a decrypted one is a plain ELF
+    either way.
     """
-    if os.path.isfile(os.path.join(src, "sce_sys", "param.json")):
-        return "ps5"
-    return "ps4"
+    sce_sys = os.path.join(tree, "sce_sys")
+    if os.path.isfile(os.path.join(sce_sys, "param.json")):
+        return "ps5", "sce_sys/param.json"
+    if read_head(os.path.join(sce_sys, "param.sfo"), 4) == b"\0PSF":
+        return "ps4", "sce_sys/param.sfo"
+    magic = read_head(os.path.join(tree, "eboot.bin"), 4)
+    if magic == pfsdump.PS5_SELF_MAGIC:
+        return "ps5", "PS5 SELF eboot.bin"
+    if magic == pfsdump.SELF_MAGIC:
+        return "ps4", "PS4 SELF eboot.bin"
+    return None
+
+
+def source_platform(src):
+    """(platform, reason) for a dump folder.
+
+    The folder's own metadata decides when it has any. PS5 add-on dumps have
+    no param.json and PS4 add-on containers no param.sfo, so after that come
+    the add-ons inside a container, the <TITLE>-app dump beside a <TITLE>-dlc
+    one, and finally the title ID in the folder names. Anything still unknown
+    goes to build-fpkg.sh, which does its own identification of PS4 trees.
+    """
+    found = tree_platform(src)
+    if found:
+        return found
+
+    try:
+        children = sorted(e.path for e in os.scandir(src) if e.is_dir())
+    except OSError:
+        children = []
+    for child in children:
+        found = tree_platform(child)
+        if found:
+            return found[0], f"{os.path.basename(child)}/{found[1]}"
+
+    parent = os.path.dirname(src)
+    for layer_dir, base in ((src, parent), (parent, os.path.dirname(parent))):
+        match = LAYER_DIR_RE.match(os.path.basename(layer_dir))
+        if match and match.group(2) == "dlc":
+            app = os.path.join(base, f"{match.group(1)}-app")
+            found = tree_platform(app)
+            if found:
+                return found[0], f"{os.path.basename(app)}/{found[1]}"
+
+    for name in (os.path.basename(src), os.path.basename(parent)):
+        match = TITLE_IN_NAME_RE.search(name)
+        if match and match.group(1) in TITLE_PREFIX_PLATFORM:
+            return (TITLE_PREFIX_PLATFORM[match.group(1)],
+                    f"title ID {match.group(0)} in the folder name")
+    return "ps4", "no PS5 metadata found"
 
 
 def ps5_package_name(src, requested):
@@ -633,7 +694,7 @@ def build_job(kind, params):
         if spec["platform"] not in ("auto", "ps4", "ps5"):
             raise BadRequest(f"unknown platform: {spec['platform']}")
         if spec["platform"] == "auto":
-            spec["platform"] = source_platform(spec["source_dir"])
+            spec["platform"], _reason = source_platform(spec["source_dir"])
         spec["out_dir"] = resolve_path(params.get("out_dir"), "output directory", create=True)
         # The form carries both platforms' options; only the one that will
         # build is checked, so a stale field for the other cannot block it.
@@ -835,7 +896,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(HTTPStatus.OK, list_dir(arg("path"), f".{files}" if files else ""))
             elif url.path == "/api/platform":
                 src = resolve_path(arg("path"), "dump folder")
-                self._send(HTTPStatus.OK, {"platform": source_platform(src)})
+                platform, reason = source_platform(src)
+                self._send(HTTPStatus.OK, {"platform": platform, "reason": reason})
             elif url.path == "/api/titles":
                 host, port = parse_host(arg("host"))
                 try:

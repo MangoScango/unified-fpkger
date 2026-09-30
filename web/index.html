@@ -104,7 +104,7 @@
             <option value="ps4">PS4 (build-fpkg)</option>
             <option value="ps5">PS5 (build-ps5)</option>
           </select></label>
-        <p class="hint" data-platform-hint aria-live="polite">Detection picks PS5 when the dump has sce_sys/param.json.</p>
+        <p class="hint" data-platform-hint aria-live="polite">Detection reads sce_sys/param.json (PS5) or param.sfo (PS4).</p>
       </fieldset>
       <div data-use="t-out"></div>
       <div data-use="t-ps4" data-platform="ps4"></div>
@@ -160,6 +160,7 @@
   <p class="hint" id="picker-roots"></p>
   <p class="error" id="picker-error"></p>
   <div class="row" style="justify-content:flex-end">
+    <button type="button" id="picker-refresh" style="margin-right:auto">Refresh</button>
     <button type="button" id="picker-cancel">Cancel</button>
     <button type="button" class="primary" id="picker-select">Use this folder</button>
   </div>
@@ -279,7 +280,8 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 async function api(path, body) {
-  const opts = body === undefined ? {} : {
+  // Directory listings and detection must reflect the disk as it is now.
+  const opts = body === undefined ? {cache: "no-store"} : {
     method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)};
   const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
@@ -332,11 +334,12 @@ function syncPlatform() {
 async function detectPlatform() {
   const path = buildForm.elements.source_dir.value.trim();
   detected = "";
-  detectedHint.textContent = "Detection picks PS5 when the dump has sce_sys/param.json.";
+  detectedHint.textContent = "Detection reads sce_sys/param.json (PS5) or param.sfo (PS4).";
   if (path) {
     try {
-      detected = (await api("/api/platform?path=" + encodeURIComponent(path))).platform;
-      detectedHint.textContent = `Detected: ${detected.toUpperCase()}.`;
+      const result = await api("/api/platform?path=" + encodeURIComponent(path));
+      detected = result.platform;
+      detectedHint.textContent = `Detected: ${detected.toUpperCase()} (${result.reason}).`;
     } catch (err) {
       detectedHint.textContent = err.message;
     }
@@ -461,6 +464,7 @@ document.addEventListener("click", e => {
   pickerLoad(pickFiles && start.endsWith(".pkg") ? start.replace(/\/[^/]*$/, "") : start);
 });
 $("#picker-cancel").addEventListener("click", () => picker.close());
+$("#picker-refresh").addEventListener("click", () => pickerLoad(pickPath || "@roots"));
 function pickDone(value) {
   pickTarget.value = value;
   pickTarget.dispatchEvent(new Event("change", {bubbles: true}));
