@@ -442,7 +442,7 @@ function unitRow(u) {
     u.addons.length ? tag(plural(u.addons.length, "add-on")) : null);
   const ids = [u.title_id, u.content_id].filter(Boolean).join(" · ");
   const body = el("span", {className: "dump-body"},
-    el("span", {className: "dump-title", textContent: u.title || u.title_id || u.id}),
+    el("span", {className: "dump-title", textContent: u.title || u.title_id || u.id.split("/").pop()}),
     tags,
     ids ? el("span", {className: "dump-id", textContent: ids}) : null,
     el("span", {className: "dump-path", textContent: u.base ? u.base.path : "No base dump found"}),

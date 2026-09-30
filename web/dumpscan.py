@@ -140,16 +140,28 @@ def version_key(version):
     return tuple(int(n) for n in re.findall(r"\d+", version or ""))
 
 
-def read_meta(folder):
-    """One tree's identity from its sce_sys/param.json or param.sfo, else None.
+def platform_of(folder):
+    """"ps4", "ps5" or None, from which param file sce_sys holds.
 
-    param.json wins when both exist, matching how the server picks PS5 builds.
+    param.sfo wins: PS4 titles can carry a param.json too (a stub holding only
+    gameIntent, for instance), while PS5 titles carry no param.sfo.
     """
+    sce = os.path.join(folder, "sce_sys")
+    if os.path.isfile(os.path.join(sce, "param.sfo")):
+        return "ps4"
+    if os.path.isfile(os.path.join(sce, "param.json")):
+        return "ps5"
+    return None
+
+
+def read_meta(folder):
+    """One tree's identity from its sce_sys/param.sfo or param.json, else None."""
     sce = os.path.join(folder, "sce_sys")
     json_path, sfo_path = os.path.join(sce, "param.json"), os.path.join(sce, "param.sfo")
     meta = {"path": folder, "icon": os.path.isfile(os.path.join(sce, "icon0.png")),
             "sdk": None, "notes": []}
-    if os.path.isfile(json_path):
+    platform = platform_of(folder)
+    if platform == "ps5":
         param = read_param_json(json_path)
         content_id = param.get("contentId") or None
         category = param.get("applicationCategoryType")
@@ -163,7 +175,7 @@ def read_meta(folder):
             sdk=fw_from_hex(param.get("sdkVersion")))
         if not param:
             meta["notes"].append("param.json could not be read")
-    elif os.path.isfile(sfo_path):
+    elif platform == "ps4":
         sfo = read_sfo(sfo_path)
         content_id = sfo.get("CONTENT_ID") or None
         category = sfo.get("CATEGORY") or None
@@ -178,6 +190,18 @@ def read_meta(folder):
             meta["notes"].append("param.sfo could not be read")
         if meta["role"] == "base" and not os.path.isfile(os.path.join(folder, "eboot.bin")):
             meta["notes"].append("no eboot.bin")
+        # backport-sdk.py's <TITLE>-bp output carries the dump's param.sfo
+        # unmodified next to only the executables it restamped, so its sfo reads
+        # as a base. A dump's sce_sys always holds more than param.sfo.
+        # build-fpkg has no way to build from such a folder yet (--base-pkg
+        # regenerates it from the -app dump), so it is marked and left out.
+        if meta["role"] == "base":
+            try:
+                only_sfo = os.listdir(sce) == ["param.sfo"]
+            except OSError:
+                only_sfo = False
+            if only_sfo:
+                meta["role"] = "backport"
     else:
         return None
     return meta
@@ -201,7 +225,9 @@ def find_trees(root, depth, limit):
         if meta:
             trees.append(meta)
             return
-        if level >= depth:
+        # sce_sys without a param file is nothing buildable; a title's own
+        # folders are not searched for more titles either way.
+        if level >= depth or os.path.isdir(os.path.join(folder, "sce_sys")):
             return
         try:
             children = sorted((e for e in os.scandir(folder)
@@ -227,6 +253,8 @@ def group(trees):
     units = []
     by_title = {}
     for tree in trees:
+        if tree["role"] == "backport":
+            continue
         if tree["platform"] == "ps5":
             units.append(unit(tree, [], []))
         else:

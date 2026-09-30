@@ -447,9 +447,7 @@ def source_platform(src):
     build-fpkg.sh does its own identification of PS4 trees, including add-on
     containers with no param.sfo at all, so anything not PS5 goes to it.
     """
-    if os.path.isfile(os.path.join(src, "sce_sys", "param.json")):
-        return "ps5"
-    return "ps4"
+    return "ps5" if dumpscan.platform_of(src) == "ps5" else "ps4"
 
 
 def ps5_package_name(src, requested):
@@ -722,8 +720,7 @@ def unit_layers(source, params):
         raise BadRequest("addons must be a list of folders")
     if not all(isinstance(p, (str, type(None))) for p in (base, update)):
         raise BadRequest("base and update must be folders")
-    if base and os.path.isfile(os.path.join(resolve_path(base, "base dump"),
-                                            "sce_sys", "param.json")):
+    if base and dumpscan.platform_of(resolve_path(base, "base dump")) == "ps5":
         meta = scanned_tree(base, "dump", "ps5", "base")
         if update or addons:
             raise BadRequest("PS5 dumps are built on their own")
