@@ -11,7 +11,7 @@ Configuration comes from the environment, or a .env beside the tools:
   WEB_BIND      address to listen on (default 0.0.0.0)
   WEB_PORT      port (default 8080)
   WEB_ROOTS     colon-separated directories the UI may read and write
-                (default /work if it exists, else the current directory)
+                (default: the working directory)
   WEB_PASSWORD  when set, every request needs HTTP basic auth with it
   WEB_LOG_DIR   where job logs go (default <first root>/fpkger-logs)
 """
@@ -96,12 +96,36 @@ def setting(key, default=""):
 
 
 def default_roots():
-    fallback = "/work" if os.path.isdir("/work") else os.getcwd()
-    return [os.path.realpath(p) for p in setting("WEB_ROOTS", fallback).split(":") if p]
+    return [os.path.realpath(p)
+            for p in setting("WEB_ROOTS", os.getcwd()).split(":") if p]
 
 
 ROOTS = default_roots()
-LOG_DIR = setting("WEB_LOG_DIR", os.path.join(ROOTS[0], "fpkger-logs"))
+
+
+def pick_log_dir():
+    """WEB_LOG_DIR, else fpkger-logs in the first root this user can write.
+
+    Returns (directory, warning or None).
+    """
+    explicit = setting("WEB_LOG_DIR")
+    candidates = [explicit] if explicit else []
+    candidates += [os.path.join(root, "fpkger-logs") for root in ROOTS]
+    candidates.append(os.path.join(os.path.expanduser("~"), "fpkger-logs"))
+    for path in candidates:
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError:
+            continue
+        if os.access(path, os.W_OK):
+            if path == candidates[0]:
+                return path, None
+            first = explicit or ROOTS[0]
+            return path, f"{first} is not writable as uid {os.getuid()}; logging to {path}"
+    raise SystemExit(f"no writable place for job logs; tried {', '.join(candidates)}")
+
+
+LOG_DIR, LOG_DIR_WARNING = pick_log_dir()
 PASSWORD = setting("WEB_PASSWORD")
 
 
