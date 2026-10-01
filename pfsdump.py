@@ -1606,7 +1606,7 @@ def dump_ps5_metadata(host, port, mount, title, dest, verbose=False):
     if fetched:
         print(f"  sce_sys: {fetched} trophy/UDS file(s) from the console's conf")
 
-    for name in sorted(set(ciphertext) - plaintext):
+    for name in sorted(set(ciphertext) - plaintext) and name not in ['sce_sys/license.dat', 'sce_sys/license.info']:
         problems.append((f"sce_sys/{name}",
                          "encrypted in the package and no plaintext copy was "
                          "found on the console"))
