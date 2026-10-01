@@ -99,6 +99,8 @@ class Module:
     def _read_dynamic(self):
         self.tags = defaultdict(list)
         self.flavour = None
+        self.layout = PROSPERO
+        self.strtab = self.strsz = None
         if self.dynamic is None:
             return
         offset, size = self.dynamic

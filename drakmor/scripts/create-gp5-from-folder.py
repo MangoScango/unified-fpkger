@@ -397,8 +397,8 @@ def read_addcont_mount_level(source: Path) -> int:
 
 
 def normalize_entitlement_key(volume: str, value: str | None) -> str | None:
-    if volume == "al" and value is None:
-        raise ValueError("--entitlement-key is required for --volume al")
+    if volume in {"ac", "al"} and value is None:
+        raise ValueError(f"--entitlement-key is required for --volume {volume}")
     if value is None:
         return None
     if volume not in {"ac", "al"}:
@@ -424,6 +424,10 @@ def write_standard_param(
             raise ValueError(
                 f"{source} is missing required PSAL field(s): {', '.join(missing)}")
         value = {key: value[key] for key in PSAL_PARAM_KEYS}
+    elif volume == "ac":
+        # img_create refuses an add-on param.json carrying either key.
+        value.pop("applicationDrmType", None)
+        value.pop("applicationCategoryType", None)
     else:
         value["applicationDrmType"] = "standard"
         if size_selection is not None:
@@ -1131,7 +1135,7 @@ def main() -> None:
                         help="32-character package passcode (default: 32 zeroes)")
     parser.add_argument(
         "--entitlement-key",
-        help="16-byte hex entitlement key (required for al; optional for ac)")
+        help="16-byte hex entitlement key (required for ac and al)")
     parser.add_argument("--absolute-paths", action="store_true",
                         help="write absolute src_path values instead of paths relative to the GP5")
     parser.add_argument("--keep-sce-sys", action="append", default=[], metavar="PATH",

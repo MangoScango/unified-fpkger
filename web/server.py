@@ -447,7 +447,26 @@ def source_platform(src):
     build-fpkg.sh does its own identification of PS4 trees, including add-on
     containers with no param.sfo at all, so anything not PS5 goes to it.
     """
-    return "ps5" if dumpscan.platform_of(src) == "ps5" else "ps4"
+    platform = dumpscan.platform_of(src)
+    if platform is None and ps5_addons(src):
+        return "ps5"
+    return "ps5" if platform == "ps5" else "ps4"
+
+
+def is_ps5_addon(path):
+    """A PS5 tree with metadata but no eboot.bin, which only an add-on lacks."""
+    return (dumpscan.platform_of(path) == "ps5"
+            and not os.path.isfile(os.path.join(path, "eboot.bin")))
+
+
+def ps5_addons(directory):
+    """The PS5 add-on trees directly inside directory, such as a -dlc dump."""
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return []
+    return [os.path.join(directory, name) for name in names
+            if is_ps5_addon(os.path.join(directory, name))]
 
 
 def ps5_package_name(src, requested):
@@ -471,9 +490,9 @@ def package_mtimes(directory):
 def build_step(job, spec, src, platform):
     out_dir = spec["out_dir"]
     os.makedirs(out_dir, exist_ok=True)
-    before = package_mtimes(out_dir)
-    job.step = f"building {os.path.basename(src)} ({platform.upper()})"
     if platform == "ps4":
+        before = package_mtimes(out_dir)
+        job.step = f"building {os.path.basename(src)} (PS4)"
         opts = spec["ps4"]
         argv = [BUILD_FPKG, "--" + opts["mode"]]
         if not opts["backport"]:
@@ -499,24 +518,48 @@ def build_step(job, spec, src, platform):
             if opts["no_dlc"]:
                 argv.append("--no-dlc")
             argv += ["--out", out_dir, src]
+        run_build(job, argv, out_dir, before, platform)
+        return
+    # A folder of add-ons, as pfsdump writes into <title>-dlc, builds each one.
+    if os.path.isfile(os.path.join(src, "sce_sys", "param.json")):
+        targets = [src]
     else:
-        opts = spec["ps5"]
-        package = os.path.join(out_dir, ps5_package_name(src, opts["name"]) + ".pkg")
-        argv = [BUILD_PS5, "--source-folder", src, "--output-package", package,
-                "--passcode", opts["passcode"],
-                "--compression-level", str(opts["compression_level"]),
-                "--chunk-count", str(opts["chunk_count"])]
+        targets = ps5_addons(src)
+        if not targets:
+            raise JobError(f"{src} is neither a PS5 tree nor a folder of add-ons")
+        job.say(f"{len(targets)} add-on(s) in {os.path.basename(src)}")
+    for target in targets:
+        build_ps5(job, spec, target, out_dir)
+
+
+def build_ps5(job, spec, src, out_dir):
+    opts = spec["ps5"]
+    addon = is_ps5_addon(src)
+    # One name override cannot cover several packages, so add-ons keep theirs.
+    requested = None if addon else opts["name"]
+    package = os.path.join(out_dir, ps5_package_name(src, requested) + ".pkg")
+    job.step = f"building {os.path.basename(src)} (PS5 {'add-on' if addon else 'app'})"
+    argv = [BUILD_PS5, "--source-folder", src, "--output-package", package,
+            "--volume", "ac" if addon else "app",
+            "--passcode", opts["passcode"],
+            "--compression-level", str(opts["compression_level"])]
+    if not addon:
+        argv += ["--chunk-count", str(opts["chunk_count"])]
         if opts.get("reference_pkg"):
             argv += ["--reference-package", opts["reference_pkg"]]
-        if opts.get("temp_dir"):
-            argv += ["--temp-dir", opts["temp_dir"]]
-        if opts["keep_intermediate"]:
-            argv.append("--keep-intermediate")
-        if opts["force"]:
-            argv.append("--force")
+    if opts.get("temp_dir"):
+        argv += ["--temp-dir", opts["temp_dir"]]
+    if opts["keep_intermediate"]:
+        argv.append("--keep-intermediate")
+    if opts["force"]:
+        argv.append("--force")
+    run_build(job, argv, out_dir, package_mtimes(out_dir), "PS5")
+
+
+def run_build(job, argv, out_dir, before, label):
     rc = run(job, argv, cwd=out_dir)
     if rc != 0:
-        raise JobError(f"{platform.upper()} build failed (exit {rc})")
+        raise JobError(f"{label.upper()} build failed (exit {rc})")
     built = sorted(os.path.join(out_dir, name)
                    for name, mtime in package_mtimes(out_dir).items()
                    if before.get(name) != mtime)
@@ -561,6 +604,11 @@ def execute(job):
                 spec["no_patch"] = True
         app_dir = dump_step(job, spec, title, method)
         build_step(job, spec, app_dir, platform)
+        # build-fpkg.sh finds a PS4 title's sibling -dlc itself; build-ps5.sh
+        # takes one tree at a time.
+        dlc_dir = os.path.join(spec["dump_dir"], f"{title}-dlc")
+        if platform == "ps5" and not spec["no_dlc"] and ps5_addons(dlc_dir):
+            build_step(job, spec, dlc_dir, platform)
         if spec["delete_dumps"]:
             delete_dumps(job, spec["dump_dir"], title, spec["out_dir"])
 

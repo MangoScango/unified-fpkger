@@ -86,6 +86,33 @@ DB_DIR = os.environ.get('FW_EXPORT_DB',
                                      'docs'))
 
 
+# libkernel's table of modules a game supplies from /app0/sce_module rather
+# than the firmware, each with the first PS5 firmware whose libkernel lists it.
+# Read from libkernel.sprx in every dumped firmware, 1.00 through 12.70; the
+# table has only grown once. No firmware exports these libraries, so a title
+# that imports one without shipping it is not asking the firmware for anything:
+# Astro (PPSA01325) needs libSceJobManager, ships no copy, and runs, its seven
+# imports left unbound. Re-check the table when adding a firmware dump.
+APP_SUPPLIED_MODULES = {
+    'libSceFios2': '1.00',
+    'libc': '1.00',
+    'libSceFace': '1.00',
+    'libSceHand': '1.00',
+    'libSceSmart': '1.00',
+    'libSceS3DConversion': '1.00',
+    'libSceHeadTracker': '1.00',
+    'libSceFaceTracker': '1.00',
+    'libSceHandTracker': '1.00',
+    'libSceAudioLatencyEstimation': '1.00',
+    'libSceNpToolkit': '1.00',
+    'libSceJobManager': '1.00',
+    'libSceNpToolkit2': '1.00',
+    'libSceNpCppWebApi': '1.00',
+    'libScePfs': '1.00',
+    'libSceFontGsm': '6.00',
+}
+
+
 def die(msg):
     sys.exit('error: %s' % msg)
 
@@ -305,6 +332,15 @@ def choose_sdk(dumps):
         if pair in holes:
             gated.append((pair, holes[pair]))
 
+    # Only libkernel's own list of game-supplied modules is excused, and a member
+    # the list gained later still needs the firmware that added it.
+    unshipped = sorted(pair for pair in beyond if pair[0] in APP_SUPPLIED_MODULES)
+    beyond = [pair for pair in beyond if pair[0] not in APP_SUPPLIED_MODULES]
+    for library in sorted({lib for lib, _ in unshipped}):
+        since = APP_SUPPLIED_MODULES[library]
+        if rank.get(since, 0) > rank[floor]:
+            floor, floor_for = since, (library, '(listed from %s)' % since)
+
     if beyond:
         known = {library for library, _ in ranges}
         foreign = sorted({library for library, _ in beyond
@@ -325,6 +361,11 @@ def choose_sdk(dumps):
 
     lines = ['%d imports: %d satisfied within the dump, %d from firmware'
              % (len(imported), len(imported) - len(wanted), len(wanted))]
+    if unshipped:
+        lines.append('%d import(s) of %s ignored: a game-supplied module the '
+                     'dump does not ship, so they stay unbound'
+                     % (len(unshipped),
+                        ', '.join(sorted({lib for lib, _ in unshipped}))))
     if superseded:
         lines.append('%d import(s) of %s ignored: carried as an empty file, so '
                      'an update superseded it'

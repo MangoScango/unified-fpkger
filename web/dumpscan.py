@@ -170,7 +170,12 @@ def read_meta(folder):
             title_id=param.get("titleId") or title_id_from_content_id(content_id) or None,
             version=param.get("contentVersion") or param.get("masterVersion") or None,
             category=category,
-            kind="Game" if category == 0 else ("App" if category is not None else "Unknown"),
+            # An add-on's param.json has no applicationCategoryType, and only
+            # an application has an eboot.bin. build-ps5 builds either alone,
+            # so a PS5 add-on keeps the "base" role and its own unit.
+            kind=("Game" if category == 0 else "App" if category is not None
+                  else "Unknown" if os.path.isfile(os.path.join(folder, "eboot.bin"))
+                  else "Add-on"),
             fw=fw_from_hex(param.get("requiredSystemSoftwareVersion")),
             sdk=fw_from_hex(param.get("sdkVersion")))
         if not param:

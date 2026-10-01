@@ -13,9 +13,12 @@ PYTHON="python3"
 TEMPORARY_DIRECTORY="${LIBPROSPERO_TEMP_DIR:-}"
 COMPRESSION_LEVEL=7
 CHUNK_COUNT=100
-KEEP_KEYSTONE=0
 KEEP_INTERMEDIATE=0
 FORCE=0
+VOLUME=auto
+# The console's fake-package support ignores it, but img_create will not build
+# an add-on without one.
+ENTITLEMENT_KEY="00000000000000000000000000000000"
 
 usage() {
     echo "Usage: $0 --source-folder <dir> --output-package <file.pkg> [options]"
@@ -26,7 +29,8 @@ usage() {
     echo "  --temp-dir <dir>            (default: \$LIBPROSPERO_TEMP_DIR)"
     echo "  --compression-level <-4..9> (default: 7)"
     echo "  --chunk-count <1..255>      (default: 100)"
-    echo "  --keep-keystone"
+    echo "  --volume <auto|app|ac>      (default: auto; ac when there is no eboot.bin)"
+    echo "  --entitlement-key <hex>     add-ons only (default: 32 zeroes)"
     echo "  --keep-intermediate"
     echo "  --force"
     exit 1
@@ -42,7 +46,8 @@ while [[ $# -gt 0 ]]; do
         --temp-dir) TEMPORARY_DIRECTORY="$2"; shift 2 ;;
         --compression-level) COMPRESSION_LEVEL="$2"; shift 2 ;;
         --chunk-count) CHUNK_COUNT="$2"; shift 2 ;;
-        --keep-keystone) KEEP_KEYSTONE=1; shift ;;
+        --volume) VOLUME="$2"; shift 2 ;;
+        --entitlement-key) ENTITLEMENT_KEY="$2"; shift 2 ;;
         --keep-intermediate) KEEP_INTERMEDIATE=1; shift ;;
         --force|-f) FORCE=1; shift ;;
         *) echo "Unknown option: $1" >&2; usage ;;
@@ -60,15 +65,36 @@ if [[ ! -d "$SOURCE_FOLDER" ]]; then
 fi
 SOURCE_FOLDER="$(realpath "$SOURCE_FOLDER")"
 
-SOURCE_KEYSTONE="$SOURCE_FOLDER/sce_sys/keystone"
-if [[ ! -f "$SOURCE_KEYSTONE" ]]; then
-    echo "This custom-keystone toolchain requires: $SOURCE_KEYSTONE" >&2
+case "$VOLUME" in
+    auto) if [[ -f "$SOURCE_FOLDER/eboot.bin" ]]; then VOLUME=app; else VOLUME=ac; fi ;;
+    app|ac) ;;
+    *) echo "--volume must be auto, app or ac" >&2; exit 1 ;;
+esac
+echo "Volume: $VOLUME"
+
+if [[ ! -f "$SOURCE_FOLDER/sce_sys/param.json" ]]; then
+    echo "Not a PS5 tree, no sce_sys/param.json: $SOURCE_FOLDER" >&2
     exit 1
 fi
 
-KEYSTONE_SIZE=$(stat -c%s "$SOURCE_KEYSTONE")
-if [[ "$KEYSTONE_SIZE" -ne 96 ]]; then
-    echo "The source keystone must be exactly 96 bytes: $SOURCE_KEYSTONE" >&2
+# Add-ons carry no keystone; the custom-keystone requirement is the app's.
+if [[ "$VOLUME" == app ]]; then
+    SOURCE_KEYSTONE="$SOURCE_FOLDER/sce_sys/keystone"
+    if [[ ! -f "$SOURCE_KEYSTONE" ]]; then
+        echo "This custom-keystone toolchain requires: $SOURCE_KEYSTONE" >&2
+        exit 1
+    fi
+
+    KEYSTONE_SIZE=$(stat -c%s "$SOURCE_KEYSTONE")
+    if [[ "$KEYSTONE_SIZE" -ne 96 ]]; then
+        echo "The source keystone must be exactly 96 bytes: $SOURCE_KEYSTONE" >&2
+        exit 1
+    fi
+elif [[ ! "$ENTITLEMENT_KEY" =~ ^[0-9A-Fa-f]{32}$ ]]; then
+    echo "--entitlement-key must be 32 hex digits" >&2
+    exit 1
+elif [[ -n "$REFERENCE_PACKAGE" ]]; then
+    echo "--reference-package applies to application builds only" >&2
     exit 1
 fi
 
@@ -198,14 +224,19 @@ GP5_ARGS=(
     "$GP5"
     "--passcode" "$PASSCODE"
     "--absolute-paths"
-    "--keep-keystone"
-    "--chunk-count" "$CHUNK_COUNT"
+    "--volume" "$VOLUME"
 )
 
-if [[ -z "$REFERENCE" ]]; then
-    GP5_ARGS+=("--auto-size-profile" "$AUTO_SIZE_PROFILE")
+# Keystone, chunk layout and size profile are application-only.
+if [[ "$VOLUME" == ac ]]; then
+    GP5_ARGS+=("--entitlement-key" "$ENTITLEMENT_KEY")
 else
-    echo "Reference build: preserving source attributePub; unpacked patch size cannot determine remastered size."
+    GP5_ARGS+=("--keep-keystone" "--chunk-count" "$CHUNK_COUNT")
+    if [[ -z "$REFERENCE" ]]; then
+        GP5_ARGS+=("--auto-size-profile" "$AUTO_SIZE_PROFILE")
+    else
+        echo "Reference build: preserving source attributePub; unpacked patch size cannot determine remastered size."
+    fi
 fi
 
 set +e
