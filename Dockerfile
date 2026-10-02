@@ -68,6 +68,7 @@ COPY *.sh *.py \
 # tables travel with the image instead. build-export-db.py regenerates them and
 # stays out.
 COPY docs/fw-levels.csv docs/fw-exports.csv docs/fw-export-gaps.csv \
+     docs/fw-modules.csv \
      /opt/fpkger/docs/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY drakmor /opt/fpkger/drakmor

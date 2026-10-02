@@ -1,0 +1,325 @@
+PPSA01302-app  DEATHLOOP
+  eboot SDK PS5 3.00 (0x03000027), PS4 compat 0x08540001; param.json sdk 3.00, requires 6.02
+  floor PS5 5.00  (libSceVideoOutVrrPeg / sceVideoOutVrrPegToFixedRate)
+  target 4.00: 2 symbols in 1 library across 1 module
+    libSceVideoOut.sprx                     present, replace
+      libSceVideoOutVrrPeg            2  whole library, first in 5.00  <eboot.bin>
+
+PPSA01325-app  ASTRO's PLAYROOM
+  eboot SDK PS5 1.00 (0x01000026), PS4 compat 0x07590001; param.json sdk 1.00, requires 10.60
+  floor PS5 1.00: no injection needed (backport floor 4.00)
+  ignored: libSceJobManager (game-supplied, not shipped)
+
+PPSA01342-app  Demon's Souls
+  eboot SDK PS5 12.00 (0x12000038), PS4 compat 0x13090001; param.json sdk 12.00, requires 12.02
+  floor PS5 12.00  (libSceAgc / v3G+IipShZs)
+  target 4.00: 54 symbols in 5 libraries across 5 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                      23  23 of its exports missing  <eboot.bin>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 6  6 of its exports missing  <eboot.bin>
+    libSceLibcInternal.sprx                 present, replace
+      libSceLibcInternalExt           3  3 of its exports missing  <sce_module/libc.prx>
+    libScePsml.sprx                         absent before 9.00, supply whole
+      libScePsml                     13  whole library, first in 9.00  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       9  9 of its exports missing  <eboot.bin, sce_module/libc.prx>
+  target 5.00: 53 symbols in 5 libraries across 5 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                      22  22 of its exports missing  <eboot.bin>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 6  6 of its exports missing  <eboot.bin>
+    libSceLibcInternal.sprx                 present, replace
+      libSceLibcInternalExt           3  3 of its exports missing  <sce_module/libc.prx>
+    libScePsml.sprx                         absent before 9.00, supply whole
+      libScePsml                     13  whole library, first in 9.00  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       9  9 of its exports missing  <eboot.bin, sce_module/libc.prx>
+  target 6.00: 48 symbols in 5 libraries across 5 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                      19  19 of its exports missing  <eboot.bin>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 6  6 of its exports missing  <eboot.bin>
+    libSceLibcInternal.sprx                 present, replace
+      libSceLibcInternalExt           3  3 of its exports missing  <sce_module/libc.prx>
+    libScePsml.sprx                         absent before 9.00, supply whole
+      libScePsml                     13  whole library, first in 9.00  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       7  7 of its exports missing  <eboot.bin, sce_module/libc.prx>
+  target 7.01: 40 symbols in 5 libraries across 5 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                      14  14 of its exports missing  <eboot.bin>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 5  5 of its exports missing  <eboot.bin>
+    libSceLibcInternal.sprx                 present, replace
+      libSceLibcInternalExt           3  3 of its exports missing  <sce_module/libc.prx>
+    libScePsml.sprx                         absent before 9.00, supply whole
+      libScePsml                     13  whole library, first in 9.00  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       5  5 of its exports missing  <eboot.bin, sce_module/libc.prx>
+  target 8.00: 30 symbols in 5 libraries across 5 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       8  8 of its exports missing  <eboot.bin>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 1  1 of its exports missing  <eboot.bin>
+    libSceLibcInternal.sprx                 present, replace
+      libSceLibcInternalExt           3  3 of its exports missing  <sce_module/libc.prx>
+    libScePsml.sprx                         absent before 9.00, supply whole
+      libScePsml                     13  whole library, first in 9.00  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       5  5 of its exports missing  <eboot.bin, sce_module/libc.prx>
+  target 9.00: 13 symbols in 5 libraries across 5 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       3  3 of its exports missing  <eboot.bin>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 1  1 of its exports missing  <eboot.bin>
+    libSceLibcInternal.sprx                 present, replace
+      libSceLibcInternalExt           3  3 of its exports missing  <sce_module/libc.prx>
+    libScePsml.sprx                         present, replace
+      libScePsml                      3  3 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       3  3 of its exports missing  <eboot.bin, sce_module/libc.prx>
+  target 10.01: 11 symbols in 5 libraries across 5 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       1  1 of its exports missing  <eboot.bin>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 1  1 of its exports missing  <eboot.bin>
+    libSceLibcInternal.sprx                 present, replace
+      libSceLibcInternalExt           3  3 of its exports missing  <sce_module/libc.prx>
+    libScePsml.sprx                         present, replace
+      libScePsml                      3  3 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       3  3 of its exports missing  <eboot.bin, sce_module/libc.prx>
+  target 11.00: 4 symbols in 3 libraries across 3 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       1  1 of its exports missing  <eboot.bin>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 1  1 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       2  2 of its exports missing  <sce_module/libc.prx>
+
+PPSA03746-app  Skyrim
+  eboot SDK PS5 3.00 (0x03000027), PS4 compat 0x08540001; param.json sdk 3.00, requires 13.60
+  floor PS5 3.00: no injection needed (backport floor 4.00)
+
+PPSA03974-app  Cyberpunk 2077
+  eboot SDK PS5 13.00 (0x13000035), PS4 compat 0x13590001; param.json sdk 13.00, requires 13.00
+  floor PS5 12.40  (libkernel / La9uyZv4Kvw)
+  target 4.00: 54 symbols in 7 libraries across 6 modules
+    note: libSceFontGsm is game-supplied only from 6.00; libkernel at 4.00 will not load it from sce_module
+    libSceAgc.sprx                          present, replace
+      libSceAgc                      23  23 of its exports missing  <eboot.bin, sce_module/libSceFontGsm.prx, sce_module/libSceJobManager.prx>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 6  6 of its exports missing  <eboot.bin, sce_module/libSceJobManager.prx>
+    libSceLibcInternal.sprx                 present, replace
+      libSceLibcInternal              1  1 of its exports missing  <sce_module/libSceJobManager.prx>
+      libSceLibcInternalExt           3  3 of its exports missing  <sce_module/libc.prx>
+    libScePsml.sprx                         absent before 9.00, supply whole
+      libScePsml_mfsr2                9  whole library, first in 12.00  <eboot.bin>
+    libSceVideoOut.sprx                     present, replace
+      libSceVideoOutVrrStatus         3  whole library, first in 5.00  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       9  9 of its exports missing  <eboot.bin, sce_module/libSceJobManager.prx, sce_module/libc.prx>
+  target 5.00: 51 symbols in 7 libraries across 6 modules
+    note: libSceFontGsm is game-supplied only from 6.00; libkernel at 5.00 will not load it from sce_module
+    libSceAgc.sprx                          present, replace
+      libSceAgc                      22  22 of its exports missing  <eboot.bin, sce_module/libSceFontGsm.prx, sce_module/libSceJobManager.prx>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 6  6 of its exports missing  <eboot.bin, sce_module/libSceJobManager.prx>
+    libSceLibcInternal.sprx                 present, replace
+      libSceLibcInternal              1  1 of its exports missing  <sce_module/libSceJobManager.prx>
+      libSceLibcInternalExt           3  3 of its exports missing  <sce_module/libc.prx>
+    libScePsml.sprx                         absent before 9.00, supply whole
+      libScePsml_mfsr2                9  whole library, first in 12.00  <eboot.bin>
+    libSceVideoOut.sprx                     present, replace
+      libSceVideoOutVrrStatus         1  1 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       9  9 of its exports missing  <eboot.bin, sce_module/libSceJobManager.prx, sce_module/libc.prx>
+  target 6.00: 46 symbols in 7 libraries across 6 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                      19  19 of its exports missing  <eboot.bin, sce_module/libSceFontGsm.prx, sce_module/libSceJobManager.prx>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 6  6 of its exports missing  <eboot.bin, sce_module/libSceJobManager.prx>
+    libSceLibcInternal.sprx                 present, replace
+      libSceLibcInternal              1  1 of its exports missing  <sce_module/libSceJobManager.prx>
+      libSceLibcInternalExt           3  3 of its exports missing  <sce_module/libc.prx>
+    libScePsml.sprx                         absent before 9.00, supply whole
+      libScePsml_mfsr2                9  whole library, first in 12.00  <eboot.bin>
+    libSceVideoOut.sprx                     present, replace
+      libSceVideoOutVrrStatus         1  1 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       7  7 of its exports missing  <eboot.bin, sce_module/libSceJobManager.prx, sce_module/libc.prx>
+  target 7.01: 38 symbols in 7 libraries across 6 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                      14  14 of its exports missing  <eboot.bin, sce_module/libSceFontGsm.prx, sce_module/libSceJobManager.prx>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 5  5 of its exports missing  <eboot.bin, sce_module/libSceJobManager.prx>
+    libSceLibcInternal.sprx                 present, replace
+      libSceLibcInternal              1  1 of its exports missing  <sce_module/libSceJobManager.prx>
+      libSceLibcInternalExt           3  3 of its exports missing  <sce_module/libc.prx>
+    libScePsml.sprx                         absent before 9.00, supply whole
+      libScePsml_mfsr2                9  whole library, first in 12.00  <eboot.bin>
+    libSceVideoOut.sprx                     present, replace
+      libSceVideoOutVrrStatus         1  1 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       5  5 of its exports missing  <sce_module/libSceJobManager.prx, sce_module/libc.prx>
+  target 8.00: 28 symbols in 7 libraries across 6 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       8  8 of its exports missing  <eboot.bin, sce_module/libSceFontGsm.prx, sce_module/libSceJobManager.prx>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 1  1 of its exports missing  <eboot.bin>
+    libSceLibcInternal.sprx                 present, replace
+      libSceLibcInternal              1  1 of its exports missing  <sce_module/libSceJobManager.prx>
+      libSceLibcInternalExt           3  3 of its exports missing  <sce_module/libc.prx>
+    libScePsml.sprx                         absent before 9.00, supply whole
+      libScePsml_mfsr2                9  whole library, first in 12.00  <eboot.bin>
+    libSceVideoOut.sprx                     present, replace
+      libSceVideoOutVrrStatus         1  1 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       5  5 of its exports missing  <sce_module/libSceJobManager.prx, sce_module/libc.prx>
+  target 9.00: 20 symbols in 6 libraries across 6 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       3  3 of its exports missing  <eboot.bin, sce_module/libSceFontGsm.prx, sce_module/libSceJobManager.prx>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 1  1 of its exports missing  <eboot.bin>
+    libSceLibcInternal.sprx                 present, replace
+      libSceLibcInternalExt           3  3 of its exports missing  <sce_module/libc.prx>
+    libScePsml.sprx                         present, replace
+      libScePsml_mfsr2                9  whole library, first in 12.00  <eboot.bin>
+    libSceVideoOut.sprx                     present, replace
+      libSceVideoOutVrrStatus         1  1 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       3  3 of its exports missing  <sce_module/libSceJobManager.prx, sce_module/libc.prx>
+  target 10.01: 17 symbols in 5 libraries across 5 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       1  1 of its exports missing  <eboot.bin, sce_module/libSceJobManager.prx>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 1  1 of its exports missing  <eboot.bin>
+    libSceLibcInternal.sprx                 present, replace
+      libSceLibcInternalExt           3  3 of its exports missing  <sce_module/libc.prx>
+    libScePsml.sprx                         present, replace
+      libScePsml_mfsr2                9  whole library, first in 12.00  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       3  3 of its exports missing  <sce_module/libSceJobManager.prx, sce_module/libc.prx>
+  target 11.00: 14 symbols in 4 libraries across 4 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       1  1 of its exports missing  <eboot.bin, sce_module/libSceJobManager.prx>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 1  1 of its exports missing  <eboot.bin>
+    libScePsml.sprx                         present, replace
+      libScePsml_mfsr2                9  whole library, first in 12.00  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       3  3 of its exports missing  <sce_module/libSceJobManager.prx, sce_module/libc.prx>
+  target 12.00: 1 symbol in 1 library across 1 module
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       1  1 of its exports missing  <sce_module/libSceJobManager.prx>
+
+PPSA04610-app0  ELDEN RING™
+  eboot SDK PS5 3.00 (0x03000027), PS4 compat 0x08540001; param.json sdk 3.00, requires 11.60
+  floor PS5 3.00: no injection needed (backport floor 4.00)
+
+PPSA05109-app  Persona 5 Royal
+  eboot SDK PS5 4.00 (0x04000031), PS4 compat 0x09040001; param.json sdk 4.00, requires 5.50
+  floor PS5 4.00: no injection needed (backport floor 4.00)
+
+PPSA06795-app  echochrome
+  eboot SDK PS5 9.00 (0x09000040), PS4 compat 0x11590001; param.json sdk 9.00, requires 10.40
+  floor PS5 9.00  (libSceAgc / sceAgcGetIsTrinityMode)
+  target 4.00: 7 symbols in 3 libraries across 3 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       3  3 of its exports missing  <eboot.bin>
+    libSceVideoOut.sprx                     present, replace
+      libSceVideoOut                  1  1 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       3  3 of its exports missing  <sce_module/libc.prx>
+  target 5.00: 6 symbols in 2 libraries across 2 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       3  3 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       3  3 of its exports missing  <sce_module/libc.prx>
+  target 6.00: 3 symbols in 2 libraries across 2 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       2  2 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       1  1 of its exports missing  <sce_module/libc.prx>
+  target 7.01: 2 symbols in 1 library across 1 module
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       2  2 of its exports missing  <eboot.bin>
+  target 8.00: 1 symbol in 1 library across 1 module
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       1  1 of its exports missing  <eboot.bin>
+
+PPSA17599-app  Clair Obscur: Expedition 33
+  eboot SDK PS5 9.00 (0x09000040), PS4 compat 0x11590001; param.json sdk 9.00, requires 13.40
+  floor PS5 9.00  (libSceAgc / sceAgcCbMemsetExclusive)
+  target 4.00: 23 symbols in 4 libraries across 4 modules
+    note: libSceFontGsm is game-supplied only from 6.00; libkernel at 4.00 will not load it from sce_module
+    libSceAgc.sprx                          present, replace
+      libSceAgc                      12  12 of its exports missing  <eboot.bin, sce_module/libSceFontGsm.prx, sce_module/libSceJobManager.prx>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 5  5 of its exports missing  <sce_module/libSceJobManager.prx>
+    libSceVideoOut.sprx                     present, replace
+      libSceVideoOut                  2  2 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       4  4 of its exports missing  <eboot.bin, sce_module/libc.prx>
+  target 5.00: 20 symbols in 3 libraries across 3 modules
+    note: libSceFontGsm is game-supplied only from 6.00; libkernel at 5.00 will not load it from sce_module
+    libSceAgc.sprx                          present, replace
+      libSceAgc                      11  11 of its exports missing  <eboot.bin, sce_module/libSceFontGsm.prx, sce_module/libSceJobManager.prx>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 5  5 of its exports missing  <sce_module/libSceJobManager.prx>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       4  4 of its exports missing  <eboot.bin, sce_module/libc.prx>
+  target 6.00: 15 symbols in 3 libraries across 3 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       8  8 of its exports missing  <eboot.bin, sce_module/libSceFontGsm.prx, sce_module/libSceJobManager.prx>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 5  5 of its exports missing  <sce_module/libSceJobManager.prx>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       2  2 of its exports missing  <eboot.bin, sce_module/libc.prx>
+  target 7.01: 10 symbols in 2 libraries across 2 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       6  6 of its exports missing  <eboot.bin, sce_module/libSceFontGsm.prx, sce_module/libSceJobManager.prx>
+    libSceAgcDriver.sprx                    present, replace
+      libSceAgcDriver                 4  4 of its exports missing  <sce_module/libSceJobManager.prx>
+  target 8.00: 5 symbols in 1 library across 1 module
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       5  5 of its exports missing  <eboot.bin, sce_module/libSceFontGsm.prx, sce_module/libSceJobManager.prx>
+
+PPSA22288-app0  Sly 3: Honor Among Thieves
+  eboot SDK PS5 10.00 (0x10000040), PS4 compat 0x12090001; param.json sdk 10.00, requires 10.60
+  floor PS5 10.01  (libSceAgc / dbOlWdppb4o)
+  target 4.00: 11 symbols in 3 libraries across 3 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       4  4 of its exports missing  <eboot.bin>
+    libSceVideoOut.sprx                     present, replace
+      libSceVideoOut                  2  2 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       5  5 of its exports missing  <sce_module/libc.prx>
+  target 5.00: 9 symbols in 2 libraries across 2 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       4  4 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       5  5 of its exports missing  <sce_module/libc.prx>
+  target 6.00: 6 symbols in 2 libraries across 2 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       3  3 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       3  3 of its exports missing  <sce_module/libc.prx>
+  target 7.01: 5 symbols in 2 libraries across 2 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       3  3 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       2  2 of its exports missing  <sce_module/libc.prx>
+  target 8.00: 4 symbols in 2 libraries across 2 modules
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       2  2 of its exports missing  <eboot.bin>
+    libkernel.sprx (also libkernel_sys.sprx, libkernel_web.sprx)  present, replace
+      libkernel                       2  2 of its exports missing  <sce_module/libc.prx>
+  target 9.00: 1 symbol in 1 library across 1 module
+    libSceAgc.sprx                          present, replace
+      libSceAgc                       1  1 of its exports missing  <eboot.bin>
+
+PKG  skipped: no eboot.bin
+
+UP0700-PPSA04610_00-ELDENRINGDLC0000-ac  skipped: no eboot.bin

@@ -28,6 +28,8 @@ PT_SCE_MODULE_PARAM = 0x61000002
 DT_NULL = 0
 DT_SONAME = 14
 MODULE_PARAM_MAGIC = 0x3C13F4BF
+# "ORBI": the PT_SCE_PROCPARAM magic in PS5 eboots.
+PROCESS_PARAM_MAGIC = 0x4942524F
 
 ORBIS = dict(strtab=0x61000035, strsz=0x61000037, symtab=0x61000039,
              symtabsz=0x6100003F, export=0x61000013, imp=0x61000015)
@@ -56,7 +58,8 @@ class Module:
     exports maps a library name to the NIDs it defines; imports is a list of
     (library, nid) pairs the image needs from elsewhere. ps4_sdk and ps5_sdk are
     the two words of the param segment, or None when the image has no param
-    segment or an older revision of one.
+    segment, one with an unrecognised magic, or (for ps5_sdk) a revision older
+    than 3.
     """
 
     def __init__(self, path):
@@ -193,7 +196,7 @@ class Module:
         if self.param is None:
             return None
         magic, revision = struct.unpack_from('<II', self.data, self.param + 0x08)
-        if magic != MODULE_PARAM_MAGIC:
+        if magic not in (MODULE_PARAM_MAGIC, PROCESS_PARAM_MAGIC):
             return None
         if at == 0x14 and revision < 3:
             return None

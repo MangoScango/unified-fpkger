@@ -30,6 +30,9 @@
 #   fw-export-gaps.csv  symbols absent from a firmware inside their own range
 #                       even though the library was there, which min_fw and
 #                       max_fw alone would claim are present throughout.
+#   fw-modules.csv      library,module,min_fw,max_fw - which sprx files carry
+#                       a library, since a library is often exported from a
+#                       file of another name (libScePosix from libkernel.sprx).
 #
 # WHICH LIBRARIES
 #   A dump is surveyed through the directory holding libkernel, since that is
@@ -127,8 +130,9 @@ def anchor_dir(firmware):
 
 
 def scan(directory):
-    """-> (exports by library, module count, PS4 stamp)."""
+    """-> (exports by library, module count, PS4 stamp, files by library)."""
     exports = defaultdict(set)
+    files = defaultdict(set)
     stamps = Counter()
     modules = 0
     for path in sorted(directory.glob('*.sprx')):
@@ -140,7 +144,9 @@ def scan(directory):
             stamps[module.ps4_sdk] += 1
         for library, nids in module.exports.items():
             exports[library] |= nids
-    return exports, modules, (stamps.most_common(1)[0][0] if stamps else 0)
+            files[library].add(path.name)
+    return (exports, modules, (stamps.most_common(1)[0][0] if stamps else 0),
+            files)
 
 
 def main(argv):
@@ -181,6 +187,7 @@ def main(argv):
               'libraries will name symbols', file=sys.stderr)
 
     levels = []
+    carriers = defaultdict(list)
     newest_dir = None
     for firmware in sorted((d for d in root.iterdir()
                             if d.is_dir() and d.name[0].isdigit()),
@@ -189,7 +196,10 @@ def main(argv):
         if directory is None:
             print(f'{firmware.name:>6}  no libkernel, skipped')
             continue
-        exports, modules, stamp = scan(directory)
+        exports, modules, stamp, files = scan(directory)
+        for library, filenames in files.items():
+            for filename in filenames:
+                carriers[(library, filename)].append(len(levels))
         levels.append((firmware.name, exports, modules, stamp))
         newest_dir = firmware
         print(f'{firmware.name:>6}  {modules:4d} modules  {len(exports):4d} '
@@ -249,6 +259,12 @@ def main(argv):
         writer = csv.writer(fh)
         writer.writerow(['library', 'nid', 'name', 'missing_fw'])
         writer.writerows(gaps)
+    with open(out_dir / 'fw-modules.csv', 'w', newline='') as fh:
+        writer = csv.writer(fh)
+        writer.writerow(['library', 'module', 'min_fw', 'max_fw'])
+        for (library, module), indices in sorted(carriers.items()):
+            writer.writerow([library, module, order[indices[0]],
+                             order[indices[-1]]])
 
     added = sum(1 for r in rows if r[3] != order[0])
     removed = sum(1 for r in rows if r[4] != order[-1])
@@ -256,7 +272,8 @@ def main(argv):
     print(f'{len({r[0] for r in rows})} libraries, {len(rows)} symbols')
     print(f'{added} appear after {order[0]}, {removed} gone before '
           f'{order[-1]}, {len(gaps)} with gaps')
-    print(f'wrote {out_dir}/fw-levels.csv, fw-exports.csv, fw-export-gaps.csv')
+    print(f'wrote {out_dir}/fw-levels.csv, fw-exports.csv, fw-export-gaps.csv, '
+          f'fw-modules.csv')
     return 0
 
 
