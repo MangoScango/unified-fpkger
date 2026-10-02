@@ -226,6 +226,9 @@
     <label class="check"><input type="checkbox" name="no_patch"> Base game only (PS4: skip the patch)</label>
     <label class="check"><input type="checkbox" name="no_dlc"> Skip installed DLC</label>
     <label class="check"><input type="checkbox" name="no_decrypt"> Leave executables encrypted</label>
+    <label class="check"><input type="checkbox" name="no_entitlements"> PS5: skip reading add-on entitlement keys</label>
+    <p class="hint">PS5 dumps send ps5-entitlement-dumper to the console's payload loader (port 9021) while the
+      game runs, then save the keys to <code>entitlements.txt</code> and each add-on's <code>entitlement_key.dat</code>.</p>
     <label class="check"><input type="checkbox" name="verbose"> Log every file</label>
   </fieldset>
 </template>
@@ -286,6 +289,11 @@
         <input type="number" name="chunk_count" min="1" max="255"></label>
     </div>
     <label class="check"><input type="checkbox" name="force"> Replace existing outputs</label>
+    <label data-single>Add-on entitlement key (32 hex digits)
+      <input type="text" name="entitlement_key" autocomplete="off" spellcheck="false"
+             pattern="[0-9A-Fa-f]{32}" maxlength="32"></label>
+    <p class="hint" data-key-hint>Leave empty to use each add-on's <code>entitlement_key.dat</code>,
+      or zeroes when it has none. Some games pick the add-on to mount from this key.</p>
     <details>
       <summary>Advanced</summary>
       <label>Passcode (32 hex digits) <input type="text" name="passcode" autocomplete="off"></label>
@@ -322,6 +330,12 @@ for (const slot of $$("[data-use]")) {
   wrap.append(frag);
   slot.replaceWith(wrap);
 }
+$$("[data-key-hint]").forEach((hint, i) => {
+  hint.id = "key-hint-" + i;
+  const input = hint.previousElementSibling.querySelector("input");
+  input.setAttribute("aria-describedby", hint.id);
+  hint.dataset.default = hint.innerHTML;
+});
 
 // Tabs, with arrow-key movement per the WAI-ARIA tabs pattern.
 const tabs = $$("[role=tab]");
@@ -439,7 +453,9 @@ function unitRow(u) {
     u.fw ? tag("FW " + u.fw) : null,
     u.sdk ? tag("SDK " + u.sdk) : null,
     u.updates.length ? tag(plural(u.updates.length, "update")) : null,
-    u.addons.length ? tag(plural(u.addons.length, "add-on")) : null);
+    u.addons.length ? tag(plural(u.addons.length, "add-on")) : null,
+    u.platform === "ps5" && u.kind === "Add-on"
+      ? tag(u.base?.entitlement_key ? "entitlement key" : "no entitlement key") : null);
   const ids = [u.title_id, u.content_id].filter(Boolean).join(" · ");
   const body = el("span", {className: "dump-body"},
     el("span", {className: "dump-title", textContent: u.title || u.title_id || u.id.split("/").pop()}),
@@ -468,6 +484,26 @@ function chosenUnits() {
   return units.filter(u => selected.has(u.id));
 }
 
+// One selected PS5 add-on with a recorded key fills the field, unless the
+// user has typed their own.
+const keyInput = buildForm.elements.entitlement_key;
+const keyHint = $("[data-key-hint]", buildForm);
+let keyPrefilled = "";
+keyInput.addEventListener("input", () => { keyPrefilled = ""; });
+function prefillEntitlementKey(chosen) {
+  const addon = chosen.length === 1 && chosen[0].platform === "ps5" && chosen[0].kind === "Add-on"
+    ? chosen[0].base : null;
+  const key = addon?.entitlement_key || "";
+  const untouched = keyInput.value === "" || keyInput.value === keyPrefilled;
+  if (untouched) {
+    keyInput.value = key;
+    keyPrefilled = key;
+  }
+  if (key && keyInput.value === key) keyHint.textContent = "Read from the add-on's entitlement_key.dat.";
+  else if (addon && !key) keyHint.textContent = "This add-on has no entitlement_key.dat; it builds with zeroes unless you enter one.";
+  else keyHint.innerHTML = keyHint.dataset.default;
+}
+
 function syncSelection() {
   const chosen = chosenUnits();
   const platforms = new Set(chosen.map(u => u.platform));
@@ -483,6 +519,7 @@ function syncSelection() {
   $("#scan-selected").textContent = chosen.length
     ? `${chosen.length} selected` + (hiddenCount ? `, ${hiddenCount} hidden by the filter` : "") + "."
     : "";
+  prefillEntitlementKey(chosen);
   const submit = $("#build-submit");
   submit.disabled = !chosen.length;
   submit.textContent = chosen.length > 1 ? `Build ${chosen.length} titles` : "Build selected";

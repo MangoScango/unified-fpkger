@@ -16,9 +16,11 @@ CHUNK_COUNT=100
 KEEP_INTERMEDIATE=0
 FORCE=0
 VOLUME=auto
-# The console's fake-package support ignores it, but img_create will not build
-# an add-on without one.
-ENTITLEMENT_KEY="00000000000000000000000000000000"
+# Games read it back through sceNpEntitlementAccessGetEntitlementKey, and some
+# (FF7R) decide which add-on to mount from it. pfsdump saves the real one as
+# entitlement_key.dat in the add-on dump; zeroes are the last resort.
+ENTITLEMENT_KEY=""
+ENTITLEMENT_KEY_FILE="entitlement_key.dat"
 
 usage() {
     echo "Usage: $0 --source-folder <dir> --output-package <file.pkg> [options]"
@@ -30,7 +32,7 @@ usage() {
     echo "  --compression-level <-4..9> (default: 7)"
     echo "  --chunk-count <1..255>      (default: 100)"
     echo "  --volume <auto|app|ac>      (default: auto; ac when there is no eboot.bin)"
-    echo "  --entitlement-key <hex>     add-ons only (default: 32 zeroes)"
+    echo "  --entitlement-key <hex>     add-ons only (default: the source's $ENTITLEMENT_KEY_FILE, else 32 zeroes)"
     echo "  --keep-intermediate"
     echo "  --force"
     exit 1
@@ -90,12 +92,31 @@ if [[ "$VOLUME" == app ]]; then
         echo "The source keystone must be exactly 96 bytes: $SOURCE_KEYSTONE" >&2
         exit 1
     fi
-elif [[ ! "$ENTITLEMENT_KEY" =~ ^[0-9A-Fa-f]{32}$ ]]; then
-    echo "--entitlement-key must be 32 hex digits" >&2
-    exit 1
 elif [[ -n "$REFERENCE_PACKAGE" ]]; then
     echo "--reference-package applies to application builds only" >&2
     exit 1
+else
+    KEY_FILE="$SOURCE_FOLDER/$ENTITLEMENT_KEY_FILE"
+    if [[ -n "$ENTITLEMENT_KEY" ]]; then
+        KEY_SOURCE="--entitlement-key"
+    elif [[ -f "$KEY_FILE" ]]; then
+        # 16 raw bytes from pfsdump, or 32 hex digits written by hand.
+        if [[ "$(stat -c%s "$KEY_FILE")" -eq 16 ]]; then
+            ENTITLEMENT_KEY="$(od -An -tx1 -v "$KEY_FILE" | tr -d ' \n')"
+        else
+            ENTITLEMENT_KEY="$(tr -d '[:space:]' < "$KEY_FILE")"
+        fi
+        KEY_SOURCE="$KEY_FILE"
+    else
+        ENTITLEMENT_KEY="00000000000000000000000000000000"
+        KEY_SOURCE="default; no $ENTITLEMENT_KEY_FILE in the source"
+    fi
+    if [[ ! "$ENTITLEMENT_KEY" =~ ^[0-9A-Fa-f]{32}$ ]]; then
+        echo "The entitlement key must be 32 hex digits ($KEY_SOURCE)" >&2
+        exit 1
+    fi
+    ENTITLEMENT_KEY="${ENTITLEMENT_KEY^^}"
+    echo "Entitlement key: $ENTITLEMENT_KEY ($KEY_SOURCE)"
 fi
 
 if [[ "${OUTPUT_PACKAGE,,}" != *.pkg ]]; then

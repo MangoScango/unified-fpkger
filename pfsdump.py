@@ -27,6 +27,7 @@ import ftplib
 import os
 import re
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -1156,6 +1157,96 @@ def entitlement_label(ac_mount):
     return ac_mount[:-len("-ac")][-16:]
 
 
+# The payload loader's port. ps5-entitlement-dumper's injector finds the
+# running game, asks libSceNpEntitlementAccess for every add-on's key and
+# reports back on the same socket.
+ELF_LOADER_PORT = 9021
+ENTITLEMENT_TIMEOUT = 600
+ENTITLEMENTS_FILE = "entitlements.txt"
+ENTITLEMENT_KEY_FILE = "entitlement_key.dat"
+ENTITLEMENT_LABEL_LINE = re.compile(r"entitlements: \[(\d+)\] label=(\S+)")
+ENTITLEMENT_KEY_LINE = re.compile(r"entitlements: \[(\d+)\] key=([0-9A-Fa-f]{32})\b")
+ENTITLEMENT_DONE = b"entitlements: done"
+
+
+def default_injector():
+    return os.environ.get("ENTITLEMENT_INJECTOR") or os.path.join(
+        os.path.dirname(os.path.realpath(__file__)), "entitlement-injector.elf")
+
+
+def dump_entitlements(host, injector, port=ELF_LOADER_PORT,
+                      timeout=ENTITLEMENT_TIMEOUT):
+    """[(label, key hex)] for the running game's add-ons, in report order.
+
+    Add-ons whose key lookup failed are left out. Raises OSError when the
+    loader cannot be reached and RuntimeError when the run does not finish.
+    """
+    with open(injector, "rb") as handle:
+        payload = handle.read()
+    deadline = time.monotonic() + timeout
+    output = bytearray()
+    with socket.create_connection((host, port), timeout=30) as sock:
+        sock.sendall(payload)
+        # The loader reads the payload until EOF.
+        sock.shutdown(socket.SHUT_WR)
+        while ENTITLEMENT_DONE not in output:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock.settimeout(remaining)
+            try:
+                data = sock.recv(65536)
+            except TimeoutError:
+                break
+            if not data:
+                break
+            output += data
+    text = output.decode("utf-8", "replace")
+    if ENTITLEMENT_DONE not in output:
+        last = next((line.strip() for line in reversed(text.splitlines())
+                     if line.strip()), "no output")
+        raise RuntimeError(f"the injector did not finish: {last}")
+    labels = {int(m.group(1)): m.group(2)
+              for m in ENTITLEMENT_LABEL_LINE.finditer(text)}
+    keys = {int(m.group(1)): m.group(2).upper()
+            for m in ENTITLEMENT_KEY_LINE.finditer(text)}
+    return [(labels[i], keys[i]) for i in sorted(labels) if i in keys]
+
+
+def running_game_entitlements(host, title, running, injector):
+    """{label: key hex}, or None when the keys could not be read."""
+    # The injector picks the game process itself, so the keys are only
+    # known to be this title's when nothing else is running.
+    if running != [title]:
+        others = ", ".join(running) or "none"
+        print(f"  warning: not reading entitlement keys: {title} is not the "
+              f"only running title (running: {others})", file=sys.stderr)
+        return None
+    if not os.path.isfile(injector):
+        print(f"  warning: not reading entitlement keys: no injector at "
+              f"{injector}", file=sys.stderr)
+        return None
+    try:
+        found = dump_entitlements(host, injector)
+    except (OSError, RuntimeError) as err:
+        print(f"  warning: could not read entitlement keys via "
+              f"{host}:{ELF_LOADER_PORT}: {err}", file=sys.stderr)
+        return None
+    print(f"  entitlement keys: {len(found)} add-on(s)")
+    return dict(found)
+
+
+def write_entitlements(dest, keys):
+    with open(os.path.join(dest, ENTITLEMENTS_FILE), "w") as handle:
+        for label, key in keys.items():
+            handle.write(f"{label} {key}\n")
+
+
+def write_entitlement_key(dest, key):
+    with open(os.path.join(dest, ENTITLEMENT_KEY_FILE), "wb") as handle:
+        handle.write(bytes.fromhex(key))
+
+
 def keystone_is_generated(path):
     """Whether a keystone is the one ks_create derives from an empty passcode."""
     try:
@@ -1332,12 +1423,14 @@ def ac_nest_path(ac_mount):
 
 
 def dump_dlc(host, port, mount, title, out_dir, ac_mounts, decrypt=True,
-             verbose=False, rest_workaround=False, sce_sys_from_pkg=True):
+             verbose=False, rest_workaround=False, sce_sys_from_pkg=True,
+             keys=None):
     """Streams each add-on's image into <title>-dlc/<content-id>-ac.
 
     Add-ons sit on nothing, so unlike the app tree there is no layer to merge
     and no spelling to reconcile. sce_sys_from_pkg=False skips the ac.pkg
-    step, which has not been worked out for PS5 add-ons.
+    step, which has not been worked out for PS5 add-ons. keys maps entitlement
+    labels to keys; each add-on found in it gets an entitlement_key.dat.
     """
     root = os.path.join(out_dir, f"{title}-dlc")
     problems = []
@@ -1409,10 +1502,18 @@ def dump_dlc(host, port, mount, title, out_dir, ac_mounts, decrypt=True,
             if replaced:
                 print(f"    decrypted {replaced} executable(s)")
 
+        label = entitlement_label(ac)
+        if keys is not None:
+            if label in keys:
+                write_entitlement_key(dest, keys[label])
+                print(f"    entitlement key: {keys[label]}")
+            else:
+                print(f"    warning: the game reported no entitlement key for "
+                      f"{label}", file=sys.stderr)
+
         if not sce_sys_from_pkg:
             done += 1
             continue
-        label = entitlement_label(ac)
         pkg, pkg_path = find_ac_pkg(host, port, title, label)
         if pkg is None:
             problems.append((ac, f"no ac.pkg for label {label}; "
@@ -1630,6 +1731,13 @@ def main():
                              "image stores")
     parser.add_argument("--no-dlc", action="store_true",
                         help="skip installed add-on content")
+    parser.add_argument("--no-entitlements", action="store_true",
+                        help="PS5: do not read add-on entitlement keys from "
+                             "the running game")
+    parser.add_argument("--injector", default=default_injector(),
+                        help="ps5-entitlement-dumper's entitlement-injector.elf "
+                             "(default: $ENTITLEMENT_INJECTOR, else beside this "
+                             "script)")
     parser.add_argument("--manifest", action="store_true",
                         help="print the merged write plan and exit")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -1644,8 +1752,9 @@ def main():
     probe = FtpMount(host, port)
     try:
         title = args.title
+        running_title, candidates = discover_title(probe)
         if not title:
-            title, candidates = discover_title(probe)
+            title = running_title
             if not title:
                 print("Could not find a mounted app0; is the game running?",
                       file=sys.stderr)
@@ -1703,6 +1812,13 @@ def main():
 
         dest = os.path.join(args.output_dir, f"{title}-app")
         os.makedirs(dest, exist_ok=True)
+
+        entitlement_keys = None
+        if ps5 and not args.no_entitlements:
+            entitlement_keys = running_game_entitlements(
+                host, title, candidates, args.injector)
+            if entitlement_keys is not None:
+                write_entitlements(dest, entitlement_keys)
 
         # Probe whichever image reaches furthest into its PFS. A small patch is
         # not evidence either way because the failing 2 GiB offset lies outside
@@ -1820,7 +1936,8 @@ def main():
                 done, dlc_problems, dlc_skipped, dlc_skip_count = dump_dlc(
                     host, port, mount, title, args.output_dir, ac_mounts,
                     decrypt=not args.no_decrypt, verbose=args.verbose,
-                    rest_workaround=rest_bug, sce_sys_from_pkg=not ps5)
+                    rest_workaround=rest_bug, sce_sys_from_pkg=not ps5,
+                    keys=entitlement_keys)
                 print(f"  {done} of {len(ac_mounts)} add-on(s) dumped")
                 problems += dlc_problems
                 skip_summary.extend(dlc_skipped)

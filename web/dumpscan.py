@@ -154,6 +154,27 @@ def platform_of(folder):
     return None
 
 
+ENTITLEMENT_KEY_FILE = "entitlement_key.dat"
+
+
+def read_entitlement_key(folder):
+    """An add-on dump's entitlement key as 32 hex digits, or None.
+
+    pfsdump writes the 16 raw bytes; a hand-written file of 32 hex digits is
+    taken too.
+    """
+    try:
+        data = read_small(os.path.join(folder, ENTITLEMENT_KEY_FILE))
+    except OSError:
+        return None
+    if len(data) == 16:
+        return data.hex().upper()
+    text = data.decode("ascii", "replace").strip()
+    if re.fullmatch(r"[0-9A-Fa-f]{32}", text):
+        return text.upper()
+    return None
+
+
 def read_meta(folder):
     """One tree's identity from its sce_sys/param.sfo or param.json, else None."""
     sce = os.path.join(folder, "sce_sys")
@@ -178,6 +199,8 @@ def read_meta(folder):
                   else "Add-on"),
             fw=fw_from_hex(param.get("requiredSystemSoftwareVersion")),
             sdk=fw_from_hex(param.get("sdkVersion")))
+        meta["entitlement_key"] = (read_entitlement_key(folder)
+                                   if meta["kind"] == "Add-on" else None)
         if not param:
             meta["notes"].append("param.json could not be read")
     elif platform == "ps4":

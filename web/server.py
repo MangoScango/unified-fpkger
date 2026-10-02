@@ -421,7 +421,7 @@ def dump_step(job, spec, title, method):
     job.step = f"dumping {title}"
     if method == "pfs":
         argv = [sys.executable, PFSDUMP, f"{host}:{port}", title, "-o", dump_dir]
-        for flag in ("no_patch", "no_decrypt", "no_dlc"):
+        for flag in ("no_patch", "no_decrypt", "no_dlc", "no_entitlements"):
             if spec.get(flag):
                 argv.append("--" + flag.replace("_", "-"))
         if spec.get("verbose"):
@@ -528,6 +528,9 @@ def build_step(job, spec, src, platform):
         if not targets:
             raise JobError(f"{src} is neither a PS5 tree nor a folder of add-ons")
         job.say(f"{len(targets)} add-on(s) in {os.path.basename(src)}")
+    if spec["ps5"]["entitlement_key"] and len(targets) > 1:
+        raise JobError("one entitlement key cannot cover several add-ons; clear it "
+                       "so each uses its own entitlement_key.dat")
     for target in targets:
         build_ps5(job, spec, target, out_dir)
 
@@ -547,6 +550,14 @@ def build_ps5(job, spec, src, out_dir):
         argv += ["--chunk-count", str(opts["chunk_count"])]
         if opts.get("reference_pkg"):
             argv += ["--reference-package", opts["reference_pkg"]]
+    elif opts["entitlement_key"]:
+        argv += ["--entitlement-key", opts["entitlement_key"]]
+    else:
+        key = dumpscan.read_entitlement_key(src)
+        job.say(f"entitlement key for {os.path.basename(src)}: "
+                + (f"{key} from {dumpscan.ENTITLEMENT_KEY_FILE}" if key
+                   else f"none recorded ({dumpscan.ENTITLEMENT_KEY_FILE} missing), "
+                        "building with zeroes"))
     if opts.get("temp_dir"):
         argv += ["--temp-dir", opts["temp_dir"]]
     if opts["keep_intermediate"]:
@@ -622,7 +633,7 @@ def console_spec(params, spec):
 
 def dump_spec(params, spec):
     spec["dump_dir"] = resolve_path(params.get("dump_dir"), "dump directory", create=True)
-    for flag in ("no_patch", "no_decrypt", "no_dlc", "verbose"):
+    for flag in ("no_patch", "no_decrypt", "no_dlc", "no_entitlements", "verbose"):
         spec[flag] = bool(params.get(flag))
 
 
@@ -667,6 +678,9 @@ def ps5_spec(params):
     reference = optional_path(params, "reference_pkg", "reference package", "file")
     if reference and not reference.lower().endswith(".pkg"):
         raise BadRequest("the reference package must be a .pkg")
+    entitlement_key = (params.get("entitlement_key") or "").strip()
+    if entitlement_key and not PASSCODE_RE.match(entitlement_key):
+        raise BadRequest("the entitlement key must be 32 hex digits")
     return {
         "name": name, "passcode": passcode, "reference_pkg": reference,
         "compression_level": int_in(params, "compression_level", -4, 9, 7,
@@ -674,6 +688,7 @@ def ps5_spec(params):
         "chunk_count": int_in(params, "chunk_count", 1, 255, 100, "chunk count"),
         "temp_dir": (resolve_path(params["ps5_temp_dir"], "PS5 temp directory",
                                   create=True) if params.get("ps5_temp_dir") else None),
+        "entitlement_key": entitlement_key.upper(),
         "keep_intermediate": bool(params.get("keep_intermediate")),
         "force": bool(params.get("force")),
     }
@@ -732,7 +747,7 @@ def build_job(kind, params):
 PER_TITLE_OPTIONS = {
     "content_id": "content ID override", "ps2_tid": "PS2 serial override",
     "base_pkg": "existing base package", "ps5_name": "package name",
-    "reference_pkg": "reference package",
+    "reference_pkg": "reference package", "entitlement_key": "entitlement key",
 }
 MAX_BATCH = 200
 SCAN_DEPTH = int(setting("SCAN_DEPTH", "4"))

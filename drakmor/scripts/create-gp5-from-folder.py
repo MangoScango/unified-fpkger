@@ -75,7 +75,12 @@ GENERATED_SCE_SYS_DIRECTORIES = frozenset({"about"})
 GENERATED_ROOT_DIRECTORIES = frozenset({"sce_suppl", "sce_sc"})
 RESERVED_SCE_SYS_SUFFIXES = frozenset({".dds", ".auth_info"})
 PROJECT_SUFFIXES = frozenset({".gp4", ".gp5", ".esbak"})
-EXCLUDED_ROOT_FILES = frozenset({"ampr_emu.index"})
+EXCLUDED_ROOT_FILES = {
+    "ampr_emu.index": "host emulator index",
+    # pfsdump writes these beside the dumped content.
+    "entitlements.txt": "dumper entitlement record",
+    "entitlement_key.dat": "dumper entitlement record",
+}
 EXCLUDED_FAKE_LIBRARIES = frozenset({"libsceampr.sprx", "libsceplaygo.sprx"})
 GENERATED_ASSET_DIRECTORY = "gp5-assets"
 NORMALIZED_SELF_DIRECTORY = "normalized-self"
@@ -336,7 +341,7 @@ def collect_files(root: Path, output: Path, keep_service_paths: set[str]) -> tup
                 continue
             normalized = relative.casefold()
             if normalized in EXCLUDED_ROOT_FILES:
-                skipped.append(relative + " (host emulator index)")
+                skipped.append(f"{relative} ({EXCLUDED_ROOT_FILES[normalized]})")
                 continue
             if (normalized.startswith("fakelib/") and
                     normalized.removeprefix("fakelib/") in EXCLUDED_FAKE_LIBRARIES):
