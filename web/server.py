@@ -66,6 +66,7 @@ SDK_RE = re.compile(r"^(auto|0x[0-9A-Fa-f]{8})$")
 PASSCODE_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 FILENAME_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 ANSI_RE = re.compile(r"\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|[@-Z\\-_])")
+NEWLINE_RE = re.compile(r"\r+\n")
 
 
 def read_env_files():
@@ -255,7 +256,8 @@ class Job:
         Progress displays redraw one line with carriage returns; only the last
         redraw of each line is kept.
         """
-        text = ANSI_RE.sub("", self.partial + text).replace("\r\n", "\n")
+        # wine's console ends its lines with \r\r\n.
+        text = NEWLINE_RE.sub("\n", ANSI_RE.sub("", self.partial + text))
         parts = text.split("\n")
         for part in parts[:-1]:
             self._commit(part.rsplit("\r", 1)[-1])
