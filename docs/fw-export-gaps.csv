@@ -3,7 +3,7 @@ libSceAppContent,AS45QoYHjc4,_Z5dummyv,8.00;8.20;8.40;8.60
 libSceNpUniversalDataSystem,Dm8WJjI6Pks,sceNpUniversalDataSystemIntInitialize,5.00;5.02;5.10;5.50
 libSceNpUniversalDataSystem,75lTZ9hOy2w,sceNpUniversalDataSystemIntTerminate,5.00;5.02;5.10;5.50
 libSceUpdateService,NqCD8n5dq+Y,sceUpsrvUpdateCheckDoCheckSystemWithPupInfo,2.00
-libSceVideoStreamingEngine,vLAERdvUknc,,9.60
+libSceVideoStreamingEngine,vLAERdvUknc,sceVideoStreamingEngineIsTransparentVideoMode,9.60
 libwebrtc,8U-+Z-wKXHE,,8.00;8.20;8.40;8.60;9.00;9.05;9.20;9.40;9.60;10.01;10.20;10.40;10.60;11.00;11.20;11.40;11.60
 libwebrtc,Df74nmSqk08,,11.00;11.20;11.40;11.60
 libwebrtc,GiybFUzYwpo,,11.00;11.20;11.40;11.60

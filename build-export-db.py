@@ -7,8 +7,15 @@
 # USAGE
 #   build-export-db.py [options] PS5_LIBS_DIR
 #     -o, --out DIR     where to write the tables (default: ./docs)
-#     -n, --nids FILE   Ghidra GhidraOrbis nid_db.xml, to name symbols
+#     -n, --names FILE  a source of symbol names; repeatable, earlier files win
 #     -h, --help        this text
+#
+#   Names only label the tables; nothing matches on them. A NID is the first
+#   eight bytes of SHA-1(name + salt), so any list of names is a lookup table
+#   once hashed. Each FILE may be a GhidraOrbis nid_db.xml, "NID name" pairs
+#   (aerolib.csv), or one name per line; every name is hashed and kept only
+#   for the NID it produces, so a wrong or stale pair cannot mislabel a row.
+#   Strings inside the newest firmware's own libraries are tried last.
 #
 #   PS5_LIBS_DIR holds one directory per firmware, named for its version
 #   ("7.61"), each containing that firmware's extracted libraries. The firmware
@@ -37,7 +44,9 @@
 #   dump is wrong the tables will be wrong with it; the fix for that is a better
 #   dump, not more inference here.
 # ----------------------------------------------------------------------------
+import base64
 import csv
+import hashlib
 import os
 import re
 import sys
@@ -56,11 +65,53 @@ def fw_key(name):
     return tuple(int(part) for part in name.split('.'))
 
 
-def load_nids(path):
-    if not path:
-        return {}
-    with open(path, encoding='utf-8', errors='replace') as fh:
-        return dict(re.findall(r'obf="([^"]+)"\s+sym="([^"]+)"', fh.read()))
+NID_SALT = bytes.fromhex('518D64A635DED8C1E6B039B1C3E55230')
+# Long enough to skip most noise, short enough to keep C++ manglings.
+STRING_TOKEN = re.compile(rb'[A-Za-z_][A-Za-z0-9_@$.]{3,399}')
+
+
+def nid_of(name):
+    digest = hashlib.sha1(name.encode('utf-8', 'surrogateescape') + NID_SALT).digest()
+    return base64.b64encode(digest[:8][::-1]).decode().rstrip('=').replace('/', '-')
+
+
+def candidate_names(path):
+    """Every string in a names file that might be a symbol name."""
+    with open(path, encoding='utf-8', errors='surrogateescape') as fh:
+        text = fh.read()
+    if 'obf="' in text:
+        return [sym for _, sym in re.findall(r'obf="([^"]+)"\s+sym="([^"]+)"', text)]
+    names = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        names.append(line)
+        # "NID name" pairs: the name is the second field.
+        first, _, rest = line.partition(' ')
+        if rest:
+            names.append(rest.strip())
+    return names
+
+
+def add_names(table, wanted, names):
+    """Hash names into table for the NIDs in wanted. -> how many were new."""
+    added = 0
+    for name in names:
+        if len(name) > 400:
+            continue
+        nid = nid_of(name)
+        if nid in wanted and nid not in table:
+            table[nid] = name
+            added += 1
+    return added
+
+
+def library_strings(directory):
+    tokens = set()
+    for path in sorted(directory.rglob('*.sprx')):
+        tokens.update(STRING_TOKEN.findall(path.read_bytes()))
+    return [t.decode('ascii') for t in tokens]
 
 
 def anchor_dir(firmware):
@@ -93,13 +144,13 @@ def scan(directory):
 
 
 def main(argv):
-    out_dir, nid_path, roots = Path('docs'), None, []
+    out_dir, name_paths, roots = Path('docs'), [], []
     i = 0
     while i < len(argv):
         arg = argv[i]
         if arg in ('-h', '--help'):
             for line in open(__file__):
-                if line.startswith('# ---'):
+                if line.startswith(('# ---', '#!')):
                     continue
                 if not line.startswith('#'):
                     break
@@ -108,9 +159,9 @@ def main(argv):
         elif arg in ('-o', '--out'):
             i += 1
             out_dir = Path(argv[i])
-        elif arg in ('-n', '--nids'):
+        elif arg in ('-n', '--names', '--nids'):
             i += 1
-            nid_path = argv[i]
+            name_paths.append(argv[i])
         elif arg.startswith('-'):
             die(f'unknown option: {arg}')
         else:
@@ -122,9 +173,15 @@ def main(argv):
     root = Path(roots[0])
     if not root.is_dir():
         die(f'not a directory: {root}')
-    names = load_nids(nid_path)
+    for path in name_paths:
+        if not os.path.isfile(path):
+            die(f'names file not found: {path}')
+    if not name_paths:
+        print('warning: no -n names files given; only strings inside the '
+              'libraries will name symbols', file=sys.stderr)
 
     levels = []
+    newest_dir = None
     for firmware in sorted((d for d in root.iterdir()
                             if d.is_dir() and d.name[0].isdigit()),
                            key=lambda d: fw_key(d.name)):
@@ -134,6 +191,7 @@ def main(argv):
             continue
         exports, modules, stamp = scan(directory)
         levels.append((firmware.name, exports, modules, stamp))
+        newest_dir = firmware
         print(f'{firmware.name:>6}  {modules:4d} modules  {len(exports):4d} '
               f'libraries  ps4 0x{stamp:08x}  {directory.relative_to(firmware)}',
               flush=True)
@@ -147,6 +205,17 @@ def main(argv):
         for library, nids in exports.items():
             for nid in nids:
                 seen[(library, nid)].append(index)
+
+    wanted = {nid for _, nid in seen}
+    names = {}
+    print()
+    for path in name_paths:
+        added = add_names(names, wanted, candidate_names(path))
+        print(f'names: {added:6d} from {path}')
+    added = add_names(names, wanted, library_strings(newest_dir))
+    print(f'names: {added:6d} from strings in {newest_dir}')
+    print(f'names: {len(names)} of {len(wanted)} NIDs '
+          f'({100 * len(names) / len(wanted):.1f}%)')
 
     rows, gaps = [], []
     for (library, nid), indices in sorted(seen.items()):
