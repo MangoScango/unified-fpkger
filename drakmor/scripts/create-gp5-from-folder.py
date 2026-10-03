@@ -12,23 +12,24 @@ excluded by default.
 
 The source tree is never modified. A normalized param.json with
 applicationDrmType=standard, repaired SELF headers, and PNG files recovered from
-sce_sys/*.dds when a suitable PNG is missing are written below a .gp5-assets
+sce_sys/*.dds when a suitable PNG is missing are written below a gp5-assets
 directory beside the generated GP5. SDK presentation PNGs use RGB for icon0,
 pic0, and pic1, and RGBA for pic2; only pic2 preserves the alpha channel.
 For PSAL (`--volume al`), the project instead contains only its normalized metadata
 (param.json and a validated 512x512 RGB icon0.png) and requires an entitlement key.
-Application projects use 100 PlayGo chunks by default, configurable from 1 through 255.
+Application projects read the PlayGo chunk count from sce_sys/playgo-chunk.dat when present.
+Without it, the fallback is 100 chunks, configurable from 1 through 255.
 Game files remain in chunk zero; each language declared by playgo-scenario.json gets a
 small generated, uncompressed payload. Languages share a chunk when the configured count
 is too small to assign each a separate chunk. Remaining chunks are empty placeholders.
 Source scenarios and localized presentation strings are retained, and every scenario
 contains all configured chunks and marks all of them as initial/required.
 
-With --build, the output is a new directory containing the GP5, a verified copy of
+With --build, APP and AC projects produce a new directory containing the GP5, a verified copy of
 the patched SDK runtime, build logs, the directly generated LibProsperoPkg-compatible
 package, reproducibility scripts, and a SHA-256 manifest. This mode uses
-the custom-keystone profile and therefore always includes an exact 96-byte source
-sce_sys/keystone instead of asking Publishing Tools to generate one.
+the custom-keystone profile: APP requires an exact 96-byte source sce_sys/keystone.
+AC requires a 16-byte entitlement key and omits application-only param.json fields.
 """
 from __future__ import annotations
 
@@ -53,6 +54,7 @@ GENERATED_SCE_SYS_FILES = frozenset({
     "imagedigs.dat",
     "license.info",
     "license.dat",
+    "lem_notification.dat",
     "playgo-chunk.dat",
     "playgo-hash-table.dat",
     "playgo-ficm.dat",
@@ -72,7 +74,7 @@ GENERATED_SCE_SYS_FILES = frozenset({
     "target-relocinfo.dat",
 })
 GENERATED_SCE_SYS_DIRECTORIES = frozenset({"about"})
-GENERATED_ROOT_DIRECTORIES = frozenset({"sce_suppl", "sce_sc"})
+GENERATED_ROOT_DIRECTORIES = frozenset({"sce_suppl", "sce_sc", "playgo-languages"})
 RESERVED_SCE_SYS_SUFFIXES = frozenset({".dds", ".auth_info"})
 PROJECT_SUFFIXES = frozenset({".gp4", ".gp5", ".esbak"})
 EXCLUDED_ROOT_FILES = {
@@ -107,8 +109,8 @@ VOLUME_TYPES = {
 DEFAULT_PUBLISHING_TOOLS = Path(
     r"C:\SCE\Prospero\Tools\Publishing Tools_2.7.9-plaintext-custom-keystone-v3\bin")
 SUPPORTED_PATCH_PROFILES = frozenset({
-    "sdk279-plaintext-direct-v3",
-    "sdk313-plaintext-direct-v3",
+    "sdk279-plaintext-direct-v4",
+    "sdk313-plaintext-direct-v4",
 })
 CONTENT_ID_PATTERN = re.compile(
     r"^[A-Z]{2}[0-9]{4}-[A-Z]{4}[0-9]{5}_[0-9]{2}-[A-Z0-9]{16}$")
@@ -341,7 +343,7 @@ def collect_files(root: Path, output: Path, keep_service_paths: set[str]) -> tup
                 continue
             normalized = relative.casefold()
             if normalized in EXCLUDED_ROOT_FILES:
-                skipped.append(f"{relative} ({EXCLUDED_ROOT_FILES[normalized]})")
+                skipped.append(relative + " (host emulator index)")
                 continue
             if (normalized.startswith("fakelib/") and
                     normalized.removeprefix("fakelib/") in EXCLUDED_FAKE_LIBRARIES):
@@ -430,7 +432,6 @@ def write_standard_param(
                 f"{source} is missing required PSAL field(s): {', '.join(missing)}")
         value = {key: value[key] for key in PSAL_PARAM_KEYS}
     elif volume == "ac":
-        # img_create refuses an add-on param.json carrying either key.
         value.pop("applicationDrmType", None)
         value.pop("applicationCategoryType", None)
     else:
@@ -592,8 +593,41 @@ def default_scenario(language: str) -> dict[str, object]:
     }
 
 
+def read_source_chunk_count(root: Path, fallback: int) -> int:
+    """Read only the chunk count from a validated PS5 PlayGo descriptor header."""
+    source = root / "sce_sys" / "playgo-chunk.dat"
+    if not source.exists():
+        return fallback
+    with source.open("rb") as stream:
+        header = stream.read(0x18)
+        size = os.fstat(stream.fileno()).st_size
+    if (len(header) != 0x18 or header[:4] != b"plgx" or
+            struct.unpack_from("<HH", header, 4) != (0x1000, 0) or
+            size < 0x100 or struct.unpack_from("<I", header, 0x10)[0] != size):
+        raise ValueError(f"{source}: invalid PS5 playgo-chunk.dat header")
+    chunks = struct.unpack_from("<H", header, 0x0a)[0]
+    scenarios = struct.unpack_from("<H", header, 0x0e)[0]
+    if (not 1 <= chunks <= MAX_PLAYGO_CHUNK_COUNT or
+            not 1 <= scenarios <= MAX_PLAYGO_SCENARIO_COUNT):
+        raise ValueError(
+            f"{source}: unsupported PlayGo counts: {chunks} chunks, {scenarios} scenarios")
+    print(f"PlayGo: using {chunks} chunks from {source}")
+    return chunks
+
+
+def parse_playgo_languages(value: str) -> list[str]:
+    codes = {code.casefold(): code for code in PLAYGO_LANGUAGES}
+    requested = [item.strip().casefold() for item in value.split(",")]
+    if not requested or any(item not in codes for item in requested):
+        raise ValueError("PlayGo languages must be a non-empty comma-separated list of supported codes")
+    if len(set(requested)) != len(requested):
+        raise ValueError("PlayGo languages must not contain duplicates")
+    return [codes[item] for item in requested]
+
+
 def write_scenario(
     path: Path, source: Path, fallback_language: str,
+    selected_languages: list[str] | None = None,
 ) -> tuple[int, int, list[tuple[int, str, str]], str, list[str]]:
     if source.is_file():
         try:
@@ -647,6 +681,15 @@ def write_scenario(
         definitions.append((scenario_id, scenario_type, label))
     if ids != set(range(count)):
         raise ValueError(f"{source} scenario ids must be contiguous from 0 through {count - 1}")
+
+    if selected_languages is not None:
+        original_default = value.get("chunkDefaultLanguage", language)
+        canonical_default = (language_codes.get(original_default.strip().casefold())
+                             if isinstance(original_default, str) else None)
+        value["chunkSupportedLanguages"] = selected_languages
+        value["chunkDefaultLanguage"] = (
+            canonical_default if canonical_default in selected_languages else
+            "en-US" if "en-US" in selected_languages else selected_languages[0])
 
     chunk_default_language = value.get("chunkDefaultLanguage", language)
     if not isinstance(chunk_default_language, str) or not chunk_default_language.strip():
@@ -732,6 +775,7 @@ def build_gp5(
     entitlement_key: str | None = None,
     auto_size_profile: str | None = None,
     chunk_count: int = DEFAULT_PLAYGO_CHUNK_COUNT,
+    playgo_languages: str | None = None,
 ) -> tuple[int, list[str]]:
     if len(passcode) != 32:
         raise ValueError("passcode must contain exactly 32 characters")
@@ -740,15 +784,22 @@ def build_gp5(
     if output.exists() or output.is_symlink():
         raise FileExistsError(f"output already exists: {output}")
     entitlement_key = normalize_entitlement_key(volume, entitlement_key)
+    if playgo_languages is not None and volume != "app":
+        raise ValueError("PlayGo language selection supports APP volumes only")
+    selected_languages = (parse_playgo_languages(playgo_languages)
+                          if playgo_languages is not None else None)
     if auto_size_profile is not None and volume != "app":
         raise ValueError("automatic package-size selection supports APP volumes only")
     if type(chunk_count) is not int or not 1 <= chunk_count <= MAX_PLAYGO_CHUNK_COUNT:
         raise ValueError(f"PlayGo chunk count must be 1..{MAX_PLAYGO_CHUNK_COUNT}")
     if volume != "app" and chunk_count != DEFAULT_PLAYGO_CHUNK_COUNT:
         raise ValueError("custom PlayGo chunk count supports APP volumes only")
+    if volume == "app":
+        chunk_count = read_source_chunk_count(root, chunk_count)
     is_psal = volume == "al"
+    has_scenario = volume not in {"ac", "al"}
     scenario_input = output.with_suffix(".playgo-scenario.json")
-    if not is_psal and (scenario_input.exists() or scenario_input.is_symlink()):
+    if has_scenario and (scenario_input.exists() or scenario_input.is_symlink()):
         raise FileExistsError(f"generated PlayGo scenario already exists: {scenario_input}")
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -806,11 +857,16 @@ def build_gp5(
         scenario_definitions = []
         chunk_default_language = ""
         chunk_languages = []
+    elif volume == "ac":
+        scenario_count = scenario_default_id = 0
+        scenario_definitions = []
+        chunk_default_language = ""
+        chunk_languages = []
     else:
         (scenario_count, scenario_default_id, scenario_definitions,
          chunk_default_language, chunk_languages) = write_scenario(
             scenario_input, root / "sce_sys" / "playgo-scenario.json",
-            default_language(param))
+            default_language(param), selected_languages)
     generated_root = output.parent / GENERATED_ASSET_DIRECTORY / output.stem
     generated_system = generated_root / "sce_sys"
     generated_param = generated_system / "param.json"
@@ -899,7 +955,7 @@ def build_gp5(
             scenario.text = f"0-{chunk_count - 1}" if chunk_count > 1 else "0"
 
     files_node = ET.SubElement(project, "files")
-    if not is_psal:
+    if has_scenario:
         ET.SubElement(files_node, "file", {
             "dst_path": "sce_sys/playgo-scenario.json",
             "src_path": source_path(output.parent, scenario_input, absolute_paths),
@@ -931,7 +987,7 @@ def build_gp5(
     indent(project)
     ET.ElementTree(project).write(output, encoding="utf-8", xml_declaration=True)
     return (len(files) + len(converted_pngs) + len(language_payloads) +
-            (0 if is_psal else 1)), skipped
+            (1 if has_scenario else 0)), skipped
 
 
 def copy_toolchain(
@@ -1039,10 +1095,17 @@ def build_bundle(
     keep_service_paths: set[str], publishing_tools: Path,
     converter_path: Path | None,
     chunk_count: int = DEFAULT_PLAYGO_CHUNK_COUNT,
+    entitlement_key: str | None = None,
+    playgo_languages: str | None = None,
 ) -> tuple[Path, int, list[str]]:
-    if volume != "app":
-        raise ValueError("--build currently supports only the verified debug APP/nwonly profile")
-    if "sce_sys/keystone" not in keep_service_paths:
+    if volume not in {"app", "ac"}:
+        raise ValueError("--build supports debug APP/AC nwonly profiles")
+    entitlement_key = normalize_entitlement_key(volume, entitlement_key)
+    if playgo_languages is not None:
+        if volume != "app":
+            raise ValueError("PlayGo language selection supports APP volumes only")
+        parse_playgo_languages(playgo_languages)
+    if volume == "app" and "sce_sys/keystone" not in keep_service_paths:
         raise ValueError(
             "the custom-keystone build profile requires a 96-byte source "
             "sce_sys/keystone")
@@ -1052,7 +1115,7 @@ def build_bundle(
     toolchain_profile = json.loads(manifest_path.read_text(encoding="utf-8")).get("profile")
     if toolchain_profile not in SUPPORTED_PATCH_PROFILES:
         raise ValueError(f"unsupported patched SDK profile in {manifest_path}")
-    auto_size_profile = toolchain_profile[:6]
+    auto_size_profile = toolchain_profile[:6] if volume == "app" else None
     destination.mkdir(parents=True)
     project_path = destination / "project.gp5"
     # Bundle GP5 paths are relative to the bundle. They still resolve to the caller-owned source
@@ -1060,8 +1123,10 @@ def build_bundle(
     count, skipped = build_gp5(
         root, project_path, volume, passcode, absolute_paths=False,
         keep_service_paths=keep_service_paths, converter_path=converter_path,
-        entitlement_key=None, auto_size_profile=auto_size_profile,
-        chunk_count=chunk_count)
+        entitlement_key=entitlement_key, auto_size_profile=auto_size_profile,
+        chunk_count=chunk_count, playgo_languages=playgo_languages)
+    chunk_info = ET.parse(project_path).getroot().find("volume/chunk_info")
+    chunk_count = int(chunk_info.attrib["chunk_count"]) if chunk_info is not None else 0
 
     toolchain = destination / "toolchain"
     toolchain_profile, runtime = copy_toolchain(publishing_tools, toolchain)
@@ -1090,13 +1155,15 @@ def build_bundle(
         for path in output_files if path.is_file()
     }
     result = {
-        "profile": toolchain_profile.replace("-v3", "-bundle-v3"),
+        "profile": toolchain_profile.replace("-v4", "-bundle-v4"),
         "toolchain_profile": toolchain_profile,
         "source": str(root),
         "project": "project.gp5",
         "passcode": passcode,
         "volume": volume,
         "chunk_count": chunk_count,
+        "playgo_languages": (chunk_info.find("chunks").attrib["supported_languages"].split()
+                             if chunk_info is not None else []),
         "file_count": count,
         "excluded": skipped,
         "toolchain_source": str(publishing_tools),
@@ -1135,9 +1202,13 @@ def main() -> None:
                         help="select attributePub from unpacked inputs for this SDK")
     parser.add_argument("--chunk-count", type=int, default=DEFAULT_PLAYGO_CHUNK_COUNT,
                         metavar="1..255",
-                        help="PlayGo chunk count for APP projects (default: 100)")
+                        help="fallback APP PlayGo chunk count without source "
+                             "sce_sys/playgo-chunk.dat (default: 100)")
     parser.add_argument("--passcode", default="0" * 32,
                         help="32-character package passcode (default: 32 zeroes)")
+    parser.add_argument("--playgo-languages", metavar="CODE,CODE",
+                        help="override APP PlayGo chunk languages, e.g. en-US,ru-RU; "
+                             "otherwise retain source languages")
     parser.add_argument(
         "--entitlement-key",
         help="16-byte hex entitlement key (required for ac and al)")
@@ -1156,9 +1227,9 @@ def main() -> None:
         raise ValueError("output must be distinct from the source directory")
     entitlement_key = normalize_entitlement_key(args.volume, args.entitlement_key)
     keep = {path.replace("\\", "/").lstrip("/").casefold() for path in args.keep_sce_sys}
-    # --build uses a custom-keystone-only SDK profile, so preserving the source
-    # keystone is mandatory. GP5-only generation remains opt-in.
-    keep_keystone = args.keep_keystone or args.build
+    # APP bundles preserve the source keystone. AC does not carry the APP helper;
+    # GP5-only keystone retention remains opt-in.
+    keep_keystone = args.keep_keystone or (args.build and args.volume == "app")
     if keep_keystone:
         keystone = root / "sce_sys" / "keystone"
         if not keystone.is_file() or keystone.stat().st_size != 0x60:
@@ -1175,7 +1246,7 @@ def main() -> None:
             root, output, args.volume, args.passcode, keep,
             args.publishing_tools.resolve(),
             args.dds_converter.resolve() if args.dds_converter else None,
-            args.chunk_count)
+            args.chunk_count, entitlement_key, args.playgo_languages)
         print(f"Created build bundle {output} with {count} explicit file mapping(s).")
         print(f"Final LibProsperoPkg-compatible package: {package}")
     else:
@@ -1184,7 +1255,7 @@ def main() -> None:
         count, skipped = build_gp5(
             root, output, args.volume, args.passcode, args.absolute_paths, keep,
             args.dds_converter.resolve() if args.dds_converter else None,
-            entitlement_key, args.auto_size_profile, args.chunk_count)
+            entitlement_key, args.auto_size_profile, args.chunk_count, args.playgo_languages)
         print(f"Created {output} with {count} explicit file mapping(s).")
     if skipped:
         print("Excluded " + str(len(skipped)) + " service/project artifact(s):")
