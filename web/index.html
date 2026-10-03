@@ -285,9 +285,12 @@
     <div class="grid2">
       <label>Compression level (-4 to 9)
         <input type="number" name="compression_level" min="-4" max="9"></label>
-      <label>PlayGo chunks (1 to 255)
-        <input type="number" name="chunk_count" min="1" max="255"></label>
+      <label>PlayGo chunks, when the dump has no playgo-chunk.dat (1 to 255)
+        <input type="number" name="chunk_count" min="1" max="255" placeholder="100"></label>
     </div>
+    <label>PlayGo languages, apps only (default: the dump's)
+      <input type="text" name="playgo_languages" autocomplete="off" spellcheck="false"
+             placeholder="en-US,ja-JP"></label>
     <label class="check"><input type="checkbox" name="force"> Replace existing outputs</label>
     <label data-single>Add-on entitlement key (32 hex digits)
       <input type="text" name="entitlement_key" autocomplete="off" spellcheck="false"

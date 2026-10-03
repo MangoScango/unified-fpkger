@@ -67,6 +67,12 @@ PASSCODE_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 FILENAME_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 ANSI_RE = re.compile(r"\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|[@-Z\\-_])")
 NEWLINE_RE = re.compile(r"\r+\n")
+# create-gp5-from-folder.py's PLAYGO_LANGUAGES, compared case-insensitively.
+PLAYGO_LANGUAGES = {code.casefold() for code in (
+    "ja-JP", "en-US", "fr-FR", "es-ES", "de-DE", "it-IT", "nl-NL", "pt-PT",
+    "ru-RU", "ko-KR", "zh-Hant", "zh-Hans", "fi-FI", "sv-SE", "da-DK", "no-NO",
+    "pl-PL", "pt-BR", "en-GB", "tr-TR", "es-419", "ar-AE", "fr-CA", "cs-CZ",
+    "hu-HU", "el-GR", "ro-RO", "th-TH", "vi-VN", "id-ID", "uk-UA")}
 
 
 def read_env_files():
@@ -563,7 +569,10 @@ def build_ps5(job, spec, src, out_dir):
             "--passcode", opts["passcode"],
             "--compression-level", str(opts["compression_level"])]
     if not addon:
-        argv += ["--chunk-count", str(opts["chunk_count"])]
+        if opts["chunk_count"] is not None:
+            argv += ["--chunk-count", str(opts["chunk_count"])]
+        if opts["playgo_languages"]:
+            argv += ["--playgo-languages", opts["playgo_languages"]]
         if opts.get("reference_pkg"):
             argv += ["--reference-package", opts["reference_pkg"]]
     elif opts["entitlement_key"]:
@@ -698,6 +707,13 @@ def ps5_spec(params):
     reference = optional_path(params, "reference_pkg", "reference package", "file")
     if reference and not reference.lower().endswith(".pkg"):
         raise BadRequest("the reference package must be a .pkg")
+    playgo_languages = ",".join(code.strip() for code in
+                                str(params.get("playgo_languages") or "").split(",")
+                                if code.strip())
+    unknown = [code for code in playgo_languages.split(",")
+               if code and code.casefold() not in PLAYGO_LANGUAGES]
+    if unknown:
+        raise BadRequest(f"unknown PlayGo language(s): {', '.join(unknown)}")
     entitlement_key = (params.get("entitlement_key") or "").strip()
     if entitlement_key and not PASSCODE_RE.match(entitlement_key):
         raise BadRequest("the entitlement key must be 32 hex digits")
@@ -705,7 +721,8 @@ def ps5_spec(params):
         "name": name, "passcode": passcode, "reference_pkg": reference,
         "compression_level": int_in(params, "compression_level", -4, 9, 7,
                                     "compression level"),
-        "chunk_count": int_in(params, "chunk_count", 1, 255, 100, "chunk count"),
+        "chunk_count": int_in(params, "chunk_count", 1, 255, None, "chunk count"),
+        "playgo_languages": playgo_languages,
         "temp_dir": (resolve_path(params["ps5_temp_dir"], "PS5 temp directory",
                                   create=True) if params.get("ps5_temp_dir") else None),
         "entitlement_key": entitlement_key.upper(),
@@ -968,7 +985,7 @@ def config():
         "ps5_temp_dir": usable_path(setting("LIBPROSPERO_TEMP_DIR")),
         "passcode": "0" * 32,
         "compression_level": "7",
-        "chunk_count": "100",
+        "chunk_count": "",
     }
     tools = {name: os.path.exists(path) for name, path in
              (("pfsdump", PFSDUMP), ("ftpdump", FTPDUMP),

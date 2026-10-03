@@ -12,7 +12,10 @@ PASSCODE="00000000000000000000000000000000"
 PYTHON="python3"
 TEMPORARY_DIRECTORY="${LIBPROSPERO_TEMP_DIR:-}"
 COMPRESSION_LEVEL=7
-CHUNK_COUNT=100
+# Empty means unset; the GP5 script prefers the source's playgo-chunk.dat and
+# falls back to 100.
+CHUNK_COUNT=""
+PLAYGO_LANGUAGES=""
 KEEP_INTERMEDIATE=0
 FORCE=0
 VOLUME=auto
@@ -30,7 +33,8 @@ usage() {
     echo "  --python <path>             (default: python3)"
     echo "  --temp-dir <dir>            (default: \$LIBPROSPERO_TEMP_DIR)"
     echo "  --compression-level <-4..9> (default: 7)"
-    echo "  --chunk-count <1..255>      (default: 100)"
+    echo "  --chunk-count <1..255>      apps only; used when the source has no sce_sys/playgo-chunk.dat (default: 100)"
+    echo "  --playgo-languages <list>   apps only; e.g. en-US,ru-RU (default: the source's languages)"
     echo "  --volume <auto|app|ac>      (default: auto; ac when there is no eboot.bin)"
     echo "  --entitlement-key <hex>     add-ons only (default: the source's $ENTITLEMENT_KEY_FILE, else 32 zeroes)"
     echo "  --keep-intermediate"
@@ -48,6 +52,7 @@ while [[ $# -gt 0 ]]; do
         --temp-dir) TEMPORARY_DIRECTORY="$2"; shift 2 ;;
         --compression-level) COMPRESSION_LEVEL="$2"; shift 2 ;;
         --chunk-count) CHUNK_COUNT="$2"; shift 2 ;;
+        --playgo-languages) PLAYGO_LANGUAGES="$2"; shift 2 ;;
         --volume) VOLUME="$2"; shift 2 ;;
         --entitlement-key) ENTITLEMENT_KEY="$2"; shift 2 ;;
         --keep-intermediate) KEEP_INTERMEDIATE=1; shift ;;
@@ -92,8 +97,19 @@ if [[ "$VOLUME" == app ]]; then
         echo "The source keystone must be exactly 96 bytes: $SOURCE_KEYSTONE" >&2
         exit 1
     fi
+    if [[ -n "$ENTITLEMENT_KEY" ]]; then
+        echo "--entitlement-key applies to add-on builds only" >&2
+        exit 1
+    fi
+    if [[ -n "$CHUNK_COUNT" ]] && ! [[ "$CHUNK_COUNT" =~ ^[0-9]+$ && "$CHUNK_COUNT" -ge 1 && "$CHUNK_COUNT" -le 255 ]]; then
+        echo "--chunk-count must be 1 through 255" >&2
+        exit 1
+    fi
 elif [[ -n "$REFERENCE_PACKAGE" ]]; then
     echo "--reference-package applies to application builds only" >&2
+    exit 1
+elif [[ -n "$CHUNK_COUNT" || -n "$PLAYGO_LANGUAGES" ]]; then
+    echo "--chunk-count and --playgo-languages apply to application builds only" >&2
     exit 1
 else
     KEY_FILE="$SOURCE_FOLDER/$ENTITLEMENT_KEY_FILE"
@@ -252,7 +268,10 @@ GP5_ARGS=(
 if [[ "$VOLUME" == ac ]]; then
     GP5_ARGS+=("--entitlement-key" "$ENTITLEMENT_KEY")
 else
-    GP5_ARGS+=("--keep-keystone" "--chunk-count" "$CHUNK_COUNT")
+    GP5_ARGS+=("--keep-keystone" "--chunk-count" "${CHUNK_COUNT:-100}")
+    if [[ -n "$PLAYGO_LANGUAGES" ]]; then
+        GP5_ARGS+=("--playgo-languages" "$PLAYGO_LANGUAGES")
+    fi
     if [[ -z "$REFERENCE" ]]; then
         GP5_ARGS+=("--auto-size-profile" "$AUTO_SIZE_PROFILE")
     else
