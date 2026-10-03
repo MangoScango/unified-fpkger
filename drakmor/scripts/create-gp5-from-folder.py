@@ -619,6 +619,8 @@ def read_source_chunk_count(root: Path, fallback: int, announce: bool = True) ->
 
 
 PLAYGO_FLT_MAGIC = b"\x7fFLT"
+# In every retail file map, but Publishing Tools writes them itself.
+PLAYGO_SDK_GENERATED_PATHS = ("sce_sys/about/right.sprx", "sce_sys/pfs-version.dat")
 PLAYGO_HASH_MIX = 0x8000000080008081
 MASK64 = (1 << 64) - 1
 
@@ -666,8 +668,24 @@ class SourcePlayGoLayout:
         present = {language for _label, languages in self.chunks for language in languages}
         return [language for language in PLAYGO_LANGUAGES if language in present]
 
+    def hash_of(self, path: str) -> int:
+        return playgo_path_hash(path, self.seed, self.key)
+
     def chunk_of(self, path: str) -> int | None:
-        return self.file_chunks.get(playgo_path_hash(path, self.seed, self.key))
+        return self.file_chunks.get(self.hash_of(path))
+
+    def missing_by_chunk(self, placed: set[int]) -> dict[int, tuple[int, int]]:
+        """{chunk: (missing, expected)} for chunks whose mapped files are not all placed."""
+        generated = {self.hash_of(path) for path in PLAYGO_SDK_GENERATED_PATHS}
+        expected: dict[int, int] = {}
+        missing: dict[int, int] = {}
+        for path_hash, chunk_id in self.file_chunks.items():
+            if path_hash in generated:
+                continue
+            expected[chunk_id] = expected.get(chunk_id, 0) + 1
+            if path_hash not in placed:
+                missing[chunk_id] = missing.get(chunk_id, 0) + 1
+        return {chunk_id: (count, expected[chunk_id]) for chunk_id, count in missing.items()}
 
 
 def read_source_playgo_layout(root: Path) -> SourcePlayGoLayout | None:
@@ -1083,6 +1101,7 @@ def build_gp5(
 
     files_node = ET.SubElement(project, "files")
     unmapped: list[str] = []
+    placed: set[int] = set()
     if has_scenario:
         ET.SubElement(files_node, "file", {
             "dst_path": "sce_sys/playgo-scenario.json",
@@ -1110,10 +1129,15 @@ def build_gp5(
             "src_path": source_path(output.parent, actual_source, absolute_paths),
         }
         if not is_psal:
-            chunk_id = layout.chunk_of(attributes["dst_path"]) if layout is not None else 0
-            if chunk_id is None:
-                unmapped.append(attributes["dst_path"])
-                chunk_id = 0
+            chunk_id = 0
+            if layout is not None:
+                path_hash = layout.hash_of(attributes["dst_path"])
+                chunk_id = layout.file_chunks.get(path_hash)
+                if chunk_id is None:
+                    unmapped.append(attributes["dst_path"])
+                    chunk_id = 0
+                else:
+                    placed.add(path_hash)
             attributes["chunk"] = str(chunk_id)
         ET.SubElement(files_node, "file", attributes)
     if layout is not None:
@@ -1123,6 +1147,14 @@ def build_gp5(
         if unmapped:
             shown = ", ".join(unmapped[:5]) + (", ..." if len(unmapped) > 5 else "")
             print(f"PlayGo: {len(unmapped)} file(s) not in the source map went to chunk 0: {shown}")
+        incomplete = layout.missing_by_chunk(placed)
+        for chunk_id, (count, expected) in sorted(incomplete.items()):
+            label, languages = layout.chunks[chunk_id]
+            print(f"[Warn] PlayGo chunk {chunk_id} ({label}; {' '.join(languages)}) is missing "
+                  f"{count} of its {expected} file(s) in the source")
+        if incomplete:
+            print("[Warn] The package still declares these chunks. Installing a language "
+                  "that uses them gives the game an incomplete data set.")
     indent(project)
     ET.ElementTree(project).write(output, encoding="utf-8", xml_declaration=True)
     return (len(files) + len(converted_pngs) + len(language_payloads) +
