@@ -19,9 +19,11 @@ For PSAL (`--volume al`), the project instead contains only its normalized metad
 (param.json and a validated 512x512 RGB icon0.png) and requires an entitlement key.
 Application projects read the PlayGo chunk count from sce_sys/playgo-chunk.dat when present.
 Without it, the fallback is 100 chunks, configurable from 1 through 255.
-Game files remain in chunk zero; each language declared by playgo-scenario.json gets a
-small generated, uncompressed payload. Languages share a chunk when the configured count
-is too small to assign each a separate chunk. Remaining chunks are empty placeholders.
+When the source also has playgo-hash-table.dat and playgo-ficm.dat, its chunk labels,
+chunk languages and file-to-chunk assignments are kept.
+Otherwise game files remain in chunk zero; each language declared by playgo-scenario.json
+gets a small generated, uncompressed payload. Languages share a chunk when the configured
+count is too small to assign each a separate chunk. Remaining chunks are empty placeholders.
 Source scenarios and localized presentation strings are retained, and every scenario
 contains all configured chunks and marks all of them as initial/required.
 
@@ -593,7 +595,7 @@ def default_scenario(language: str) -> dict[str, object]:
     }
 
 
-def read_source_chunk_count(root: Path, fallback: int) -> int:
+def read_source_chunk_count(root: Path, fallback: int, announce: bool = True) -> int:
     """Read only the chunk count from a validated PS5 PlayGo descriptor header."""
     source = root / "sce_sys" / "playgo-chunk.dat"
     if not source.exists():
@@ -611,8 +613,119 @@ def read_source_chunk_count(root: Path, fallback: int) -> int:
             not 1 <= scenarios <= MAX_PLAYGO_SCENARIO_COUNT):
         raise ValueError(
             f"{source}: unsupported PlayGo counts: {chunks} chunks, {scenarios} scenarios")
-    print(f"PlayGo: using {chunks} chunks from {source}")
+    if announce:
+        print(f"PlayGo: using {chunks} chunks from {source}")
     return chunks
+
+
+PLAYGO_FLT_MAGIC = b"\x7fFLT"
+PLAYGO_HASH_MIX = 0x8000000080008081
+MASK64 = (1 << 64) - 1
+
+
+def _rol64(value: int, count: int) -> int:
+    return ((value << count) | (value >> (64 - count))) & MASK64
+
+
+def _playgo_mix(a: int, b: int, c: int) -> tuple[int, int, int]:
+    x = _rol64(_rol64(c ^ b, 5) ^ a, 53)
+    y = _rol64(_rol64(c ^ a, 17) ^ b, 11)
+    z = _rol64(_rol64(b ^ a, 1) ^ c, 59)
+    return (((~y & z) ^ x ^ PLAYGO_HASH_MIX) & MASK64,
+            ((~z & x) ^ y) & MASK64, ((~x & y) ^ z) & MASK64)
+
+
+def playgo_path_hash(path: str, seed: int, key: int) -> int:
+    """Hash an image-relative path (no leading slash) as playgo-hash-table.dat stores it.
+
+    seed and key are read from that file's header; they vary between packages.
+    """
+    data = path.encode("utf-8").upper()
+    a, b, c = seed, _rol64(seed, 11), _rol64(seed, 23)
+    tail = 0
+    if data:
+        blocks, rest = divmod(len(data) - 1, 8)
+        for index in range(blocks):
+            a ^= struct.unpack_from("<Q", data, index * 8)[0]
+            a, b, c = _playgo_mix(a, b, c)
+        tail = int.from_bytes(data[blocks * 8:blocks * 8 + rest + 1], "little")
+    return _playgo_mix(tail ^ a ^ key, b, c)[0]
+
+
+class SourcePlayGoLayout:
+    """Chunk labels and languages, and each file's chunk keyed by path hash."""
+
+    def __init__(self, chunks: list[tuple[str, list[str]]], file_chunks: dict[int, int],
+                 seed: int, key: int):
+        self.chunks = chunks
+        self.file_chunks = file_chunks
+        self.seed, self.key = seed, key
+
+    @property
+    def languages(self) -> list[str]:
+        present = {language for _label, languages in self.chunks for language in languages}
+        return [language for language in PLAYGO_LANGUAGES if language in present]
+
+    def chunk_of(self, path: str) -> int | None:
+        return self.file_chunks.get(playgo_path_hash(path, self.seed, self.key))
+
+
+def read_source_playgo_layout(root: Path) -> SourcePlayGoLayout | None:
+    """Read the layout from sce_sys/playgo-{chunk,hash-table,ficm}.dat.
+
+    Returns None when any of the three is missing or every file is in chunk 0.
+    The ficm holds one chunk per entry of the sorted hash table.
+    """
+    system = root / "sce_sys"
+    chunk_path = system / "playgo-chunk.dat"
+    hash_path = system / "playgo-hash-table.dat"
+    ficm_path = system / "playgo-ficm.dat"
+    if not (chunk_path.is_file() and hash_path.is_file() and ficm_path.is_file()):
+        return None
+    chunk_dat = chunk_path.read_bytes()
+    hash_table = hash_path.read_bytes()
+    ficm = ficm_path.read_bytes()
+
+    if (len(hash_table) < 0x38 or hash_table[0x18:0x1c] != PLAYGO_FLT_MAGIC or
+            struct.unpack_from("<I", hash_table, 0x08)[0] != 0x38):
+        raise ValueError(f"{hash_path}: unrecognized header")
+    file_count = struct.unpack_from("<I", hash_table, 0x24)[0]
+    seed, key = struct.unpack_from("<QQ", hash_table, 0x28)
+    if len(hash_table) != 0x38 + file_count * 8:
+        raise ValueError(f"{hash_path}: size does not match {file_count} entries")
+    if (len(ficm) < 0x10 or struct.unpack_from("<I", ficm, 0x08)[0] != 0x10 or
+            struct.unpack_from("<I", ficm, 0x0c)[0] != file_count * 2 or
+            len(ficm) != 0x10 + file_count * 2):
+        raise ValueError(f"{ficm_path}: does not describe {file_count} files")
+    hashes = struct.unpack_from(f"<{file_count}Q", hash_table, 0x38)
+    file_chunk_ids = struct.unpack_from(f"<{file_count}H", ficm, 0x10)
+
+    chunk_count = read_source_chunk_count(root, DEFAULT_PLAYGO_CHUNK_COUNT, announce=False)
+    attrs_offset, attrs_size = struct.unpack_from("<II", chunk_dat, 0xc0)
+    labels_offset, labels_size = struct.unpack_from("<II", chunk_dat, 0xd0)
+    if attrs_size != chunk_count * 0x20 or attrs_offset + attrs_size > len(chunk_dat):
+        raise ValueError(f"{chunk_path}: chunk attribute table does not match {chunk_count} chunks")
+    labels = chunk_dat[labels_offset:labels_offset + labels_size]
+    chunks: list[tuple[str, list[str]]] = []
+    for chunk_id in range(chunk_count):
+        entry = attrs_offset + chunk_id * 0x20
+        # Bit 63 is ja-JP, then down through PLAYGO_LANGUAGES in order.
+        mask = struct.unpack_from("<Q", chunk_dat, entry + 0x10)[0]
+        label_at = struct.unpack_from("<I", chunk_dat, entry + 0x1c)[0]
+        end = labels.find(b"\0", label_at)
+        label = (labels[label_at:end if end >= 0 else None].decode("utf-8", "replace")
+                 if label_at < len(labels) else "")
+        languages = [language for bit, language in enumerate(PLAYGO_LANGUAGES)
+                     if mask >> (63 - bit) & 1]
+        if not languages:
+            raise ValueError(f"{chunk_path}: chunk {chunk_id} has no known languages")
+        chunks.append((label or f"Chunk #{chunk_id}", languages))
+
+    if any(chunk_id >= chunk_count for chunk_id in file_chunk_ids):
+        raise ValueError(f"{ficm_path}: refers to a chunk past {chunk_count}")
+    if not any(file_chunk_ids):
+        return None
+    return SourcePlayGoLayout(chunks, dict(zip(hashes, file_chunk_ids)), seed, key)
 
 
 def parse_playgo_languages(value: str) -> list[str]:
@@ -794,8 +907,18 @@ def build_gp5(
         raise ValueError(f"PlayGo chunk count must be 1..{MAX_PLAYGO_CHUNK_COUNT}")
     if volume != "app" and chunk_count != DEFAULT_PLAYGO_CHUNK_COUNT:
         raise ValueError("custom PlayGo chunk count supports APP volumes only")
+    layout = None
     if volume == "app":
         chunk_count = read_source_chunk_count(root, chunk_count)
+        layout = read_source_playgo_layout(root)
+        if layout is not None and selected_languages is not None:
+            print("PlayGo: --playgo-languages given; replacing the source chunk layout "
+                  "with generated chunks")
+            layout = None
+        if layout is not None:
+            chunk_count = len(layout.chunks)
+            # The chunk masks can list more languages than playgo-scenario.json.
+            selected_languages = layout.languages
     is_psal = volume == "al"
     has_scenario = volume not in {"ac", "al"}
     scenario_input = output.with_suffix(".playgo-scenario.json")
@@ -877,7 +1000,7 @@ def build_gp5(
     executable_replacements = ({} if is_psal else
                                prepare_executable_inputs(root, files, generated_root))
     language_payloads = (write_language_payloads(generated_root, chunk_languages, chunk_count)
-                         if volume == "app" else [])
+                         if volume == "app" and layout is None else [])
     size_selection = None
     if auto_size_profile is not None:
         mapped_files = [executable_replacements.get(file, file) for file in files
@@ -932,12 +1055,16 @@ def build_gp5(
             "default_language": chunk_default_language,
         })
         for chunk_id in range(chunk_count):
-            assigned_languages = [language for index, language in
-                                  enumerate(chunk_languages, start=1)
-                                  if min(index, chunk_count - 1) == chunk_id]
+            if layout is not None:
+                label, assigned_languages = layout.chunks[chunk_id]
+            else:
+                label = f"Chunk #{chunk_id}"
+                assigned_languages = [language for index, language in
+                                      enumerate(chunk_languages, start=1)
+                                      if min(index, chunk_count - 1) == chunk_id]
             attributes = {
                 "id": str(chunk_id),
-                "label": f"Chunk #{chunk_id}",
+                "label": label,
                 "layer_no": "0",
                 "languages": (" ".join(assigned_languages) if assigned_languages
                               else " ".join(chunk_languages)),
@@ -955,6 +1082,7 @@ def build_gp5(
             scenario.text = f"0-{chunk_count - 1}" if chunk_count > 1 else "0"
 
     files_node = ET.SubElement(project, "files")
+    unmapped: list[str] = []
     if has_scenario:
         ET.SubElement(files_node, "file", {
             "dst_path": "sce_sys/playgo-scenario.json",
@@ -982,8 +1110,19 @@ def build_gp5(
             "src_path": source_path(output.parent, actual_source, absolute_paths),
         }
         if not is_psal:
-            attributes["chunk"] = "0"
+            chunk_id = layout.chunk_of(attributes["dst_path"]) if layout is not None else 0
+            if chunk_id is None:
+                unmapped.append(attributes["dst_path"])
+                chunk_id = 0
+            attributes["chunk"] = str(chunk_id)
         ET.SubElement(files_node, "file", attributes)
+    if layout is not None:
+        print(f"PlayGo: kept the source layout ({chunk_count} chunks, languages "
+              f"{' '.join(chunk_languages)}); {len(files) - len(unmapped)} of "
+              f"{len(files)} files placed from playgo-ficm.dat")
+        if unmapped:
+            shown = ", ".join(unmapped[:5]) + (", ..." if len(unmapped) > 5 else "")
+            print(f"PlayGo: {len(unmapped)} file(s) not in the source map went to chunk 0: {shown}")
     indent(project)
     ET.ElementTree(project).write(output, encoding="utf-8", xml_declaration=True)
     return (len(files) + len(converted_pngs) + len(language_payloads) +
