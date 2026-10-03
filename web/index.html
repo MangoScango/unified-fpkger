@@ -808,6 +808,7 @@ async function pollJob() {
   const state = $("#job-state");
   state.textContent = parts.join(" · ") + (job.error ? ` — ${job.error}` : "");
   state.className = job.status === "failed" ? "error" : "";
+  state.style.whiteSpace = "pre-line";
   const outs = $("#job-outputs");
   outs.replaceChildren(...job.outputs.map(o => Object.assign(document.createElement("li"), {textContent: o})));
   $("#job-cancel").hidden = Boolean(job.finished);

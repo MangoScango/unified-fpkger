@@ -278,6 +278,7 @@ else
 fi
 
 PUBLISHER="$TOOLKIT/toolchain/prospero-pub-cmd.exe"
+WINEPREFIX_DIR="${WINEPREFIX:-$HOME/.wine}"
 SDK_STARTED="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 SDK_STARTED_EPOCH="$(date +%s)"
 
@@ -287,8 +288,8 @@ if [[ -n "$REFERENCE" ]]; then
 fi
 PUBLISHER_ARGS+=("$GP5" "$PARTIAL")
 
-wine "$PUBLISHER" "${PUBLISHER_ARGS[@]}"
-SDK_EXIT_CODE=$?
+SDK_EXIT_CODE=0
+wine "$PUBLISHER" "${PUBLISHER_ARGS[@]}" || SDK_EXIT_CODE=$?
 
 SDK_FINISHED="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 SDK_FINISHED_EPOCH="$(date +%s)"
@@ -312,7 +313,14 @@ exit_code=$SDK_EXIT_CODE
 EOF
 
 if [[ "$SDK_EXIT_CODE" -ne 0 ]]; then
-    echo "PKG creation failed with exit code $SDK_EXIT_CODE" >&2
+    echo "PKG creation failed: img_create exited with $SDK_EXIT_CODE after ${ELAPSED}s" >&2
+    # Without --temp-dir, img_create stages in wine's %TEMP%, which lives in
+    # the prefix and is easy to fill with a large title.
+    for dir in "$OUTPUT_DIRECTORY" "${TEMP:-$WINEPREFIX_DIR/drive_c}"; do
+        [[ -d "$dir" ]] && df -h --output=avail,target "$dir" | tail -1 \
+            | awk -v d="$dir" '{print "  free space: " $1 " on " $2 " (" d ")"}' >&2
+    done
+    echo "  details: $LOG_DIRECTORY/02-img-create.log" >&2
     exit 1
 fi
 

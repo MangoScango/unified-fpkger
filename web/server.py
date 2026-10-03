@@ -273,6 +273,17 @@ class Job:
             self._commit(self.partial.rstrip("\r").rsplit("\r", 1)[-1])
         self.partial = ""
 
+    def tail(self, since, count=6):
+        """The last non-blank output lines committed after line number since."""
+        with self.lock:
+            first = self.line_count - len(self.lines)
+            recent = list(itertools.islice(self.lines, max(since - first, 0), None))
+        # >> lines are the server's own narration; progress bars say nothing.
+        useful = [line.strip() for line in recent
+                  if line.strip() and not line.startswith(">> ")
+                  and line.strip("=|_.0123456789 ")]
+        return useful[-count:]
+
     def close_log(self):
         self._log.close()
 
@@ -433,9 +444,12 @@ def dump_step(job, spec, title, method):
         # taken when the build needs the layers apart.
         argv = [FTPDUMP, f"{host}:{port}", "-a", "-d", "-k", "-p", "-r",
                 "-j", str(spec["jobs"]), "-o", dump_dir]
+    start = job.line_count
     rc = run(job, argv, cwd=dump_dir)
     if rc != 0:
-        raise JobError(f"{method} dump failed (exit {rc})")
+        detail = job.tail(start)
+        raise JobError(f"{method} dump failed (exit {rc})"
+                       + "".join(f"\n  {line}" for line in detail))
     app_dir = os.path.join(dump_dir, f"{title}-app")
     if not os.path.isdir(app_dir):
         raise JobError(f"the dump finished but {app_dir} is missing")
@@ -570,9 +584,13 @@ def build_ps5(job, spec, src, out_dir):
 
 
 def run_build(job, argv, out_dir, before, label):
+    start = job.line_count
     rc = run(job, argv, cwd=out_dir)
     if rc != 0:
-        raise JobError(f"{label.upper()} build failed (exit {rc})")
+        detail = job.tail(start)
+        raise JobError(f"{label.upper()} build failed (exit {rc})"
+                       + ("".join(f"\n  {line}" for line in detail) if detail
+                          else ": the build printed nothing after its last step"))
     built = sorted(os.path.join(out_dir, name)
                    for name, mtime in package_mtimes(out_dir).items()
                    if before.get(name) != mtime)
