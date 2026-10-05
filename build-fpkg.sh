@@ -168,6 +168,7 @@ ORBIS_PUB_CMD="${ORBIS_PUB_CMD:-$SDK_DIR/orbis-pub-cmd.exe}"
 MAKE_FSELF="${MAKE_FSELF:-$SELF_DIR/make_fself.py}"
 BACKPORT_SDK="${BACKPORT_SDK:-$SELF_DIR/backport-sdk.py}"
 PKG_SET_APPVER="${PKG_SET_APPVER:-$SELF_DIR/pkg-set-appver.py}"
+SHRINK_PNG="${SHRINK_PNG:-$SELF_DIR/shrink-png.py}"
 SFO_TOOL="${SFO_TOOL:-$SELF_DIR/sfo}"
 FAKE_PASSCODE="00000000000000000000000000000000"
 DLC_ENT_KEY="00000000000000000000000000000000"   # zero entitlement key (kstuff fakes the check)
@@ -295,6 +296,8 @@ wine_run() {
 winpath() { winepath -w "$1"; }
 sfo_get() { "$SFO_TOOL" "$1" -q "$2" 2>/dev/null | tr -d '\r\n'; }
 sfo_edit() { "$SFO_TOOL" "$@" >/dev/null 2>&1 || true; }
+# Publishing Tools rejects icon0*.png over 1 MiB; some dumps pad them with metadata.
+fix_icons() { python3 "$SHRINK_PNG" "$1" || die "icon0 in $1 is too large for Publishing Tools"; }
 
 # --- args ------------------------------------------------------------------
 # UPDATE: "" = auto-discover sibling "-patch" dir; "none" = base-only;
@@ -513,6 +516,7 @@ stage_tree() {
     cp -a "$UPDATE/." "$stage/"
     dedupe_case "$stage" "$UPDATE"
   fi
+  fix_icons "$stage/sce_sys"
 
   if [ "$IS_PS2" -eq 1 ]; then
     local paid auth file
@@ -662,6 +666,7 @@ stage_from() {
     # the overlay carries whichever param.sfo the backport last collected
     cp -a "$src/sce_sys/param.sfo" "$stage/sce_sys/param.sfo"
   fi
+  fix_icons "$stage/sce_sys"
   unlink_executables "$stage"
 }
 
@@ -846,6 +851,7 @@ build_variant_patch() {
   # An executable can live under sce_sys too, so the collected copies go last.
   cp -a "$bp/sce_sys/." "$stage/sce_sys/"
   cp -a "$src_sys/param.sfo" "$stage/sce_sys/param.sfo"
+  fix_icons "$stage/sce_sys"
   unlink_executables "$stage"
 
   gen_gp4 "$stage" "$GENGP4_PATCH"; gp4="$stage.gp4"
@@ -924,6 +930,7 @@ build_one_dlc() {
   #    hardlink would write straight through to the original dump.
   cp -al "$ac" "$stage" 2>/dev/null || cp -a "$ac" "$stage"
   rm -rf "$stage/sce_sys"; cp -a "$ac/sce_sys" "$stage/sce_sys"
+  fix_icons "$stage/sce_sys"
 
   # 2. make the staged sfo look like an app so gengp4_app can scan it. CATEGORY
   #    alone is not enough; it also needs the app keys an ac sfo lacks.
@@ -996,6 +1003,7 @@ build_one_al() {
   local have_icon=0
   if [ -f "$al/sce_sys/icon0.png" ]; then
     cp "$al/sce_sys/icon0.png" "$stage/sce_sys/icon0.png"
+    fix_icons "$stage/sce_sys"
     have_icon=1
   fi
 
