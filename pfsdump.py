@@ -1161,7 +1161,7 @@ def entitlement_label(ac_mount):
 # running game, asks libSceNpEntitlementAccess for every add-on's key and
 # reports back on the same socket.
 ELF_LOADER_PORT = 9021
-ENTITLEMENT_TIMEOUT = 600
+ENTITLEMENT_TIMEOUT = 60
 ENTITLEMENTS_FILE = "entitlements.txt"
 ENTITLEMENT_KEY_FILE = "entitlement_key.dat"
 ENTITLEMENT_LABEL_LINE = re.compile(r"entitlements: \[(\d+)\] label=(\S+)")
@@ -1227,6 +1227,7 @@ def running_game_entitlements(host, title, running, injector):
               f"{injector}", file=sys.stderr)
         return None
     try:
+        print("Injecting ps5-entitlement-dumper")
         found = dump_entitlements(host, injector)
     except (OSError, RuntimeError) as err:
         print(f"  warning: could not read entitlement keys via "
