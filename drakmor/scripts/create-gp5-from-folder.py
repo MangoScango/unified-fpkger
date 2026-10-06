@@ -567,8 +567,13 @@ def convert_dds_images(
         preserve_alpha = required_color is None or required_color == 6
         mode = "RGBA" if preserve_alpha else "RGB"
         print(f"Converting sce_sys/{source.name} to {png_name} ({mode})...")
-        command = (['wine',sys.executable, str(converter)]
-                   if converter.suffix.casefold() == ".py" else [str(converter)])
+        suffix = converter.suffix.casefold()
+        if suffix == ".py":
+            command = [sys.executable, str(converter)]
+        elif suffix == ".exe" and os.name != "nt":
+            command = ['wine', str(converter)]
+        else:
+            command = [str(converter)]
         command.extend([str(source), str(destination)])
         if preserve_alpha:
             command.append("--preserve-alpha")
