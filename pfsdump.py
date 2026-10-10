@@ -1171,7 +1171,7 @@ ENTITLEMENT_DONE = b"entitlements: done"
 
 def default_injector():
     return os.environ.get("ENTITLEMENT_INJECTOR") or os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "entitlement-injector.elf")
+        os.path.dirname(os.path.realpath(__file__)), "entitlements.elf")
 
 
 def dump_entitlements(host, injector, port=ELF_LOADER_PORT,
@@ -1736,7 +1736,7 @@ def main():
                         help="PS5: do not read add-on entitlement keys from "
                              "the running game")
     parser.add_argument("--injector", default=default_injector(),
-                        help="ps5-entitlement-dumper's entitlement-injector.elf "
+                        help="ps5-entitlement-dumper's entitlements.elf "
                              "(default: $ENTITLEMENT_INJECTOR, else beside this "
                              "script)")
     parser.add_argument("--manifest", action="store_true",

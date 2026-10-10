@@ -84,9 +84,9 @@ COPY docs/fw-levels.csv docs/fw-exports.csv docs/fw-export-gaps.csv \
      /opt/fpkger/docs/
 # pfsdump sends this to the console's payload loader to read PS5 add-on
 # entitlement keys from the running game.
-ARG ENTITLEMENT_INJECTOR_URL=https://github.com/MangoScango/ps5-entitlement-dumper/releases/latest/download/entitlement-injector.elf
-ADD --chmod=644 "$ENTITLEMENT_INJECTOR_URL" /opt/fpkger/entitlement-injector.elf
-ENV ENTITLEMENT_INJECTOR=/opt/fpkger/entitlement-injector.elf
+ARG ENTITLEMENT_INJECTOR_URL=https://github.com/MangoScango/ps5-entitlement-dumper/releases/latest/download/entitlements.elf
+ADD --chmod=644 "$ENTITLEMENT_INJECTOR_URL" /opt/fpkger/entitlements.elf
+ENV ENTITLEMENT_INJECTOR=/opt/fpkger/entitlements.elf
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY drakmor /opt/fpkger/drakmor
 COPY web /opt/fpkger/web
