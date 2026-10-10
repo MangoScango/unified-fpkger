@@ -55,6 +55,14 @@ PFSDUMP = os.path.join(TOOLS, "pfsdump.py")
 FTPDUMP = os.environ.get("FTPDUMP") or os.path.join(TOOLS, "ftpdump.sh")
 BUILD_FPKG = os.environ.get("BUILD_FPKG") or os.path.join(TOOLS, "build-fpkg.sh")
 BUILD_PS5 = os.environ.get("BUILD_PS5") or os.path.join(TOOLS, "build-ps5.sh")
+BACKPORT_PS5 = (os.environ.get("BACKPORT_PS5")
+                or os.path.join(TOOLS, "another-backporter", "backport-ps5.py"))
+MAKE_FSELF = os.path.join(TOOLS, "make_fself.py")
+PROSPERO_PUB_CMD = os.path.join(TOOLS, "drakmor", "toolchain", "prospero-pub-cmd.exe")
+# another-backporter's SOURCE_FW: the firmware whose modules the fakelibs are
+# built from, so the libraries folder must hold its dump.
+BACKPORT_SOURCE_FW = "13.60"
+BACKPORT_TIERS = ("7xx", "4xx")
 DEFAULT_FTP_PORT = 2121
 # orbis-pub-cmd wraps its output to the terminal width, truncating paths.
 PTY_COLUMNS, PTY_ROWS = 400, 50
@@ -315,7 +323,7 @@ class Job:
         return info
 
 
-def run(job, argv, cwd):
+def run(job, argv, cwd, env_extra=None):
     """Runs argv on a pty, streaming its output into the job. Returns the rc.
 
     A pty keeps the tools' progress displays on, since they only draw them for
@@ -328,6 +336,8 @@ def run(job, argv, cwd):
     fcntl.ioctl(slave, termios.TIOCSWINSZ,
                 struct.pack("HHHH", PTY_ROWS, PTY_COLUMNS, 0, 0))
     env = dict(os.environ, COLUMNS=str(PTY_COLUMNS), PYTHONUNBUFFERED="1")
+    if env_extra:
+        env.update(env_extra)
     try:
         proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                 stdout=slave, stderr=slave, start_new_session=True)
@@ -608,6 +618,44 @@ def run_build(job, argv, out_dir, before, label):
         job.say(f"warning: the build succeeded but no new .pkg is in {out_dir}")
 
 
+def backport_step(job, spec):
+    """another-backporter's end-to-end run: acquire, unwrap, plan, build.
+
+    Writes loose files (the fakelib set plus patched game executables) into
+    spec["out"]; nothing here packages them.
+    """
+    src, out = spec["source"], spec["out"]
+    job.step = f"backporting {os.path.basename(src.rstrip(os.sep))} to {spec['tier']}"
+    argv = [sys.executable, BACKPORT_PS5, "run", src, out, "--tier", spec["tier"]]
+    if spec["title"]:
+        argv += ["--title", spec["title"]]
+    for key, flag in (("allow_unreviewed", "--allow-unreviewed"),
+                      ("unpeg_shim", "--unpeg-shim")):
+        if spec[key]:
+            argv.append(flag)
+    # The acquired and unwrapped binaries are worth keeping between runs.
+    data = setting("BACKPORT_DATA_DIR") or os.path.join(ROOTS[0], "ps5backport-data")
+    env = {"PS5BACKPORT_LIBS": spec["libs_dir"],
+           "PS5BACKPORT_CACHE": os.path.join(data, "binaries"),
+           "PS5BACKPORT_ELF_CACHE": os.path.join(data, "binaries-elf")}
+    os.makedirs(env["PS5BACKPORT_CACHE"], exist_ok=True)
+    os.makedirs(env["PS5BACKPORT_ELF_CACHE"], exist_ok=True)
+    for key, path in (("PS5BACKPORT_MAKE_FSELF", MAKE_FSELF),
+                      ("PS5BACKPORT_PUB_CMD", PROSPERO_PUB_CMD)):
+        if not os.environ.get(key) and os.path.exists(path):
+            env[key] = path
+    start = job.line_count
+    rc = run(job, argv, cwd=spec["out_dir"], env_extra=env)
+    if rc != 0:
+        detail = job.tail(start)
+        raise JobError(f"backport failed (exit {rc})"
+                       + "".join(f"\n  {line}" for line in detail))
+    job.outputs.append(out)
+    report = os.path.join(spec["out_dir"], os.path.basename(out) + "-report.json")
+    if os.path.isfile(report):
+        job.outputs.append(report)
+
+
 def delete_dumps(job, dump_dir, title, out_dir):
     """Removes this title's dump directories after a successful build."""
     for suffix in ("app", "patch", "dlc", "keystone"):
@@ -628,6 +676,8 @@ def execute(job):
         dump_step(job, spec, title, "pfs")
     elif job.kind == "build":
         build_step(job, spec, spec["source_dir"], spec["platform"])
+    elif job.kind == "backport":
+        backport_step(job, spec)
     else:
         title, platform = probe(job, spec["host"], spec["port"], spec["title"])
         if platform in spec["option_problems"]:
@@ -731,6 +781,43 @@ def ps5_spec(params):
     }
 
 
+def backport_spec(params):
+    """Options for another-backporter's `run`: a dump or pkg, a target tier."""
+    value = (params.get("source") or "").strip()
+    if not value:
+        raise BadRequest("source is required")
+    if not os.path.isabs(value):
+        value = os.path.join(ROOTS[0], value)
+    src = os.path.realpath(value)
+    if not inside_roots(src):
+        raise BadRequest(f"source must be under {', '.join(ROOTS)}")
+    if not os.path.isdir(src):
+        if not (os.path.isfile(src) and src.lower().endswith(".pkg")):
+            raise BadRequest(f"source is neither a dump folder nor a .pkg: {src}")
+        if not (os.environ.get("PS5BACKPORT_PUB_CMD")
+                or os.path.exists(PROSPERO_PUB_CMD)):
+            raise BadRequest("pkg input needs prospero-pub-cmd.exe, which is missing")
+    tier = params.get("tier") or "7xx"
+    if tier not in BACKPORT_TIERS:
+        raise BadRequest(f"unknown tier: {tier}")
+    libs = resolve_path(params.get("libs_dir"), "firmware libraries")
+    if not os.path.isdir(os.path.join(libs, BACKPORT_SOURCE_FW)):
+        raise BadRequest(f"firmware libraries: no {BACKPORT_SOURCE_FW} dump in {libs}")
+    title = checked(params, "title", TITLE_RE, "title ID")
+    out_dir = resolve_path(params.get("out_dir"), "output directory", create=True)
+    # build_title() deletes the output folder outright before writing, so the
+    # server names it and refuses to reuse one that already exists.
+    m = re.search(r"[A-Z]{4}[0-9]{5}", os.path.basename(src.rstrip(os.sep)))
+    name = title or (m.group(0) if m else "backport")
+    out = os.path.join(out_dir, f"{name}-backport")
+    if os.path.exists(out):
+        raise BadRequest(f"output folder already exists: {out}")
+    return {"source": src, "title": title, "tier": tier, "libs_dir": libs,
+            "out_dir": out_dir, "out": out,
+            "allow_unreviewed": bool(params.get("allow_unreviewed")),
+            "unpeg_shim": bool(params.get("unpeg_shim"))}
+
+
 def build_job(kind, params):
     """Validates a submission into a Job, raising BadRequest on anything off."""
     if not isinstance(params, dict):
@@ -775,6 +862,11 @@ def build_job(kind, params):
             raise BadRequest("; ".join(f"{p.upper()}: {e}" for p, e in problems.items()))
         spec["option_problems"] = problems
         summary = f"Dump+Build {spec['title'] or 'running game'} from {spec['host']}"
+    elif kind == "backport":
+        if not os.path.isfile(BACKPORT_PS5):
+            raise BadRequest(f"another-backporter is not installed: {BACKPORT_PS5}")
+        spec.update(backport_spec(params))
+        summary = f"Backport {os.path.basename(spec['source'].rstrip(os.sep))} ({spec['tier']})"
     else:
         raise BadRequest(f"unknown job kind: {kind}")
     return Job(kind, spec, summary)
@@ -986,10 +1078,13 @@ def config():
         "passcode": "0" * 32,
         "compression_level": "7",
         "chunk_count": "",
+        "libs_dir": usable_path(setting("PS5BACKPORT_LIBS")),
+        "tier": "7xx",
     }
     tools = {name: os.path.exists(path) for name, path in
              (("pfsdump", PFSDUMP), ("ftpdump", FTPDUMP),
-              ("build-fpkg", BUILD_FPKG), ("build-ps5", BUILD_PS5))}
+              ("build-fpkg", BUILD_FPKG), ("build-ps5", BUILD_PS5),
+              ("backport-ps5", BACKPORT_PS5))}
     return {"defaults": defaults, "roots": ROOTS, "tools": tools,
             "log_dir": LOG_DIR}
 

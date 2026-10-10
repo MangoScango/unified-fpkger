@@ -22,6 +22,11 @@ ARG PKGTOOLS_REF=main
 RUN git clone --depth 1 --branch "$PKGTOOLS_REF" "$PKGTOOLS_REPO" /out-pkgtools \
     && rm -rf /out-pkgtools/.git
 
+ARG BACKPORTER_REPO=https://github.com/MangoScango/another-backporter
+ARG BACKPORTER_REF=master
+RUN git clone --depth 1 --branch "$BACKPORTER_REF" "$BACKPORTER_REPO" /out-backporter \
+    && rm -rf /out-backporter/.git
+
 FROM debian:trixie-slim
 
 ARG WINE_BRANCH=stable
@@ -43,8 +48,11 @@ RUN dpkg --add-architecture i386 \
         bash coreutils sed grep findutils \
         xvfb gosu \
         curl sqlite3 lftp binutils \
+        clang lld \
     && rm -rf "/opt/wine-${WINE_BRANCH}/lib/wine/i386-unix" \
     && rm -rf /var/lib/apt/lists/*
+# clang + lld are only for another-backporter's --unpeg-shim, which assembles
+# ps5backport/vrr_shim.s at build time.
 
 # Consumed by build-fpkg.sh's ${VAR:-default} tool-path hooks.
 ENV SDK_DIR=/opt/fpkger/PS4_Fake_PKG_Tools_3 \
@@ -55,11 +63,15 @@ ENV SDK_DIR=/opt/fpkger/PS4_Fake_PKG_Tools_3 \
     PKG_SET_APPVER=/opt/fpkger/pkg-set-appver.py \
     BACKPORT_SDK=/opt/fpkger/backport-sdk.py \
     FW_EXPORT_DB=/opt/fpkger/docs \
+    BACKPORT_PS5=/opt/fpkger/another-backporter/backport-ps5.py \
+    PS5BACKPORT_MAKE_FSELF=/opt/fpkger/make_fself.py \
+    PS5BACKPORT_PUB_CMD=/opt/fpkger/drakmor/toolchain/prospero-pub-cmd.exe \
     WINEDEBUG=-all \
     WINEDLLOVERRIDES="wineps.drv,localspl.dll,spoolss.dll=d"
 
-COPY --from=deps /out-sfo      /opt/fpkger/sfo
-COPY --from=deps /out-pkgtools /opt/fpkger/PS4_Fake_PKG_Tools_3
+COPY --from=deps /out-sfo        /opt/fpkger/sfo
+COPY --from=deps /out-pkgtools   /opt/fpkger/PS4_Fake_PKG_Tools_3
+COPY --from=deps /out-backporter /opt/fpkger/another-backporter
 # ftpdump takes sfo from its own directory when sfo_path is unset, so they ship
 # side by side.
 COPY *.sh *.py \

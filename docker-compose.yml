@@ -24,6 +24,9 @@ services:
       PGID: 100
       # The UI can only browse and write under these, colon-separated.
       WEB_ROOTS: /work:/ps4dumps
+      # Default firmware libraries folder for the Backport tab
+      # Must be under one of the WEB_ROOTS above.
+      # PS5BACKPORT_LIBS: /work/PS5_Libs
       # Without it, anyone who can reach the port can run dumps and builds.
       # WEB_PASSWORD: change-me
     volumes:
