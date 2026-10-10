@@ -37,11 +37,12 @@
 #   module in the dump satisfies itself are not counted; a game bundles its own
 #   libc and friends under sce_module.
 #
-#   It reads the tables build-export-db.py writes, by default from ./docs beside
-#   this file and otherwise from $FW_EXPORT_DB. An import no sampled firmware
-#   exports is an error rather than a lower floor, because lowering the stamp
-#   does not conjure the symbol and the result would not load. Adding a newer
-#   firmware dump or naming an explicit --sdk are the ways past it.
+#   It reads the tables another-backporter's fwdb/ carries, by default from the
+#   submodule beside this file and otherwise from $FW_EXPORT_DB. An import no
+#   sampled firmware exports is an error rather than a lower floor, because
+#   lowering the stamp does not conjure the symbol and the result would not
+#   load. Adding a newer firmware dump or naming an explicit --sdk are the ways
+#   past it.
 #
 #   The stamp it emits is the floor's compat level with the point-release digit
 #   dropped, so 07.590 becomes 07.500. An explicit --sdk is used exactly as
@@ -107,7 +108,7 @@ EXEC_SUFFIXES = ('.elf', '.self', '.prx', '.sprx')
 SFO_MAGIC = b'\x00PSF'
 DB_DIR = os.environ.get('FW_EXPORT_DB',
                         os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                     'docs'))
+                                     'another-backporter', 'fwdb'))
 
 
 # libkernel's table of modules a game supplies from /app0/sce_module rather
@@ -379,8 +380,8 @@ def choose_sdk(dumps):
             detail.append('  ... and %d more' % (len(beyond) - 12))
         die('%d import(s) are exported by no firmware in the tables, so no '
             'target satisfies this title. The newest sampled is PS5 %s:\n%s\n'
-            'Add a newer firmware dump and rerun build-export-db.py, or pass an '
-            'explicit --sdk to stamp it anyway.'
+            'Update the another-backporter submodule for newer tables, or pass '
+            'an explicit --sdk to stamp it anyway.'
             % (len(beyond), levels[-1], '\n'.join(detail)))
 
     lines = ['%d imports: %d satisfied within the dump, %d from firmware'
@@ -421,7 +422,7 @@ def load_module_table():
     """-> {library: [(sprx filename, min_fw, max_fw)]} from fw-modules.csv."""
     path = os.path.join(DB_DIR, 'fw-modules.csv')
     if not os.path.exists(path):
-        die('%s is missing; run build-export-db.py' % path)
+        die('%s is missing; check out the another-backporter submodule' % path)
     table = {}
     with open(path) as fh:
         for row in csv.DictReader(fh):

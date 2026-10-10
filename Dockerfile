@@ -22,11 +22,6 @@ ARG PKGTOOLS_REF=main
 RUN git clone --depth 1 --branch "$PKGTOOLS_REF" "$PKGTOOLS_REPO" /out-pkgtools \
     && rm -rf /out-pkgtools/.git
 
-ARG BACKPORTER_REPO=https://github.com/MangoScango/another-backporter
-ARG BACKPORTER_REF=master
-RUN git clone --depth 1 --branch "$BACKPORTER_REF" "$BACKPORTER_REPO" /out-backporter \
-    && rm -rf /out-backporter/.git
-
 FROM debian:trixie-slim
 
 ARG WINE_BRANCH=stable
@@ -62,7 +57,7 @@ ENV SDK_DIR=/opt/fpkger/PS4_Fake_PKG_Tools_3 \
     ORBIS_PUB_CMD=/opt/fpkger/PS4_Fake_PKG_Tools_3/orbis-pub-cmd.exe \
     PKG_SET_APPVER=/opt/fpkger/pkg-set-appver.py \
     BACKPORT_SDK=/opt/fpkger/backport-sdk.py \
-    FW_EXPORT_DB=/opt/fpkger/docs \
+    FW_EXPORT_DB=/opt/fpkger/another-backporter/fwdb \
     BACKPORT_PS5=/opt/fpkger/another-backporter/backport-ps5.py \
     PS5BACKPORT_MAKE_FSELF=/opt/fpkger/make_fself.py \
     PS5BACKPORT_PUB_CMD=/opt/fpkger/drakmor/toolchain/prospero-pub-cmd.exe \
@@ -71,17 +66,15 @@ ENV SDK_DIR=/opt/fpkger/PS4_Fake_PKG_Tools_3 \
 
 COPY --from=deps /out-sfo        /opt/fpkger/sfo
 COPY --from=deps /out-pkgtools   /opt/fpkger/PS4_Fake_PKG_Tools_3
-COPY --from=deps /out-backporter /opt/fpkger/another-backporter
+# another-backporter is a git submodule: backport-ps5.py drives the web UI's
+# Backport tab, and its fwdb/ CSVs are backport-sdk.py's export tables. The
+# PS5 firmware dumps fakelibs are built from are not shipped; the Backport
+# tab takes them at runtime (PS5BACKPORT_LIBS).
+COPY another-backporter /opt/fpkger/another-backporter
 # ftpdump takes sfo from its own directory when sfo_path is unset, so they ship
 # side by side.
 COPY *.sh *.py \
      /opt/fpkger/
-# The firmware dumps these are derived from are far too large to ship, so the
-# tables travel with the image instead. build-export-db.py regenerates them and
-# stays out.
-COPY docs/fw-levels.csv docs/fw-exports.csv docs/fw-export-gaps.csv \
-     docs/fw-modules.csv \
-     /opt/fpkger/docs/
 # pfsdump sends this to the console's payload loader to read PS5 add-on
 # entitlement keys from the running game.
 ARG ENTITLEMENT_INJECTOR_URL=https://github.com/MangoScango/ps5-entitlement-dumper/releases/latest/download/entitlements.elf

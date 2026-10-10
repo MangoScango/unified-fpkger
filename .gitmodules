@@ -1,0 +1,3 @@
+[submodule "another-backporter"]
+	path = another-backporter
+	url = https://github.com/MangoScango/another-backporter
