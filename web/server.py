@@ -578,6 +578,9 @@ def build_ps5(job, spec, src, out_dir):
             "--volume", "ac" if addon else "app",
             "--passcode", opts["passcode"],
             "--compression-level", str(opts["compression_level"])]
+    # An SC package restores sce_sys for apps and add-ons alike.
+    if opts.get("sc_pkg"):
+        argv += ["--sc-pkg", opts["sc_pkg"]]
     if not addon:
         if opts["chunk_count"] is not None:
             argv += ["--chunk-count", str(opts["chunk_count"])]
@@ -757,6 +760,17 @@ def ps5_spec(params):
     reference = optional_path(params, "reference_pkg", "reference package", "file")
     if reference and not reference.lower().endswith(".pkg"):
         raise BadRequest("the reference package must be a .pkg")
+    sc_pkg = (params.get("sc_pkg") or "").strip()
+    if sc_pkg:
+        if sc_pkg.startswith(("http://", "https://")):
+            if not urlparse(sc_pkg).netloc:
+                raise BadRequest(f"bad SC package URL: {sc_pkg}")
+        elif "://" in sc_pkg:
+            raise BadRequest("the SC package URL must be http or https")
+        else:
+            sc_pkg = resolve_path(sc_pkg, "SC package", "file")
+            if not sc_pkg.lower().endswith(".pkg"):
+                raise BadRequest("the SC package must be a .pkg or an http(s) URL")
     playgo_languages = ",".join(code.strip() for code in
                                 str(params.get("playgo_languages") or "").split(",")
                                 if code.strip())
@@ -769,6 +783,7 @@ def ps5_spec(params):
         raise BadRequest("the entitlement key must be 32 hex digits")
     return {
         "name": name, "passcode": passcode, "reference_pkg": reference,
+        "sc_pkg": sc_pkg,
         "compression_level": int_in(params, "compression_level", -4, 9, 7,
                                     "compression level"),
         "chunk_count": int_in(params, "chunk_count", 1, 255, None, "chunk count"),
@@ -877,6 +892,7 @@ PER_TITLE_OPTIONS = {
     "content_id": "content ID override", "ps2_tid": "PS2 serial override",
     "base_pkg": "existing base package", "ps5_name": "package name",
     "reference_pkg": "reference package", "entitlement_key": "entitlement key",
+    "sc_pkg": "SC package",
 }
 MAX_BATCH = 200
 SCAN_DEPTH = int(setting("SCAN_DEPTH", "4"))

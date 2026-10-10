@@ -327,6 +327,12 @@
     <label>PlayGo languages, apps only (default: the dump's)
       <input type="text" name="playgo_languages" autocomplete="off" spellcheck="false"
              placeholder="en-US,ja-JP"></label>
+    <label data-single>Retail SC package (URL or local .pkg)
+      <span class="row"><input type="text" name="sc_pkg" autocomplete="off" spellcheck="false"
+             placeholder="EP0082-PPSA08668_00-..._sc.pkg">
+      <button type="button" data-browse="sc_pkg" data-files="pkg">Browse</button></span></label>
+    <p class="hint">Restores sce_sys metadata (param.json, icons, playgo files) from the retail
+      metadata package before building, replacing what the dump has. Encrypted files are excluded.</p>
     <label class="check"><input type="checkbox" name="force"> Replace existing outputs</label>
     <label data-single>Add-on entitlement key (32 hex digits)
       <input type="text" name="entitlement_key" autocomplete="off" spellcheck="false"

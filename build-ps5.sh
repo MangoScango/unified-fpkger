@@ -24,11 +24,13 @@ VOLUME=auto
 # entitlement_key.dat in the add-on dump; zeroes are the last resort.
 ENTITLEMENT_KEY=""
 ENTITLEMENT_KEY_FILE="entitlement_key.dat"
+SC_PKG=""
 
 usage() {
     echo "Usage: $0 --source-folder <dir> --output-package <file.pkg> [options]"
     echo "Options:"
     echo "  --reference-package <file.pkg>"
+    echo "  --sc-pkg <file.pkg|url>     restore sce_sys metadata from a retail SC package"
     echo "  --passcode <hex>             (default: 00000000000000000000000000000000)"
     echo "  --python <path>             (default: python3)"
     echo "  --temp-dir <dir>            (default: \$LIBPROSPERO_TEMP_DIR)"
@@ -47,6 +49,7 @@ while [[ $# -gt 0 ]]; do
         --source-folder|-s) SOURCE_FOLDER="$2"; shift 2 ;;
         --output-package|-o) OUTPUT_PACKAGE="$2"; shift 2 ;;
         --reference-package|-r) REFERENCE_PACKAGE="$2"; shift 2 ;;
+        --sc-pkg) SC_PKG="$2"; shift 2 ;;
         --passcode) PASSCODE="$2"; shift 2 ;;
         --python) PYTHON="$2"; shift 2 ;;
         --temp-dir) TEMPORARY_DIRECTORY="$2"; shift 2 ;;
@@ -82,6 +85,11 @@ echo "Volume: $VOLUME"
 if [[ ! -f "$SOURCE_FOLDER/sce_sys/param.json" ]]; then
     echo "Not a PS5 tree, no sce_sys/param.json: $SOURCE_FOLDER" >&2
     exit 1
+fi
+
+if [[ -n "$SC_PKG" ]]; then
+    echo "Restoring sce_sys metadata from SC package: $SC_PKG"
+    "$PYTHON" "$SCRIPT_DIR/sc-overlay.py" "$SC_PKG" "$SOURCE_FOLDER"
 fi
 
 # Add-ons carry no keystone; the custom-keystone requirement is the app's.
