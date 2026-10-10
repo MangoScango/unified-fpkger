@@ -20,6 +20,8 @@ import shutil
 import sys
 import tempfile
 import urllib.request
+from urllib.parse import urlparse
+import ssl
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pkg as pkgmod  # noqa: E402
@@ -37,8 +39,12 @@ def materialize(source):
     if source.startswith(("http://", "https://")):
         tmp = tempfile.NamedTemporaryFile(prefix="sc-overlay-", suffix=".pkg",
                                           delete=False)
+        if urlparse(source).hostname.endswith('playstation.net'):
+            ctx = ssl._create_unverified_context()
+        else:
+            ctx = ssl.create_default_context()
         try:
-            with urllib.request.urlopen(source) as response:
+            with urllib.request.urlopen(source, context=ctx) as response:
                 shutil.copyfileobj(response, tmp)
         except Exception:
             os.unlink(tmp.name)
