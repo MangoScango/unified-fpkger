@@ -805,7 +805,13 @@ def read_source_playgo_layout(
         languages = [language for bit, language in enumerate(PLAYGO_LANGUAGES)
                      if mask >> (63 - bit) & 1]
         if not languages:
-            raise ValueError(f"{chunk_path}: chunk {chunk_id} has no known languages")
+            print(f"\nLanguage parsing failed for chunk {chunk_id} in {chunk_path}")
+            print(f"  Raw Mask (Hex): {hex(mask)}")
+            print(f"  Raw Mask (Bin): {bin(mask)}")
+            print(f"  Total known languages available: {len(PLAYGO_LANGUAGES)}")
+            active_bits = [63 - b for b in range(64) if (mask >> b) & 1]
+            print(f"  Bits set in mask (from MSB 63 down to LSB 0): {active_bits}")
+            raise ValueError(f"{chunk_path}: chunk {chunk_id} has no known languages.")
         chunks.append((label or f"Chunk #{chunk_id}", languages))
 
     return SourcePlayGoLayout(chunks, file_chunks, seed, key)
