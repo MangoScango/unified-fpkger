@@ -9,12 +9,14 @@ the publisher to regenerate unless explicitly retained. Extracted `sce_suppl` an
 The root decrypted/ tree is omitted because it contains host-side decryption copies.
 Actual input metadata such as param.json, presentation media,
 trophy/UCP and game payloads remain included; extracted license.info/license.dat files are
-excluded by default.
+excluded by default. A sce_sys/uds UCP container that is missing or fails validation
+against the NPWR ids in npbind.dat is replaced by a generated stub, so the package keeps
+a well-formed (if empty) trophy/UDS data set.
 
 The source tree is never modified. A normalized param.json with
-applicationDrmType=standard, repaired SELF headers, and PNG files recovered from
-sce_sys/*.dds when a suitable PNG is missing are written below a gp5-assets
-directory beside the generated GP5. SDK presentation PNGs use RGB for icon0,
+applicationDrmType=standard, repaired SELF headers, PNG files recovered from
+sce_sys/*.dds when a suitable PNG is missing, and the UCP stubs are written below
+a gp5-assets directory beside the generated GP5. SDK presentation PNGs use RGB for icon0,
 pic0, and pic1, and RGBA for pic2; only pic2 preserves the alpha channel.
 For PSAL (`--volume al`), the project instead contains only its normalized metadata
 (param.json and a validated 512x512 RGB icon0.png) and requires an entitlement key.
@@ -131,6 +133,19 @@ LARGE_PACKAGE_LV1_LIMIT = 195_878_191_104
 LARGE_PACKAGE_LV2_LIMIT = 260_436_918_272
 ADDCONT_MOUNT_LV2_LIMIT = 97_945_387_008
 LARGE_PACKAGE_LV2_FILE_LIMIT = 500_000  # patched Publishing Tools profiles
+
+# sce_sys/uds UCP containers: 0x60-byte header, one 0x40-byte entry per member,
+# member data 16-byte aligned. Each NPWR id in npbind.dat maps to uds<NN>.ucp
+# by index.
+UCP_MAGIC = 0xB228C60A
+NPBIND_MAGIC = 0xD294A018
+UCP_HEADER, UCP_ENTRY, UCP_ALIGN = 0x60, 0x40, 0x10
+# Always write all four members. You've been warned.
+UCP_MEMBER_ORDER = ("enum_definition.json", "events_definition.json",
+                    "stats_definition.json", "stats_extraction.json")
+UCP_ID_MEMBERS = ("enum_definition.json", "stats_definition.json",
+                  "stats_extraction.json")
+UCP_CONFIGURATION_ID = 54474
 
 
 def choose_package_size(unpacked_bytes: int, file_count: int,
@@ -591,6 +606,171 @@ def convert_dds_images(
                 f"DDS converter did not create an 8-bit {mode} PNG: {destination}")
         converted.append((f"sce_sys/{png_name}", destination))
     return converted
+
+
+def ucp_member_documents(npwr: str) -> dict[str, dict[str, object]]:
+    base = {"schemaVersion": "1.1", "npCommunicationId": npwr}
+    return {
+        "enum_definition.json": {**base, "enumDefinitionRevision": 1, "enumArray": []},
+        "events_definition.json": {"configurationId": UCP_CONFIGURATION_ID, "events": [],
+                                   "nextOffset": 0, "previousOffset": 0, "totalItemCount": 0},
+        "stats_definition.json": {**base, "statsDefinitionRevision": 1, "statDefinitionArray": []},
+        "stats_extraction.json": {**base, "statsExtractionRevision": 1,
+                                  "statsExtractionRuleArray": []},
+    }
+
+
+def ucp_digest(data: bytes) -> bytes:
+    zeroed = bytearray(data)
+    zeroed[0x1C:0x30] = bytes(20)
+    return hashlib.sha1(zeroed).digest()
+
+
+def pack_ucp(members: list[tuple[str, bytes]]) -> bytes:
+    """UCP bytes with a valid header digest from [(name, bytes)] members."""
+    table_end = UCP_HEADER + UCP_ENTRY * len(members)
+    offsets, at = [], table_end
+    for _, body in members:
+        offsets.append(at)
+        # Real files add a full 16 bytes after members that are already aligned.
+        at += len(body) + (UCP_ALIGN - len(body) % UCP_ALIGN)
+    out = bytearray(at)
+    struct.pack_into(">IIQIII", out, 0, UCP_MAGIC, 1, at, len(members), UCP_ENTRY, 0)
+    for i, ((name, body), off) in enumerate(zip(members, offsets)):
+        entry = UCP_HEADER + i * UCP_ENTRY
+        out[entry:entry + len(name)] = name.encode()
+        struct.pack_into(">QQ", out, entry + 0x20, off, len(body))
+        out[off:off + len(body)] = body
+    out[0x1C:0x30] = hashlib.sha1(out).digest()
+    return bytes(out)
+
+
+def unpack_ucp(data: bytes) -> list[tuple[str, bytes]]:
+    """Parse the container, raising ValueError on structural problems."""
+    if len(data) < UCP_HEADER:
+        raise ValueError(f"{len(data)} bytes, shorter than the {UCP_HEADER:#x}-byte header")
+    magic, version, size = struct.unpack_from(">IIQ", data, 0)
+    count, entry_size = struct.unpack_from(">II", data, 0x10)
+    if magic != UCP_MAGIC:
+        raise ValueError(f"bad magic {magic:#010x}")
+    if version == 0:
+        raise ValueError("version is 0")
+    if size != len(data):
+        raise ValueError(f"size field {size} != file size {len(data)}")
+    if entry_size != UCP_ENTRY:
+        raise ValueError(f"entry size {entry_size:#x}, expected {UCP_ENTRY:#x}")
+    if UCP_HEADER + count * UCP_ENTRY > len(data):
+        raise ValueError(f"{count} entries do not fit in the file")
+    members = []
+    for i in range(count):
+        entry = UCP_HEADER + i * UCP_ENTRY
+        name = data[entry:entry + 0x20].split(b"\0")[0].decode("latin1")
+        off, length = struct.unpack_from(">QQ", data, entry + 0x20)
+        if off > len(data) or off + length > len(data):
+            raise ValueError(f"member {name!r} runs past the end of the file")
+        members.append((name, data[off:off + length]))
+    return members
+
+
+def ucp_problems(data: bytes, npwr: str) -> list[str]:
+    """Return a list of problems; empty means the UCP is acceptable."""
+    try:
+        members = unpack_ucp(data)
+    except ValueError as error:
+        return [str(error)]
+    problems = []
+    if ucp_digest(data) != data[0x1C:0x30]:
+        problems.append(f"digest is {data[0x1C:0x30].hex()}, should be {ucp_digest(data).hex()}")
+    names = [name for name, _ in members]
+    missing = [name for name in UCP_MEMBER_ORDER if name not in names]
+    if missing:
+        problems.append("missing members: " + ", ".join(missing))
+    for name, body in members:
+        if name not in UCP_ID_MEMBERS:
+            continue
+        try:
+            found = json.loads(body).get("npCommunicationId")
+        except (ValueError, AttributeError) as error:
+            problems.append(f"{name} is not valid JSON ({error})")
+            continue
+        if found != npwr:
+            problems.append(f"{name} npCommunicationId is {found!r}, npbind says {npwr!r}")
+    return problems
+
+
+def read_npbind_ids(path: Path) -> list[str]:
+    """NPWR ids in npbind.dat, in index order."""
+    data = path.read_bytes()
+    if len(data) < 0x80 or struct.unpack_from(">I", data, 0)[0] != NPBIND_MAGIC:
+        raise ValueError(f"{path}: not an npbind.dat")
+    entry_size, = struct.unpack_from(">I", data, 0x14)
+    count, = struct.unpack_from(">I", data, 0x1C)
+    if entry_size == 0 or 0x80 + count * entry_size > len(data):
+        raise ValueError(f"{path}: {count} entries of {entry_size:#x} bytes do not fit")
+    ids = []
+    for i in range(count):
+        base = 0x80 + i * entry_size
+        at, end = base, base + entry_size
+        while at + 4 <= end:
+            tag, length = struct.unpack_from(">HH", data, at)
+            if tag == 0:
+                break
+            if tag == 0x10:
+                ids.append(data[at + 4:at + 4 + length].split(b"\0")[0].decode("ascii"))
+                break
+            at += 4 + length
+        else:
+            raise ValueError(f"{path}: entry {i} has no NPWR id")
+    return ids
+
+
+def prepare_ucp_stubs(
+    root: Path, files: list[Path], generated_system: Path,
+) -> tuple[dict[Path, Path], list[tuple[str, Path]]]:
+    """Generated stubs for the source's missing or invalid sce_sys/uds UCPs.
+
+    Returns (replacements, additions): replacements maps an invalid source UCP
+    to the stub written for it; additions holds (dst_path, stub) pairs for
+    UCPs the source lacks entirely. The source tree is never modified.
+    """
+    system = root / "sce_sys"
+    npbind = next((candidate for candidate in
+                   (system / "uds" / "npbind.dat", system / "trophy2" / "npbind.dat")
+                   if candidate.is_file()), None)
+    if npbind is None:
+        return {}, []
+    try:
+        ids = read_npbind_ids(npbind)
+    except (OSError, ValueError) as error:
+        print(f"[Warn] {error}; UCP containers are packaged as they are")
+        return {}, []
+    sources = {relative_posix(root, file).casefold(): file for file in files}
+    replacements: dict[Path, Path] = {}
+    additions: list[tuple[str, Path]] = []
+    for index, npwr in enumerate(ids):
+        relative = f"sce_sys/uds/uds{index:02d}.ucp"
+        source = sources.get(relative.casefold())
+        if source is None:
+            reason = "missing"
+        else:
+            problems = ucp_problems(source.read_bytes(), npwr)
+            if not problems:
+                continue
+            reason = "invalid: " + "; ".join(problems)
+        documents = ucp_member_documents(npwr)
+        stub = pack_ucp([(name, json.dumps(documents[name], separators=(", ", ": ")).encode())
+                         for name in UCP_MEMBER_ORDER])
+        destination = generated_system / "uds" / f"uds{index:02d}.ucp"
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(f"generated UCP stub already exists: {destination}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(stub)
+        print(f"UCP {relative} is {reason}; wrote a stub for {npwr} ({len(stub)} bytes)")
+        if source is not None:
+            replacements[source] = destination
+        else:
+            additions.append((relative, destination))
+    return replacements, additions
 
 
 def default_scenario(language: str) -> dict[str, object]:
@@ -1151,13 +1331,19 @@ def build_gp5(
         needed_conversions, generated_system, converter_path)
     executable_replacements = ({} if is_psal else
                                prepare_executable_inputs(root, files, generated_root))
+    # Trophy/UDS metadata is application-level; add-on volumes skip it.
+    ucp_replacements: dict[Path, Path] = {}
+    generated_ucps: list[tuple[str, Path]] = []
+    if volume in {"app", "patch"}:
+        ucp_replacements, generated_ucps = prepare_ucp_stubs(root, files, generated_system)
     language_payloads = (write_language_payloads(generated_root, chunk_languages, chunk_count)
                          if volume == "app" and layout is None else [])
     size_selection = None
     if auto_size_profile is not None:
-        mapped_files = [executable_replacements.get(file, file) for file in files
-                        if file != param]
+        mapped_files = [ucp_replacements.get(file, executable_replacements.get(file, file))
+                        for file in files if file != param]
         mapped_files.extend(path for _, path in converted_pngs)
+        mapped_files.extend(path for _, path in generated_ucps)
         mapped_files.extend(path for _, path, _ in language_payloads)
         mapped_files.append(scenario_input)
         # The normalized param is metadata, not game payload. Its small size is
@@ -1285,6 +1471,12 @@ def build_gp5(
             "src_path": source_path(output.parent, converted, absolute_paths),
             "chunk": mapped_chunk(destination),
         })
+    for destination, stub in generated_ucps:
+        ET.SubElement(files_node, "file", {
+            "dst_path": destination,
+            "src_path": source_path(output.parent, stub, absolute_paths),
+            "chunk": mapped_chunk(destination),
+        })
     for destination, payload, chunk_id in language_payloads:
         ET.SubElement(files_node, "file", {
             "dst_path": destination,
@@ -1294,7 +1486,7 @@ def build_gp5(
         })
     for file in files:
         actual_source = (generated_param if file == param else
-                         executable_replacements.get(file, file))
+                         ucp_replacements.get(file, executable_replacements.get(file, file)))
         attributes = {
             "dst_path": relative_posix(root, file),
             "src_path": source_path(output.parent, actual_source, absolute_paths),
@@ -1319,7 +1511,7 @@ def build_gp5(
                   "that uses them gives the game an incomplete data set.")
     indent(project)
     ET.ElementTree(project).write(output, encoding="utf-8", xml_declaration=True)
-    return (len(files) + len(converted_pngs) + len(language_payloads) +
+    return (len(files) + len(converted_pngs) + len(generated_ucps) + len(language_payloads) +
             (1 if has_scenario else 0)), skipped
 
 
