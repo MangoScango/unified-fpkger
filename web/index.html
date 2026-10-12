@@ -86,6 +86,7 @@
   .tags { display: flex; flex-wrap: wrap; gap: 4px; }
   .tag { font-size: 11.5px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line); color: var(--muted); }
   .tag.ps4 { color: #8ab4ff; border-color: #3f6db3; } .tag.ps5 { color: #e6e8ec; border-color: #8a8f9c; }
+  .tag.rebuild { color: var(--warn); border-color: #7a6530; }
   .dump-id, .dump-path { font: 12px ui-monospace, monospace; color: var(--muted); overflow-wrap: anywhere; }
   .layers { padding: 0 10px 8px calc(10px + 13px + 10px + 56px + 10px); display: flex; flex-direction: column; gap: 4px; }
   label.layer { display: flex; gap: 8px; align-items: center; margin: 0; }
@@ -134,7 +135,9 @@
           <button type="button" id="scan-run">Scan</button></span></label>
         <p class="hint">Finds every <code>sce_sys/param.sfo</code> and <code>param.json</code> a few
           folders down and groups them by what they declare: each base game collects the updates
-          and add-ons carrying its title ID, wherever they are and whatever they are named.</p>
+          and add-ons carrying its title ID, wherever they are and whatever they are named.
+          Standalone PS5 <code>.pkg</code> files are listed too, tagged <code>rebuild</code>;
+          building one extracts it first, then packs the extracted tree.</p>
         <div class="scan-tools" id="scan-tools" hidden>
           <input type="search" id="scan-filter" placeholder="Filter by title, ID or folder" aria-label="Filter dumps">
           <select id="scan-platform" aria-label="Show platform">
@@ -348,6 +351,11 @@
       <label>Temporary folder
         <span class="row"><input type="text" name="ps5_temp_dir">
         <button type="button" data-browse="ps5_temp_dir">Browse</button></span></label>
+      <label>Extract rebuilt pkgs into (default: next to each pkg)
+        <span class="row"><input type="text" name="extract_dir">
+        <button type="button" data-browse="extract_dir">Browse</button></span></label>
+      <p class="hint">Each pkg is extracted to <code>&lt;name&gt;-extract</code> there before
+        building; an existing extraction of the same title is reused instead of re-extracting.</p>
       <label class="check"><input type="checkbox" name="keep_intermediate"> Keep the GP5 and intermediate files</label>
     </details>
   </fieldset>
@@ -494,6 +502,8 @@ function unitRow(u) {
   }
   const tags = el("span", {className: "tags"},
     tag(u.platform.toUpperCase(), u.platform), tag(u.kind),
+    u.rebuild ? tag("rebuild", "rebuild") : null,
+    u.edition ? tag(u.edition.toLowerCase()) : null,
     u.version ? tag("v" + u.version) : null,
     u.fw ? tag("FW " + u.fw) : null,
     u.sdk ? tag("SDK " + u.sdk) : null,
@@ -573,6 +583,7 @@ function syncSelection() {
 // What the server needs to build each selected unit.
 function selectedSources() {
   return chosenUnits().map(u => {
+    if (u.rebuild) return {pkg: u.base.path, update: null, addons: []};
     const c = choices.get(u.id);
     return {base: u.base?.path || null, update: c.update || null, addons: [...c.addons]};
   });
@@ -603,9 +614,9 @@ async function runScan() {
     for (const u of units) count.set(u.platform, (count.get(u.platform) || 0) + 1);
     const split = [...count].map(([p, n]) => `${n} ${p.toUpperCase()}`).join(", ");
     status.textContent = units.length
-      ? `${plural(units.length, "title")} (${split}) from ${plural(data.found, "param file")} in ${data.path}.` +
+      ? `${plural(units.length, "title")} (${split}) from ${plural(data.found, "dump/package")} in ${data.path}.` +
         (data.truncated ? ` Stopped at ${data.limit}; scan a narrower folder to see the rest.` : "")
-      : `No param.sfo or param.json within ${plural(data.depth, "folder")} of ${data.path}.`;
+      : `No param.sfo, param.json or PS5 .pkg within ${plural(data.depth, "folder")} of ${data.path}.`;
   } catch (err) {
     if (token !== scanToken) return;
     status.className = "hint error";

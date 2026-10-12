@@ -47,6 +47,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.environ.get("FPKGER_DIR") or os.path.dirname(HERE)
 sys.path.insert(0, TOOLS)
 import pfsdump  # noqa: E402
+import pkg as pkgmod  # noqa: E402
 
 sys.path.insert(0, HERE)
 import dumpscan  # noqa: E402
@@ -519,9 +520,59 @@ def package_mtimes(directory):
             if entry.is_file() and entry.name.lower().endswith(".pkg")}
 
 
+def extract_step(job, spec, pkg_path):
+    """Extract a PS5 pkg into a tree build-ps5.sh can take, and return the tree.
+
+    prospero-pub-cmd's img_extract writes the whole image (sce_sys included) to
+    <stem>-extract next to the pkg, or under the extraction folder when one is
+    set. An earlier extraction is reused when its param.json declares the same
+    title.
+    """
+    if not os.path.isfile(PROSPERO_PUB_CMD):
+        raise JobError(f"rebuilding a pkg needs prospero-pub-cmd.exe, which is missing: "
+                       f"{PROSPERO_PUB_CMD}")
+    stem = os.path.splitext(os.path.basename(pkg_path))[0]
+    root = spec["ps5"].get("extract_dir") or os.path.dirname(pkg_path)
+    dest = os.path.join(root, f"{stem}-extract")
+    param_json = os.path.join(dest, "sce_sys", "param.json")
+    if os.path.isfile(param_json):
+        try:
+            with open(param_json, encoding="utf-8-sig") as handle:
+                content_id = json.load(handle).get("contentId", "")
+        except (OSError, ValueError):
+            content_id = ""
+        try:
+            with pkgmod.Pkg.open(pkg_path) as pkg:
+                title_id = pkg.title_id
+        except (pkgmod.PkgError, OSError):
+            title_id = None
+        extracted = dumpscan.title_id_from_content_id(content_id)
+        if not title_id or extracted != title_id:
+            raise JobError(f"{dest} already exists but is not {title_id or 'this package'}"
+                           f"'s extraction; move it away or pick another extraction folder")
+        job.say(f"reusing existing extraction: {dest}")
+    else:
+        os.makedirs(dest, exist_ok=True)
+        job.step = f"extracting {os.path.basename(pkg_path)}"
+        argv = ["wine", PROSPERO_PUB_CMD, "img_extract", "--passcode",
+                spec["ps5"]["passcode"], "--no_progress_bar", pkg_path, dest]
+        start = job.line_count
+        rc = run(job, argv, cwd=dest, env_extra={"WINEDEBUG": "-all"})
+        if rc != 0:
+            detail = job.tail(start)
+            raise JobError(f"pkg extraction failed (exit {rc})"
+                           + "".join(f"\n  {line}" for line in detail))
+        if not os.path.isfile(param_json):
+            raise JobError(f"the extraction finished but {param_json} is missing")
+    job.outputs.append(dest)
+    return dest
+
+
 def build_step(job, spec, src, platform):
     out_dir = spec["out_dir"]
     os.makedirs(out_dir, exist_ok=True)
+    if platform != "ps4" and spec.get("layers") and spec["layers"].get("rebuild"):
+        src = extract_step(job, spec, src)
     if platform == "ps4":
         before = package_mtimes(out_dir)
         job.step = f"building {os.path.basename(src)} (PS4)"
@@ -790,6 +841,8 @@ def ps5_spec(params):
         "playgo_languages": playgo_languages,
         "temp_dir": (resolve_path(params["ps5_temp_dir"], "PS5 temp directory",
                                   create=True) if params.get("ps5_temp_dir") else None),
+        "extract_dir": (resolve_path(params["extract_dir"], "pkg extraction folder",
+                                     create=True) if params.get("extract_dir") else None),
         "entitlement_key": entitlement_key.upper(),
         "keep_intermediate": bool(params.get("keep_intermediate")),
         "force": bool(params.get("force")),
@@ -914,14 +967,42 @@ def scanned_tree(path, label, platform, role, title_id=None):
     return meta
 
 
+def scanned_pkg(path):
+    """A package the scan offered, re-read here: the page's word is not trusted."""
+    real = resolve_path(path, "package", "file")
+    if not real.lower().endswith(".pkg"):
+        raise BadRequest(f"not a .pkg: {real}")
+    try:
+        pkg = pkgmod.Pkg.open(real)
+    except (pkgmod.PkgError, OSError) as err:
+        raise BadRequest(f"could not parse {real}: {err}") from None
+    with pkg:
+        if pkg.platform != "PS5":
+            raise BadRequest(f"only PS5 packages can be rebuilt for now: {real}")
+        if pkg.is_metadata_fragment(os.path.getsize(real)):
+            raise BadRequest(f"{real} is a metadata fragment, not a full package")
+        if pkg.kind == "Update":
+            raise BadRequest(f"{real} is a patch image; it cannot be rebuilt on its own")
+        title = pkg.title or pkg.title_id
+    return real, title or os.path.splitext(os.path.basename(real))[0]
+
+
 def unit_layers(source, params):
     """(platform, layers, title) for one selected scan unit.
 
     layers is {"base", "update", "addons"}: folders handed to build-fpkg by
     name, so it builds what the param files say rather than guessing siblings.
+    A pkg source instead gives {"base": pkg_path, "rebuild": True}: build-ps5
+    runs against the extracted image.
     """
     if not isinstance(source, dict):
         raise BadRequest("each source must be an object")
+    if source.get("pkg"):
+        if source.get("base") or source.get("update") or source.get("addons"):
+            raise BadRequest("a package rebuild takes no dump folders")
+        real, title = scanned_pkg(source["pkg"])
+        return "ps5", {"base": real, "update": None, "addons": [],
+                       "rebuild": True}, title
     base, update = source.get("base") or None, source.get("update") or None
     addons = source.get("addons") or []
     if not isinstance(addons, list) or not all(isinstance(a, str) for a in addons):
@@ -984,7 +1065,8 @@ def build_jobs(params, sources):
         spec = {"source_dir": layers["base"] or layers["addons"][0],
                 "platform": platform, "out_dir": out_dir, "layers": layers,
                 platform: options[platform]}
-        jobs.append(Job("build", spec, f"Build {title} ({platform.upper()})"))
+        verb = "Rebuild" if layers.get("rebuild") else "Build"
+        jobs.append(Job("build", spec, f"{verb} {title} ({platform.upper()})"))
     return jobs
 
 
@@ -1100,7 +1182,9 @@ def config():
     tools = {name: os.path.exists(path) for name, path in
              (("pfsdump", PFSDUMP), ("ftpdump", FTPDUMP),
               ("build-fpkg", BUILD_FPKG), ("build-ps5", BUILD_PS5),
-              ("backport-ps5", BACKPORT_PS5))}
+              ("backport-ps5", BACKPORT_PS5),
+              ("prospero-pub-cmd", PROSPERO_PUB_CMD))}
+    tools["wine"] = shutil.which("wine") is not None
     return {"defaults": defaults, "roots": ROOTS, "tools": tools,
             "log_dir": LOG_DIR}
 
@@ -1165,18 +1249,34 @@ class Handler(BaseHTTPRequestHandler):
                 root = resolve_path(arg("path"), "scan folder")
                 depth = int_in({"d": arg("depth")}, "d", 0, 8, SCAN_DEPTH, "scan depth")
                 units, found, truncated = dumpscan.scan(root, depth, SCAN_LIMIT)
+                if not os.path.isfile(PROSPERO_PUB_CMD):
+                    for u in units:
+                        if u.get("rebuild"):
+                            u["buildable"] = False
+                            u["notes"].append("rebuilding needs prospero-pub-cmd.exe, "
+                                              f"which is missing: {PROSPERO_PUB_CMD}")
                 self._send(HTTPStatus.OK, {"path": root, "depth": depth, "units": units,
                                            "found": found, "truncated": truncated,
                                            "limit": SCAN_LIMIT})
             elif url.path == "/api/icon":
-                src = resolve_path(arg("path"), "dump folder")
-                icon = os.path.join(src, "sce_sys", "icon0.png")
-                if not inside_roots(os.path.realpath(icon)) or not os.path.isfile(icon):
-                    return self._error(HTTPStatus.NOT_FOUND, "no icon")
-                if os.path.getsize(icon) > ICON_MAX_BYTES:
-                    return self._error(HTTPStatus.NOT_FOUND, "icon too large")
-                with open(icon, "rb") as handle:
-                    data = handle.read()
+                if arg("path").lower().endswith(".pkg"):
+                    src = resolve_path(arg("path"), "package", "file")
+                    try:
+                        with pkgmod.Pkg.open(src) as pkg:
+                            data = pkg.read_icon0()
+                    except (pkgmod.PkgError, OSError):
+                        data = None
+                    if not data or len(data) > ICON_MAX_BYTES:
+                        return self._error(HTTPStatus.NOT_FOUND, "no icon")
+                else:
+                    src = resolve_path(arg("path"), "dump folder")
+                    icon = os.path.join(src, "sce_sys", "icon0.png")
+                    if not inside_roots(os.path.realpath(icon)) or not os.path.isfile(icon):
+                        return self._error(HTTPStatus.NOT_FOUND, "no icon")
+                    if os.path.getsize(icon) > ICON_MAX_BYTES:
+                        return self._error(HTTPStatus.NOT_FOUND, "icon too large")
+                    with open(icon, "rb") as handle:
+                        data = handle.read()
                 if not data.startswith(b"\x89PNG\r\n\x1a\n"):
                     return self._error(HTTPStatus.NOT_FOUND, "icon is not a PNG")
                 self._send(HTTPStatus.OK, data, "image/png", "private, max-age=300")

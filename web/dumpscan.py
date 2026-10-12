@@ -1,10 +1,11 @@
-"""Finds title dumps under a folder by their param.sfo / param.json.
+"""Finds title dumps under a folder by their param.sfo / param.json, and PS5 pkgs.
 
 Every sce_sys/param.sfo (PS4) or sce_sys/param.json (PS5) found is one piece of
 content, and what it declares decides what it is: CATEGORY gd* is a base app,
 gp* an update, ac an add-on. Pieces are then grouped by the title ID they
 declare, so a base, its update and its add-ons come together wherever they sit
-and whatever their folders are called.
+and whatever their folders are called. Standalone PS5 .pkg files (parsed with
+the vendored pkg.py) are listed too, one unit each, tagged for rebuilding.
 
 The param.sfo and param.json readings follow MangoScango/ps-pkg-server
 (pkgtool/pkg.py), which in turn mirrors LibOrbisPkg's SFO/ParamSfo.cs.
@@ -14,6 +15,10 @@ import json
 import os
 import re
 import struct
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import pkg as pkgmod  # noqa: E402
 
 SCEC_MAGIC = 0x53434543
 SFO_MAGIC = 0x00505346
@@ -235,14 +240,52 @@ def read_meta(folder):
     return meta
 
 
+def read_pkg_meta(path):
+    """One standalone PS5 package's identity from pkg.py, else None.
+
+    PS4 packages are skipped for now (their rebuild needs extra consideration),
+    and split sets fall out on their own: a headless main part fails to parse,
+    an SC tail is a metadata fragment rather than a rebuildable image.
+    """
+    try:
+        pkg = pkgmod.Pkg.open(path)
+    except (pkgmod.PkgError, OSError):
+        return None
+    with pkg:
+        if pkg.platform != "PS5":
+            return None
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return None
+        if pkg.is_metadata_fragment(size):
+            return None
+        meta = {"path": path, "platform": "ps5", "role": "base",
+                "rebuild": True, "edition": pkg.edition, "notes": [],
+                "icon": path if pkg.has_icon0() else False,
+                "kind": pkg.kind, "title": pkg.title, "title_id": pkg.title_id,
+                "content_id": pkg.content_id or None, "version": pkg.version,
+                "category": pkg.category, "fw": pkg.min_sdk,
+                "sdk": fw_from_hex(pkg.param.get("sdkVersion"))}
+    if meta["edition"] == "Retail":
+        meta["notes"].append("retail package: rebuilding needs its passcode, "
+                             "the default zeroes only cover fakes")
+    if meta["kind"] == "Update":
+        meta["buildable"] = False
+        meta["notes"].append("a patch image carries only changed data; "
+                             "it cannot be rebuilt on its own")
+    return meta
+
+
 # --- scanning ------------------------------------------------------------------
 
 def find_trees(root, depth, limit):
-    """Metadata of every tree at or under root that has a sce_sys param file.
+    """Metadata of every tree and PS5 package at or under root.
 
-    depth is how many folders below root a tree may sit. A tree is not searched
-    inside, and symlinked folders are not followed, so the walk stays in root.
-    Returns (trees, truncated).
+    A tree is a folder with a sce_sys param file; a package is a standalone PS5
+    .pkg (listed for rebuilding). depth is how many folders below root either
+    may sit. A tree is not searched inside, and symlinked folders are not
+    followed, so the walk stays in root. Returns (trees, truncated).
     """
     trees = []
 
@@ -255,16 +298,24 @@ def find_trees(root, depth, limit):
             return
         # sce_sys without a param file is nothing buildable; a title's own
         # folders are not searched for more titles either way.
-        if level >= depth or os.path.isdir(os.path.join(folder, "sce_sys")):
+        if os.path.isdir(os.path.join(folder, "sce_sys")):
             return
         try:
-            children = sorted((e for e in os.scandir(folder)
-                               if not e.name.startswith(".") and e.is_dir(follow_symlinks=False)),
-                              key=lambda e: e.name.lower())
+            entries = sorted((e for e in os.scandir(folder)
+                              if not e.name.startswith(".")),
+                             key=lambda e: e.name.lower())
         except OSError:
             return
-        for child in children:
-            visit(child.path, level + 1)
+        for entry in entries:
+            if len(trees) >= limit:
+                return
+            if entry.is_dir(follow_symlinks=False):
+                if level < depth:
+                    visit(entry.path, level + 1)
+            elif entry.name.lower().endswith(".pkg"):
+                meta = read_pkg_meta(entry.path)
+                if meta:
+                    trees.append(meta)
 
     visit(root, 0)
     return trees, len(trees) >= limit
@@ -310,7 +361,10 @@ def group(trees):
 def unit(base, updates, addons):
     lead = base or (addons or updates)[0]
     notes = list(base["notes"]) if base else []
-    buildable = not base or "no eboot.bin" not in notes
+    if base and "buildable" in base:
+        buildable = base["buildable"]
+    else:
+        buildable = not base or "no eboot.bin" not in notes
     if base is None and not addons:
         buildable = False
         notes.append("an update needs its base dump to build")
@@ -325,6 +379,8 @@ def unit(base, updates, addons):
         "kind": base["kind"] if base else ("Add-ons" if addons else "Update"),
         "version": base["version"] if base else None,
         "fw": base["fw"] if base else None, "sdk": base["sdk"] if base else None,
+        "rebuild": bool(base and base.get("rebuild")),
+        "edition": base.get("edition") if base else None,
         "icon": icon_from["path"] if icon_from else None,
         "base": base, "updates": updates, "addons": addons,
         "buildable": buildable, "notes": notes,
