@@ -25,8 +25,10 @@ chunk languages and file-to-chunk assignments are kept.
 Otherwise game files remain in chunk zero; each language declared by playgo-scenario.json
 gets a small generated, uncompressed payload. Languages share a chunk when the configured
 count is too small to assign each a separate chunk. Remaining chunks are empty placeholders.
-Source scenarios and localized presentation strings are retained, and every scenario
-contains all configured chunks and marks all of them as initial/required.
+Source scenarios and localized presentation strings are retained. When the source
+playgo-chunk.dat has valid scenario tables, each scenario keeps its label, chunk list
+and initial chunk count; otherwise every scenario contains all configured chunks and
+marks all of them as initial/required.
 
 With --build, APP and AC projects produce a new directory containing the GP5, a verified copy of
 the patched SDK runtime, build logs, the directly generated LibProsperoPkg-compatible
@@ -675,10 +677,13 @@ class SourcePlayGoLayout:
     """Chunk labels and languages, and each file's chunk keyed by path hash."""
 
     def __init__(self, chunks: list[tuple[str, list[str]]], file_chunks: dict[int, int],
-                 seed: int, key: int):
+                 seed: int, key: int,
+                 scenarios: list[tuple[str, int, list[int]]] | None = None):
         self.chunks = chunks
         self.file_chunks = file_chunks
         self.seed, self.key = seed, key
+        # Per scenario id: (label, initial chunk count, ordered chunk ids).
+        self.scenarios = scenarios
 
     @property
     def languages(self) -> list[str]:
@@ -804,17 +809,75 @@ def read_source_playgo_layout(
             raise ValueError(f"{chunk_path}: chunk {chunk_id} label contains invalid XML characters")
         languages = [language for bit, language in enumerate(PLAYGO_LANGUAGES)
                      if mask >> (63 - bit) & 1]
-        if not languages:
-            print(f"\nLanguage parsing failed for chunk {chunk_id} in {chunk_path}")
-            print(f"  Raw Mask (Hex): {hex(mask)}")
-            print(f"  Raw Mask (Bin): {bin(mask)}")
-            print(f"  Total known languages available: {len(PLAYGO_LANGUAGES)}")
-            active_bits = [63 - b for b in range(64) if (mask >> b) & 1]
-            print(f"  Bits set in mask (from MSB 63 down to LSB 0): {active_bits}")
-            #raise ValueError(f"{chunk_path}: chunk {chunk_id} has no known languages.")
-        chunks.append((label or f"Chunk #{chunk_id}", languages))
+        # A zero mask is a language-neutral placeholder chunk (retail packages
+        # ship empty ones), not a parse failure. Only bits outside the known
+        # language range are worth reporting.
+        known_mask = sum(1 << (63 - bit) for bit in range(len(PLAYGO_LANGUAGES)))
+        if mask & ~known_mask:
+            unknown = [63 - b for b in range(64) if (mask >> b) & 1 and b < 64 - len(PLAYGO_LANGUAGES)]
+            print(f"\nChunk {chunk_id} in {chunk_path} sets unrecognized language bits "
+                  f"{unknown} (mask {mask:#x}); the chunk is emitted for its known languages only.")
+        # Retail leaves unused chunks fully blank: no label and no languages.
+        chunks.append((label or (f"Chunk #{chunk_id}" if languages else ""), languages))
 
-    return SourcePlayGoLayout(chunks, file_chunks, seed, key)
+    return SourcePlayGoLayout(chunks, file_chunks, seed, key,
+                              read_source_scenarios(chunk_path, chunk_count))
+
+
+def read_source_scenarios(
+    chunk_path: Path, chunk_count: int,
+) -> list[tuple[str, int, list[int]]] | None:
+    """Read each scenario's label, initial chunk count and ordered chunk list.
+
+    Sections 4, 5 and 6 of playgo-chunk.dat hold the scenario table (0x20 bytes per
+    scenario), the u16 chunk lists, and the labels. Returns None, after saying why,
+    when they are inconsistent; the caller then falls back to all-chunks scenarios.
+    """
+    data = chunk_path.read_bytes()
+    scenario_count = struct.unpack_from("<H", data, 0x0e)[0]
+    table_at, table_size = struct.unpack_from("<II", data, 0xe0)
+    lists_at, lists_size = struct.unpack_from("<II", data, 0xe8)
+    names_at, names_size = struct.unpack_from("<II", data, 0xf0)
+    try:
+        if (table_size != scenario_count * 0x20 or
+                max(table_at + table_size, lists_at + lists_size, names_at + names_size) > len(data)):
+            raise ValueError("scenario sections do not match the header")
+        lists = data[lists_at:lists_at + lists_size]
+        names = data[names_at:names_at + names_size]
+        scenarios = []
+        for index in range(scenario_count):
+            entry = table_at + index * 0x20
+            initial, total = struct.unpack_from("<HH", data, entry + 0x14)
+            list_at, name_at = struct.unpack_from("<II", data, entry + 0x18)
+            if (list_at + total * 2 > len(lists) or initial > total or
+                    name_at >= len(names) or b"\0" not in names[name_at:]):
+                raise ValueError(f"scenario {index} points outside its sections")
+            ids = list(struct.unpack_from(f"<{total}H", lists, list_at))
+            if any(chunk_id >= chunk_count for chunk_id in ids) or len(set(ids)) != total:
+                raise ValueError(f"scenario {index} has an invalid chunk list")
+            label = names[name_at:names.index(b"\0", name_at)].decode("utf-8")
+            scenarios.append((label, initial, ids))
+    except (ValueError, struct.error, UnicodeDecodeError) as error:
+        print(f"[Warn] PlayGo: ignoring the scenario tables in {chunk_path}: {error}; "
+              "every scenario will list all chunks.")
+        return None
+    return scenarios
+
+
+def chunk_ranges(ids: list[int]) -> str:
+    """Format ids in order, collapsing ascending runs of consecutive ids to 'a-b'."""
+    parts: list[str] = []
+    start = previous = None
+    for chunk_id in ids:
+        if start is not None and chunk_id == previous + 1:
+            previous = chunk_id
+            continue
+        if start is not None:
+            parts.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = chunk_id
+    if start is not None:
+        parts.append(str(start) if start == previous else f"{start}-{previous}")
+    return " ".join(parts)
 
 
 def parse_playgo_languages(value: str) -> list[str]:
@@ -1151,24 +1214,38 @@ def build_gp5(
                 assigned_languages = [language for index, language in
                                       enumerate(chunk_languages, start=1)
                                       if min(index, chunk_count - 1) == chunk_id]
+            placeholder = layout is not None and not label and not assigned_languages
+            if placeholder:
+                continue
             attributes = {
                 "id": str(chunk_id),
                 "label": label,
                 "layer_no": "0",
-                "languages": (" ".join(assigned_languages) if assigned_languages
-                              else " ".join(chunk_languages)),
+                "languages": " ".join(assigned_languages or chunk_languages),
             }
             ET.SubElement(chunks, "chunk", attributes)
         scenarios = ET.SubElement(
             chunk_info, "scenarios", {"default_id": str(scenario_default_id)})
+        source_scenarios = layout.scenarios if layout is not None else None
+        if source_scenarios is not None and len(source_scenarios) != len(scenario_definitions):
+            print(f"[Warn] PlayGo: the source has {len(source_scenarios)} scenarios but "
+                  f"playgo-scenario.json declares {len(scenario_definitions)}; every scenario "
+                  "will list all chunks.")
+            source_scenarios = None
         for scenario_id, scenario_type, label in scenario_definitions:
+            if source_scenarios is not None:
+                label, initial, chunk_ids = source_scenarios[scenario_id]
+                text = chunk_ranges(chunk_ids)
+            else:
+                initial = chunk_count
+                text = f"0-{chunk_count - 1}" if chunk_count > 1 else "0"
             scenario = ET.SubElement(scenarios, "scenario", {
                 "id": str(scenario_id),
                 "type": scenario_type,
-                "initial_chunk_count": str(chunk_count),
+                "initial_chunk_count": str(initial),
                 "label": label,
             })
-            scenario.text = f"0-{chunk_count - 1}" if chunk_count > 1 else "0"
+            scenario.text = text
 
     files_node = ET.SubElement(project, "files")
     unmapped_count = 0
