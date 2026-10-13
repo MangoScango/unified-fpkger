@@ -90,6 +90,7 @@
   .dump-id, .dump-path { font: 12px ui-monospace, monospace; color: var(--muted); overflow-wrap: anywhere; }
   .layers { padding: 0 10px 8px calc(10px + 13px + 10px + 56px + 10px); display: flex; flex-direction: column; gap: 4px; }
   .dlc-split { padding: 0 10px 10px calc(10px + 13px + 10px + 56px + 10px); }
+  .dlc-split > summary { color: var(--warn); font-size: 14px; }
   .dlc-entry { border-top: 1px solid var(--line); padding: 6px 0; }
   label.layer { display: flex; gap: 8px; align-items: center; margin: 0; }
   label.layer select { flex: 1; min-width: 0; font-size: 12.5px; padding: 3px 6px; }
@@ -510,13 +511,13 @@ function dlcSplitPanel(u) {
     const node = el("div", {className: "dlc-entry"},
       el("label", {className: "check"}, box,
         el("span", {}, el("b", {textContent: e.label || e.content_id}),
-           el("span", {className: "dump-id",
-                       textContent: ` ${e.content_id} · ${e.mount_point || "no mount point"}`}))),
+           e.mount_point ? el("span", {className: "dump-id",
+                                       textContent: " · " + e.mount_point}) : null)),
       ...e.problems.map(p => el("p", {className: "hint warn", textContent: p})),
       e.problems.length ? null : el("div", {className: "grid2"},
         el("label", {}, "SC package (URL or local .pkg)",
           el("span", {className: "row"}, sc, browse)),
-        el("label", {}, "Entitlement key (default: the ini's)", key)));
+        el("label", {}, "Entitlement key", key)));
     return {e, box, sc, key, node};
   });
   const submit = el("button", {type: "button", className: "primary", textContent: "Split DLC"});
@@ -547,11 +548,6 @@ function dlcSplitPanel(u) {
   });
   const panel = el("details", {className: "dlc-split"},
     el("summary", {textContent: `Split ${plural(entries.length, "DLC")} (dlc_emu) into separate add-ons`}),
-    el("p", {className: "hint",
-      textContent: "Each ticked DLC is moved out of the app into its own add-on folder under " +
-        "a sibling -dlc folder, with its sce_sys restored from the retail SC package " +
-        "(prosperopatches has them; match the DLC's version). The dlc_emu fakelibs and the " +
-        "ini are removed from the base. Rescan afterwards, then build base and add-ons."}),
     ...rows.map(r => r.node),
     el("p", {}, submit, " ", status));
   // These inputs live inside the build form; Enter must not submit a build.

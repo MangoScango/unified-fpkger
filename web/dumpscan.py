@@ -213,11 +213,6 @@ def read_meta(folder):
         entries = dlc_emu.read_entries(folder)
         if entries:
             meta["dlc_emu"] = entries
-            folders = ", ".join(e["mount_rel"].replace(os.sep, "/")
-                                for e in entries if e["mount_rel"])
-            meta["notes"].append(f"dlc_emu layout: {len(entries)} DLC packed into the app"
-                                 + (f" ({folders})" if folders else "")
-                                 + "; split them out before building")
     elif platform == "ps4":
         sfo = read_sfo(sfo_path)
         content_id = sfo.get("CONTENT_ID") or None
