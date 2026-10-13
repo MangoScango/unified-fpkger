@@ -18,7 +18,9 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pkg as pkgmod  # noqa: E402
+import dlc_emu  # noqa: E402
 
 SCEC_MAGIC = 0x53434543
 SFO_MAGIC = 0x00505346
@@ -208,6 +210,14 @@ def read_meta(folder):
                                    if meta["kind"] == "Add-on" else None)
         if not param:
             meta["notes"].append("param.json could not be read")
+        entries = dlc_emu.read_entries(folder)
+        if entries:
+            meta["dlc_emu"] = entries
+            folders = ", ".join(e["mount_rel"].replace(os.sep, "/")
+                                for e in entries if e["mount_rel"])
+            meta["notes"].append(f"dlc_emu layout: {len(entries)} DLC packed into the app"
+                                 + (f" ({folders})" if folders else "")
+                                 + "; split them out before building")
     elif platform == "ps4":
         sfo = read_sfo(sfo_path)
         content_id = sfo.get("CONTENT_ID") or None

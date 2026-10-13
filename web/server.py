@@ -51,6 +51,7 @@ import pkg as pkgmod  # noqa: E402
 
 sys.path.insert(0, HERE)
 import dumpscan  # noqa: E402
+import dlc_emu  # noqa: E402
 
 PFSDUMP = os.path.join(TOOLS, "pfsdump.py")
 FTPDUMP = os.environ.get("FTPDUMP") or os.path.join(TOOLS, "ftpdump.sh")
@@ -59,6 +60,7 @@ BUILD_PS5 = os.environ.get("BUILD_PS5") or os.path.join(TOOLS, "build-ps5.sh")
 BACKPORT_PS5 = (os.environ.get("BACKPORT_PS5")
                 or os.path.join(TOOLS, "another-backporter", "backport-ps5.py"))
 MAKE_FSELF = os.path.join(TOOLS, "make_fself.py")
+SC_OVERLAY = os.environ.get("SC_OVERLAY") or os.path.join(TOOLS, "sc-overlay.py")
 PROSPERO_PUB_CMD = os.path.join(TOOLS, "drakmor", "toolchain", "prospero-pub-cmd.exe")
 # another-backporter's SOURCE_FW: the firmware whose modules the fakelibs are
 # built from, so the libraries folder must hold its dump.
@@ -672,6 +674,29 @@ def run_build(job, argv, out_dir, before, label):
         job.say(f"warning: the build succeeded but no new .pkg is in {out_dir}")
 
 
+def dlc_split_step(job, spec):
+    """Splits a dlc_emu dump: mounted folders become add-on trees, see dlc_emu.py."""
+    src = spec["source"]
+    job.step = f"splitting DLC out of {os.path.basename(src.rstrip(os.sep))}"
+
+    def overlay(sc_pkg, ac_dir):
+        start = job.line_count
+        rc = run(job, [sys.executable, SC_OVERLAY, sc_pkg, ac_dir], cwd=ac_dir)
+        if rc != 0:
+            detail = job.tail(start)
+            raise dlc_emu.SplitError(
+                f"SC overlay failed for {sc_pkg} (exit {rc})"
+                + "".join(f"\n  {line}" for line in detail))
+
+    try:
+        built = dlc_emu.split(src, spec["title_id"], spec["entries"],
+                              overlay=overlay, log=job.say)
+    except dlc_emu.SplitError as err:
+        raise JobError(str(err)) from None
+    job.outputs += built
+    job.say("rescan the folder to build the base and its new add-ons")
+
+
 def backport_step(job, spec):
     """another-backporter's end-to-end run: acquire, unwrap, plan, build.
 
@@ -730,6 +755,8 @@ def execute(job):
         dump_step(job, spec, title, "pfs")
     elif job.kind == "build":
         build_step(job, spec, spec["source_dir"], spec["platform"])
+    elif job.kind == "dlc-split":
+        dlc_split_step(job, spec)
     elif job.kind == "backport":
         backport_step(job, spec)
     else:
@@ -801,6 +828,23 @@ def ps4_spec(params, with_sources):
     return opts
 
 
+def sc_pkg_checked(value, label="SC package"):
+    """A SC package as an http(s) URL or a local .pkg under ROOTS; "" for none."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if value.startswith(("http://", "https://")):
+        if not urlparse(value).netloc:
+            raise BadRequest(f"bad {label} URL: {value}")
+        return value
+    if "://" in value:
+        raise BadRequest(f"the {label} URL must be http or https")
+    path = resolve_path(value, label, "file")
+    if not path.lower().endswith(".pkg"):
+        raise BadRequest(f"the {label} must be a .pkg or an http(s) URL")
+    return path
+
+
 def ps5_spec(params):
     passcode = (params.get("passcode") or "0" * 32).strip()
     if not PASSCODE_RE.match(passcode):
@@ -811,17 +855,7 @@ def ps5_spec(params):
     reference = optional_path(params, "reference_pkg", "reference package", "file")
     if reference and not reference.lower().endswith(".pkg"):
         raise BadRequest("the reference package must be a .pkg")
-    sc_pkg = (params.get("sc_pkg") or "").strip()
-    if sc_pkg:
-        if sc_pkg.startswith(("http://", "https://")):
-            if not urlparse(sc_pkg).netloc:
-                raise BadRequest(f"bad SC package URL: {sc_pkg}")
-        elif "://" in sc_pkg:
-            raise BadRequest("the SC package URL must be http or https")
-        else:
-            sc_pkg = resolve_path(sc_pkg, "SC package", "file")
-            if not sc_pkg.lower().endswith(".pkg"):
-                raise BadRequest("the SC package must be a .pkg or an http(s) URL")
+    sc_pkg = sc_pkg_checked(params.get("sc_pkg"))
     playgo_languages = ",".join(code.strip() for code in
                                 str(params.get("playgo_languages") or "").split(",")
                                 if code.strip())
@@ -847,6 +881,55 @@ def ps5_spec(params):
         "keep_intermediate": bool(params.get("keep_intermediate")),
         "force": bool(params.get("force")),
     }
+
+
+def dlc_split_spec(params):
+    """A dlc_emu dump plus, per PSAC entry, the SC package and key to split it with.
+
+    The ini is re-read here and the page's entries are matched against it by
+    content ID: only the SC package and entitlement key are taken from the
+    submission.
+    """
+    src = resolve_path(params.get("source"), "dlc_emu dump")
+    meta = dumpscan.read_meta(src)
+    if not meta or meta["platform"] != "ps5" or meta["kind"] == "Add-on":
+        raise BadRequest(f"not a PS5 app dump: {src}")
+    if not meta["title_id"]:
+        raise BadRequest(f"the dump's title ID is unknown: {src}")
+    entries = dlc_emu.read_entries(src)
+    if not entries:
+        raise BadRequest(f"{src} has no dlc_emu.ini with PSAC entries")
+    choices = params.get("dlc")
+    if not isinstance(choices, dict):
+        raise BadRequest("dlc must be an object keyed by content ID")
+    known = {entry["content_id"] for entry in entries}
+    unknown = [cid for cid in choices if cid not in known]
+    if unknown:
+        raise BadRequest(f"unknown DLC content ID(s): {', '.join(map(str, unknown))}")
+    selected = []
+    for entry in entries:
+        choice = choices.get(entry["content_id"])
+        if choice is None:
+            continue
+        if not isinstance(choice, dict):
+            raise BadRequest("each DLC entry must be an object")
+        name = entry["label"] or entry["content_id"]
+        if entry["problems"]:
+            raise BadRequest(f"{name}: " + "; ".join(entry["problems"]))
+        sc_pkg = sc_pkg_checked(choice.get("sc_pkg"), f"SC package for {name}")
+        if not sc_pkg:
+            raise BadRequest(f"{name}: the SC package is required "
+                             "(prosperopatches has them; match the DLC's version)")
+        key = (choice.get("entitlement_key") or "").strip()
+        if key and not PASSCODE_RE.match(key):
+            raise BadRequest(f"{name}: the entitlement key must be 32 hex digits")
+        entry = dict(entry, sc_pkg=sc_pkg)
+        if key:
+            entry["entitlement_key"] = key.upper()
+        selected.append(entry)
+    if not selected:
+        raise BadRequest("no DLC selected to split")
+    return {"source": src, "title_id": meta["title_id"], "entries": selected}
 
 
 def backport_spec(params):
@@ -935,6 +1018,10 @@ def build_job(kind, params):
             raise BadRequest(f"another-backporter is not installed: {BACKPORT_PS5}")
         spec.update(backport_spec(params))
         summary = f"Backport {os.path.basename(spec['source'].rstrip(os.sep))} ({spec['tier']})"
+    elif kind == "dlc-split":
+        spec.update(dlc_split_spec(params))
+        base = os.path.basename(spec["source"].rstrip(os.sep))
+        summary = f"Split {len(spec['entries'])} DLC out of {base}"
     else:
         raise BadRequest(f"unknown job kind: {kind}")
     return Job(kind, spec, summary)

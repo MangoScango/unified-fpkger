@@ -89,12 +89,14 @@
   .tag.rebuild { color: var(--warn); border-color: #7a6530; }
   .dump-id, .dump-path { font: 12px ui-monospace, monospace; color: var(--muted); overflow-wrap: anywhere; }
   .layers { padding: 0 10px 8px calc(10px + 13px + 10px + 56px + 10px); display: flex; flex-direction: column; gap: 4px; }
+  .dlc-split { padding: 0 10px 10px calc(10px + 13px + 10px + 56px + 10px); }
+  .dlc-entry { border-top: 1px solid var(--line); padding: 6px 0; }
   label.layer { display: flex; gap: 8px; align-items: center; margin: 0; }
   label.layer select { flex: 1; min-width: 0; font-size: 12.5px; padding: 3px 6px; }
   .layer-head { font-size: 13px; color: var(--muted); }
   label.check.addon { margin: 2px 0; font-size: 13px; align-items: flex-start; }
   label.check.addon input { margin-top: 3px; }
-  @media (max-width: 520px) { .layers { padding-left: 10px; } }
+  @media (max-width: 520px) { .layers, .dlc-split { padding-left: 10px; } }
   form[data-kind=build].multi [data-single] { opacity: .6; }
   form[data-kind=build].multi [data-single]::after { content: "One dump only"; display: block;
     font-size: 11.5px; color: var(--warn); }
@@ -487,6 +489,78 @@ function layerControls(u, c) {
   return wrap;
 }
 
+// A dlc_emu dump ships its DLC inside the app folder; this panel splits each
+// dlc_emu.ini entry into a real add-on tree, one row per DLC with its own SC
+// package box.
+function dlcSplitPanel(u) {
+  const entries = u.base?.dlc_emu || [];
+  if (!entries.length) return null;
+  const status = el("span", {className: "hint"});
+  const rows = entries.map(e => {
+    const box = el("input", {type: "checkbox", checked: !e.problems.length,
+                             disabled: !!e.problems.length});
+    const sc = el("input", {type: "text", id: "dlcsc-" + e.content_id,
+                            autocomplete: "off", spellcheck: "false"});
+    const browse = el("button", {type: "button", textContent: "Browse"});
+    browse.dataset.browse = sc.id;
+    browse.dataset.files = "pkg";
+    const key = el("input", {type: "text", autocomplete: "off", spellcheck: "false",
+                             pattern: "[0-9A-Fa-f]{32}", maxlength: 32,
+                             value: e.entitlement_key || ""});
+    const node = el("div", {className: "dlc-entry"},
+      el("label", {className: "check"}, box,
+        el("span", {}, el("b", {textContent: e.label || e.content_id}),
+           el("span", {className: "dump-id",
+                       textContent: ` ${e.content_id} · ${e.mount_point || "no mount point"}`}))),
+      ...e.problems.map(p => el("p", {className: "hint warn", textContent: p})),
+      e.problems.length ? null : el("div", {className: "grid2"},
+        el("label", {}, "SC package (URL or local .pkg)",
+          el("span", {className: "row"}, sc, browse)),
+        el("label", {}, "Entitlement key (default: the ini's)", key)));
+    return {e, box, sc, key, node};
+  });
+  const submit = el("button", {type: "button", className: "primary", textContent: "Split DLC"});
+  submit.addEventListener("click", async () => {
+    const dlc = {};
+    for (const r of rows)
+      if (r.box.checked)
+        dlc[r.e.content_id] = {sc_pkg: r.sc.value.trim(), entitlement_key: r.key.value.trim()};
+    if (!Object.keys(dlc).length) {
+      status.className = "hint error";
+      status.textContent = "Tick at least one DLC.";
+      return;
+    }
+    submit.disabled = true;
+    status.className = "hint";
+    status.textContent = "Submitting...";
+    try {
+      const job = await api("/api/jobs", {kind: "dlc-split", params: {source: u.base.path, dlc}});
+      status.textContent = `Queued job #${job.id}.`;
+      showJob(job.id);
+      refreshJobs();
+    } catch (err) {
+      status.className = "hint error";
+      status.textContent = err.message;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  const panel = el("details", {className: "dlc-split"},
+    el("summary", {textContent: `Split ${plural(entries.length, "DLC")} (dlc_emu) into separate add-ons`}),
+    el("p", {className: "hint",
+      textContent: "Each ticked DLC is moved out of the app into its own add-on folder under " +
+        "a sibling -dlc folder, with its sce_sys restored from the retail SC package " +
+        "(prosperopatches has them; match the DLC's version). The dlc_emu fakelibs and the " +
+        "ini are removed from the base. Rescan afterwards, then build base and add-ons."}),
+    ...rows.map(r => r.node),
+    el("p", {}, submit, " ", status));
+  // These inputs live inside the build form; Enter must not submit a build.
+  panel.addEventListener("keydown", e => {
+    if (e.key === "Enter" && e.target.type === "text") e.preventDefault();
+  });
+  return panel;
+}
+
 function unitRow(u) {
   const c = choiceFor(u);
   const box = el("input", {type: "checkbox", className: "pick", checked: selected.has(u.id),
@@ -510,7 +584,8 @@ function unitRow(u) {
     u.updates.length ? tag(plural(u.updates.length, "update")) : null,
     u.addons.length ? tag(plural(u.addons.length, "add-on")) : null,
     u.platform === "ps5" && u.kind === "Add-on"
-      ? tag(u.base?.entitlement_key ? "entitlement key" : "no entitlement key") : null);
+      ? tag(u.base?.entitlement_key ? "entitlement key" : "no entitlement key") : null,
+    u.base?.dlc_emu?.length ? tag("dlc_emu", "rebuild") : null);
   const ids = [u.title_id, u.content_id].filter(Boolean).join(" · ");
   const body = el("span", {className: "dump-body"},
     el("span", {className: "dump-title", textContent: u.title || u.title_id || u.id.split("/").pop()}),
@@ -518,7 +593,8 @@ function unitRow(u) {
     ids ? el("span", {className: "dump-id", textContent: ids}) : null,
     el("span", {className: "dump-path", textContent: u.base ? u.base.path : "No base dump found"}),
     ...u.notes.map(n => el("span", {className: "hint warn", textContent: n})));
-  const li = el("li", {}, el("label", {className: "dump"}, box, icon, body), layerControls(u, c));
+  const li = el("li", {}, el("label", {className: "dump"}, box, icon, body),
+    layerControls(u, c), dlcSplitPanel(u));
   li.dataset.id = u.id;
   li.dataset.platform = u.platform;
   li.dataset.search = [u.title, u.title_id, u.content_id,
@@ -773,7 +849,9 @@ async function pickerLoad(path) {
 document.addEventListener("click", e => {
   const btn = e.target.closest("[data-browse]");
   if (!btn) return;
-  pickTarget = btn.form.elements[btn.dataset.browse];
+  pickTarget = btn.form?.elements[btn.dataset.browse]
+    || document.getElementById(btn.dataset.browse);
+  if (!pickTarget) return;
   pickFiles = btn.dataset.files || "";
   pickDirsToo = btn.hasAttribute("data-dirs");
   $("#picker-title").textContent = !pickFiles ? "Choose a folder"
