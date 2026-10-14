@@ -16,7 +16,7 @@ a well-formed (if empty) trophy/UDS data set.
 The source tree is never modified. A normalized param.json with
 applicationDrmType=standard, repaired SELF headers, PNG files recovered from
 sce_sys/*.dds when a suitable PNG is missing, and the UCP stubs are written below
-a gp5-assets directory beside the generated GP5. SDK presentation PNGs use RGB for icon0,
+the .gp5-assets directory beside the generated GP5. SDK presentation PNGs use RGB for icon0,
 pic0, and pic1, and RGBA for pic2; only pic2 preserves the alpha channel.
 For PSAL (`--volume al`), the project instead contains only its normalized metadata
 (param.json and a validated 512x512 RGB icon0.png) and requires an entitlement key.
@@ -587,7 +587,7 @@ def convert_dds_images(
         if suffix == ".py":
             command = [sys.executable, str(converter)]
         elif suffix == ".exe" and os.name != "nt":
-            command = ['wine', str(converter)]
+            command = ["wine", str(converter)]
         else:
             command = [str(converter)]
         command.extend([str(source), str(destination)])
@@ -988,9 +988,12 @@ def read_source_playgo_layout(
             raise ValueError(f"{chunk_path}: chunk {chunk_id} label contains invalid XML characters")
         languages = [language for bit, language in enumerate(PLAYGO_LANGUAGES)
                      if mask >> (63 - bit) & 1]
-        if not languages:
-            raise ValueError(f"{chunk_path}: chunk {chunk_id} has no known languages")
-        chunks.append((label or f"Chunk #{chunk_id}", languages))
+        # Retail leaves unused chunks fully blank: no label, no languages.
+        known_mask = sum(1 << (63 - bit) for bit in range(len(PLAYGO_LANGUAGES)))
+        if mask & ~known_mask:
+            print(f"\nChunk {chunk_id} in {chunk_path} sets unrecognized language bits "
+                  f"(mask {mask:#x}); the chunk is emitted for its known languages only.")
+        chunks.append((label or (f"Chunk #{chunk_id}" if languages else ""), languages))
 
     return SourcePlayGoLayout(chunks, file_chunks, seed, key,
                               read_source_scenarios(chunk_path, chunk_count))
