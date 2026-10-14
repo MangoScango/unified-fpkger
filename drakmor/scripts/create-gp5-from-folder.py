@@ -92,7 +92,7 @@ EXCLUDED_ROOT_FILES = {
     "entitlement_key.dat": "dumper entitlement record",
 }
 EXCLUDED_FAKE_LIBRARIES = frozenset({"libsceampr.sprx", "libsceplaygo.sprx"})
-GENERATED_ASSET_DIRECTORY = "gp5-assets"
+GENERATED_ASSET_DIRECTORY = ".gp5-assets"
 NORMALIZED_SELF_DIRECTORY = "normalized-self"
 PROSPERO_SELF_MAGIC = b"\x54\x14\xf5\xee"
 LEGACY_SELF_MAGIC = b"\x4f\x15\x3d\x1d"
@@ -140,7 +140,6 @@ LARGE_PACKAGE_LV2_FILE_LIMIT = 500_000  # patched Publishing Tools profiles
 UCP_MAGIC = 0xB228C60A
 NPBIND_MAGIC = 0xD294A018
 UCP_HEADER, UCP_ENTRY, UCP_ALIGN = 0x60, 0x40, 0x10
-# Always write all four members. You've been warned.
 UCP_MEMBER_ORDER = ("enum_definition.json", "events_definition.json",
                     "stats_definition.json", "stats_extraction.json")
 UCP_ID_MEMBERS = ("enum_definition.json", "stats_definition.json",
@@ -989,16 +988,9 @@ def read_source_playgo_layout(
             raise ValueError(f"{chunk_path}: chunk {chunk_id} label contains invalid XML characters")
         languages = [language for bit, language in enumerate(PLAYGO_LANGUAGES)
                      if mask >> (63 - bit) & 1]
-        # A zero mask is a language-neutral placeholder chunk (retail packages
-        # ship empty ones), not a parse failure. Only bits outside the known
-        # language range are worth reporting.
-        known_mask = sum(1 << (63 - bit) for bit in range(len(PLAYGO_LANGUAGES)))
-        if mask & ~known_mask:
-            unknown = [63 - b for b in range(64) if (mask >> b) & 1 and b < 64 - len(PLAYGO_LANGUAGES)]
-            print(f"\nChunk {chunk_id} in {chunk_path} sets unrecognized language bits "
-                  f"{unknown} (mask {mask:#x}); the chunk is emitted for its known languages only.")
-        # Retail leaves unused chunks fully blank: no label and no languages.
-        chunks.append((label or (f"Chunk #{chunk_id}" if languages else ""), languages))
+        if not languages:
+            raise ValueError(f"{chunk_path}: chunk {chunk_id} has no known languages")
+        chunks.append((label or f"Chunk #{chunk_id}", languages))
 
     return SourcePlayGoLayout(chunks, file_chunks, seed, key,
                               read_source_scenarios(chunk_path, chunk_count))
@@ -1407,7 +1399,8 @@ def build_gp5(
                 "id": str(chunk_id),
                 "label": label,
                 "layer_no": "0",
-                "languages": " ".join(assigned_languages or chunk_languages),
+                "languages": (" ".join(assigned_languages) if assigned_languages
+                              else " ".join(chunk_languages)),
             }
             ET.SubElement(chunks, "chunk", attributes)
         scenarios = ET.SubElement(

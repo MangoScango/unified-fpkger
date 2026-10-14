@@ -557,7 +557,7 @@ def extract_step(job, spec, pkg_path):
         os.makedirs(dest, exist_ok=True)
         job.step = f"extracting {os.path.basename(pkg_path)}"
         argv = ["wine", PROSPERO_PUB_CMD, "img_extract", "--passcode",
-                spec["ps5"]["passcode"], "--no_progress_bar", pkg_path, dest]
+                spec["ps5"]["passcode"], pkg_path, dest]
         start = job.line_count
         rc = run(job, argv, cwd=dest, env_extra={"WINEDEBUG": "-all"})
         if rc != 0:
