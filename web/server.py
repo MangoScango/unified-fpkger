@@ -1000,6 +1000,7 @@ def build_job(kind, params):
     elif kind == "dump-build":
         console_spec(params, spec)
         dump_spec(params, spec)
+        spec["no_decrypt"] = False
         spec["out_dir"] = resolve_path(params.get("out_dir"), "output directory", create=True)
         spec["jobs"] = int_in(params, "jobs", 1, 64, 8, "ftp jobs")
         spec["delete_dumps"] = bool(params.get("delete_dumps"))
@@ -1263,7 +1264,6 @@ def config():
         "tmp_dir": usable_path(setting("IMG_TMP_DIR")),
         "jobs": setting("JOBS", "8"),
         "ps5_temp_dir": usable_path(setting("LIBPROSPERO_TEMP_DIR")),
-        "passcode": "0" * 32,
         "compression_level": "7",
         "chunk_count": "",
         "libs_dir": usable_path(setting("PS5BACKPORT_LIBS")),
