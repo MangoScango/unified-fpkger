@@ -16,6 +16,7 @@ COMPRESSION_LEVEL=7
 # falls back to 100.
 CHUNK_COUNT=""
 PLAYGO_LANGUAGES=""
+DROP_UNUSED_CHUNKS=0
 KEEP_INTERMEDIATE=0
 FORCE=0
 VOLUME=auto
@@ -37,6 +38,7 @@ usage() {
     echo "  --compression-level <-4..9> (default: 7)"
     echo "  --chunk-count <1..255>      apps only; used when the source has no sce_sys/playgo-chunk.dat (default: 100)"
     echo "  --playgo-languages <list>   apps only; e.g. en-US,ru-RU (default: the source's languages)"
+    echo "  --drop-unused-chunks        apps only; remove source PlayGo chunks with no label, languages or files (ids shift)"
     echo "  --volume <auto|app|ac>      (default: auto; ac when there is no eboot.bin)"
     echo "  --entitlement-key <hex>     add-ons only (default: the source's $ENTITLEMENT_KEY_FILE, else 32 zeroes)"
     echo "  --keep-intermediate"
@@ -56,6 +58,7 @@ while [[ $# -gt 0 ]]; do
         --compression-level) COMPRESSION_LEVEL="$2"; shift 2 ;;
         --chunk-count) CHUNK_COUNT="$2"; shift 2 ;;
         --playgo-languages) PLAYGO_LANGUAGES="$2"; shift 2 ;;
+        --drop-unused-chunks) DROP_UNUSED_CHUNKS=1; shift ;;
         --volume) VOLUME="$2"; shift 2 ;;
         --entitlement-key) ENTITLEMENT_KEY="$2"; shift 2 ;;
         --keep-intermediate) KEEP_INTERMEDIATE=1; shift ;;
@@ -116,8 +119,8 @@ if [[ "$VOLUME" == app ]]; then
 elif [[ -n "$REFERENCE_PACKAGE" ]]; then
     echo "--reference-package applies to application builds only" >&2
     exit 1
-elif [[ -n "$CHUNK_COUNT" || -n "$PLAYGO_LANGUAGES" ]]; then
-    echo "--chunk-count and --playgo-languages apply to application builds only" >&2
+elif [[ -n "$CHUNK_COUNT" || -n "$PLAYGO_LANGUAGES" || "$DROP_UNUSED_CHUNKS" == 1 ]]; then
+    echo "--chunk-count, --playgo-languages and --drop-unused-chunks apply to application builds only" >&2
     exit 1
 else
     KEY_FILE="$SOURCE_FOLDER/$ENTITLEMENT_KEY_FILE"
@@ -279,6 +282,9 @@ else
     GP5_ARGS+=("--keep-keystone" "--chunk-count" "${CHUNK_COUNT:-100}")
     if [[ -n "$PLAYGO_LANGUAGES" ]]; then
         GP5_ARGS+=("--playgo-languages" "$PLAYGO_LANGUAGES")
+    fi
+    if [[ "$DROP_UNUSED_CHUNKS" == 1 ]]; then
+        GP5_ARGS+=("--drop-unused-chunks")
     fi
     if [[ -z "$REFERENCE" ]]; then
         GP5_ARGS+=("--auto-size-profile" "$AUTO_SIZE_PROFILE")

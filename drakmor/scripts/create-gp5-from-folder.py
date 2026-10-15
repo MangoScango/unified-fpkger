@@ -875,6 +875,31 @@ class SourcePlayGoLayout:
     def chunk_of(self, path: str) -> int | None:
         return self.file_chunks.get(self.hash_of(path))
 
+    def without_unused_chunks(self) -> tuple["SourcePlayGoLayout", list[int]]:
+        """Drop chunks with no label, no languages and no files, renumbering the rest.
+
+        Returns the new layout and the dropped source chunk ids.
+        """
+        used = set(self.file_chunks.values())
+        dropped = [chunk_id for chunk_id, (label, languages) in enumerate(self.chunks)
+                   if not label and not languages and chunk_id not in used]
+        if not dropped:
+            return self, []
+        renumber: dict[int, int] = {}
+        for chunk_id in range(len(self.chunks)):
+            if chunk_id not in dropped:
+                renumber[chunk_id] = len(renumber)
+        scenarios = None
+        if self.scenarios is not None:
+            scenarios = [
+                (label, sum(1 for chunk_id in ids[:initial] if chunk_id in renumber),
+                 [renumber[chunk_id] for chunk_id in ids if chunk_id in renumber])
+                for label, initial, ids in self.scenarios]
+        return SourcePlayGoLayout(
+            [chunk for chunk_id, chunk in enumerate(self.chunks) if chunk_id in renumber],
+            {path_hash: renumber[chunk_id] for path_hash, chunk_id in self.file_chunks.items()},
+            self.seed, self.key, scenarios), dropped
+
     def missing_by_chunk(self, placed: set[int]) -> dict[int, tuple[int, int]]:
         """{chunk: (missing, expected)} for chunks whose mapped files are not all placed."""
         generated = {self.hash_of(path) for path in PLAYGO_SDK_GENERATED_PATHS}
@@ -1216,6 +1241,7 @@ def build_gp5(
     auto_size_profile: str | None = None,
     chunk_count: int = DEFAULT_PLAYGO_CHUNK_COUNT,
     playgo_languages: str | None = None,
+    drop_unused_chunks: bool = False,
 ) -> tuple[int, list[str]]:
     if len(passcode) != 32:
         raise ValueError("passcode must contain exactly 32 characters")
@@ -1226,6 +1252,8 @@ def build_gp5(
     entitlement_key = normalize_entitlement_key(volume, entitlement_key)
     if playgo_languages is not None and volume != "app":
         raise ValueError("PlayGo language selection supports APP volumes only")
+    if drop_unused_chunks and volume != "app":
+        raise ValueError("dropping unused PlayGo chunks supports APP volumes only")
     selected_languages = (parse_playgo_languages(playgo_languages)
                           if playgo_languages is not None else None)
     if auto_size_profile is not None and volume != "app":
@@ -1242,6 +1270,14 @@ def build_gp5(
                   "with generated chunks")
         else:
             layout = read_source_playgo_layout(root, chunk_count)
+        if drop_unused_chunks:
+            if layout is None:
+                print("PlayGo: --drop-unused-chunks has no effect without a source chunk layout")
+            else:
+                layout, dropped = layout.without_unused_chunks()
+                if dropped:
+                    print(f"PlayGo: dropped unused chunk(s) {', '.join(map(str, dropped))}; "
+                          f"the remaining {len(layout.chunks)} are renumbered from 0")
         if layout is not None:
             chunk_count = len(layout.chunks)
             # The chunk masks can list more languages than playgo-scenario.json.
@@ -1618,6 +1654,7 @@ def build_bundle(
     chunk_count: int = DEFAULT_PLAYGO_CHUNK_COUNT,
     entitlement_key: str | None = None,
     playgo_languages: str | None = None,
+    drop_unused_chunks: bool = False,
 ) -> tuple[Path, int, list[str]]:
     if volume not in {"app", "ac"}:
         raise ValueError("--build supports debug APP/AC nwonly profiles")
@@ -1645,7 +1682,8 @@ def build_bundle(
         root, project_path, volume, passcode, absolute_paths=False,
         keep_service_paths=keep_service_paths, converter_path=converter_path,
         entitlement_key=entitlement_key, auto_size_profile=auto_size_profile,
-        chunk_count=chunk_count, playgo_languages=playgo_languages)
+        chunk_count=chunk_count, playgo_languages=playgo_languages,
+        drop_unused_chunks=drop_unused_chunks)
     chunk_info = ET.parse(project_path).getroot().find("volume/chunk_info")
     chunk_count = int(chunk_info.attrib["chunk_count"]) if chunk_info is not None else 0
 
@@ -1730,6 +1768,9 @@ def main() -> None:
     parser.add_argument("--playgo-languages", metavar="CODE,CODE",
                         help="override APP PlayGo chunk languages, e.g. en-US,ru-RU; "
                              "otherwise retain source languages")
+    parser.add_argument("--drop-unused-chunks", action="store_true",
+                        help="remove source PlayGo chunks that have no label, languages or "
+                             "files, renumbering the rest (chunk ids shift)")
     parser.add_argument(
         "--entitlement-key",
         help="16-byte hex entitlement key (required for ac and al)")
@@ -1767,7 +1808,8 @@ def main() -> None:
             root, output, args.volume, args.passcode, keep,
             args.publishing_tools.resolve(),
             args.dds_converter.resolve() if args.dds_converter else None,
-            args.chunk_count, entitlement_key, args.playgo_languages)
+            args.chunk_count, entitlement_key, args.playgo_languages,
+            args.drop_unused_chunks)
         print(f"Created build bundle {output} with {count} explicit file mapping(s).")
         print(f"Final LibProsperoPkg-compatible package: {package}")
     else:
@@ -1776,7 +1818,8 @@ def main() -> None:
         count, skipped = build_gp5(
             root, output, args.volume, args.passcode, args.absolute_paths, keep,
             args.dds_converter.resolve() if args.dds_converter else None,
-            entitlement_key, args.auto_size_profile, args.chunk_count, args.playgo_languages)
+            entitlement_key, args.auto_size_profile, args.chunk_count, args.playgo_languages,
+            args.drop_unused_chunks)
         print(f"Created {output} with {count} explicit file mapping(s).")
     if skipped:
         print("Excluded " + str(len(skipped)) + " service/project artifact(s):")

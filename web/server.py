@@ -639,6 +639,8 @@ def build_ps5(job, spec, src, out_dir):
             argv += ["--chunk-count", str(opts["chunk_count"])]
         if opts["playgo_languages"]:
             argv += ["--playgo-languages", opts["playgo_languages"]]
+        if opts["drop_unused_chunks"]:
+            argv.append("--drop-unused-chunks")
         if opts.get("reference_pkg"):
             argv += ["--reference-package", opts["reference_pkg"]]
     elif opts["entitlement_key"]:
@@ -873,6 +875,7 @@ def ps5_spec(params):
                                     "compression level"),
         "chunk_count": int_in(params, "chunk_count", 1, 255, None, "chunk count"),
         "playgo_languages": playgo_languages,
+        "drop_unused_chunks": bool(params.get("drop_unused_chunks")),
         "temp_dir": (resolve_path(params["ps5_temp_dir"], "PS5 temp directory",
                                   create=True) if params.get("ps5_temp_dir") else None),
         "extract_dir": (resolve_path(params["extract_dir"], "pkg extraction folder",
