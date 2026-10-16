@@ -172,6 +172,19 @@ SHRINK_PNG="${SHRINK_PNG:-$SELF_DIR/shrink-png.py}"
 SFO_TOOL="${SFO_TOOL:-$SELF_DIR/sfo}"
 FAKE_PASSCODE="00000000000000000000000000000000"
 DLC_ENT_KEY="00000000000000000000000000000000"   # zero entitlement key (kstuff fakes the check)
+# ent_key_of <dir>: the add-on dump's entitlement_key.dat as 32 hex digits
+# (16 raw bytes from pfsdump, or hand-written hex), else the zero key.
+ent_key_of() {
+  local f="$1/entitlement_key.dat" key=""
+  if [ -f "$f" ]; then
+    if [ "$(stat -c %s "$f")" -eq 16 ]; then
+      key="$(od -An -tx1 -v "$f" | tr -d ' \n')"
+    else
+      key="$(tr -d '[:space:]' < "$f")"
+    fi
+  fi
+  if [[ "$key" =~ ^[0-9A-Fa-f]{32}$ ]]; then echo "${key^^}"; else echo "$DLC_ENT_KEY"; fi
+}
 WINE_OVERRIDES="wineps.drv,localspl.dll,spoolss.dll=d"
 
 # PS2-emu auth-info templates (authinfo_emu.txt, FW=501). The first 2 bytes
@@ -511,6 +524,7 @@ stage_tree() {
   # Bulk content is hardlinked but sce_sys is copied to prevent modifying dump
   cp -al "$DUMP" "$stage" 2>/dev/null || cp -a "$DUMP" "$stage"
   rm -rf "$stage/sce_sys"; cp -a "$DUMP/sce_sys" "$stage/sce_sys"
+  rm -f "$stage/entitlements.txt"   # pfsdump's record, not game content
   if [ -n "$overlay" ] && [ -n "$UPDATE" ]; then
     log "overlaying update (update wins)"
     cp -a "$UPDATE/." "$stage/"
@@ -930,6 +944,7 @@ build_one_dlc() {
   #    hardlink would write straight through to the original dump.
   cp -al "$ac" "$stage" 2>/dev/null || cp -a "$ac" "$stage"
   rm -rf "$stage/sce_sys"; cp -a "$ac/sce_sys" "$stage/sce_sys"
+  rm -f "$stage/entitlement_key.dat"   # pfsdump's record, not add-on content
   fix_icons "$stage/sce_sys"
 
   # 2. make the staged sfo look like an app so gengp4_app can scan it. CATEGORY
@@ -949,9 +964,11 @@ build_one_dlc() {
   mv -f "$real_sfo.real" "$real_sfo"
 
   # 5. ac_data project + splice the scanned file list
+  local ent_key; ent_key="$(ent_key_of "$ac")"
+  log "dlc: entitlement key $ent_key"
   wine_run "$ORBIS_PUB_CMD" gp4_proj_create \
     --volume_type pkg_ps4_ac_data --content_id "$cid" \
-    --passcode "$FAKE_PASSCODE" --entitlement_key "$DLC_ENT_KEY" \
+    --passcode "$FAKE_PASSCODE" --entitlement_key "$ent_key" \
     "$(winpath "$gp4")" >/dev/null 2>&1 || die "dlc: gp4_proj_create failed for $cid"
 
   # Splice the scanned file list into the ac project: gp4_proj_create emits an

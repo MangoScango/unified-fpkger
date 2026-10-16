@@ -1153,6 +1153,20 @@ def find_dlc_mounts(mount, title):
             if name.endswith("-ac") and title in name]
 
 
+def relist_dlc_mounts(host, port, title, known):
+    """The title's add-on mounts as they are now, and those not in known.
+
+    The entitlement injector mounts every add-on to read its key, so the
+    listing taken before it ran can be short.
+    """
+    mount = FtpMount(host, port)
+    try:
+        current = find_dlc_mounts(mount, title)
+    finally:
+        mount.close()
+    return current, [name for name in current if name not in known]
+
+
 def entitlement_label(ac_mount):
     return ac_mount[:-len("-ac")][-16:]
 
@@ -1733,7 +1747,7 @@ def main():
     parser.add_argument("--no-dlc", action="store_true",
                         help="skip installed add-on content")
     parser.add_argument("--no-entitlements", action="store_true",
-                        help="PS5: do not read add-on entitlement keys from "
+                        help="do not read add-on entitlement keys from "
                              "the running game")
     parser.add_argument("--injector", default=default_injector(),
                         help="ps5-entitlement-dumper's entitlements.elf "
@@ -1815,11 +1829,16 @@ def main():
         os.makedirs(dest, exist_ok=True)
 
         entitlement_keys = None
-        if ps5 and not args.no_entitlements:
+        if not args.no_entitlements:
             entitlement_keys = running_game_entitlements(
                 host, title, candidates, args.injector)
             if entitlement_keys is not None:
                 write_entitlements(dest, entitlement_keys)
+            if not args.no_dlc:
+                ac_mounts, added = relist_dlc_mounts(host, port, title, ac_mounts)
+                if added:
+                    print(f"  the injector mounted {len(added)} more add-on(s): "
+                          f"{', '.join(added)}")
 
         # Probe whichever image reaches furthest into its PFS. A small patch is
         # not evidence either way because the failing 2 GiB offset lies outside
