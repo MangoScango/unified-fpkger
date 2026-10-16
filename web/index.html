@@ -162,7 +162,7 @@
       <div data-use="t-console"></div>
       <div data-use="t-dump"></div>
       <div data-use="t-out"></div>
-      <p class="hint">Detect the console to show only its platform's build options.</p>
+      <p class="hint">Detect the console to show its platform's build options.</p>
       <div data-use="t-ps4" data-options="ps4"></div>
       <div data-use="t-ps5" data-options="ps5"></div>
       <fieldset>
@@ -264,8 +264,6 @@
     <label class="check"><input type="checkbox" name="no_dlc"> Skip installed DLC</label>
     <label class="check"><input type="checkbox" name="no_decrypt"> Leave executables encrypted</label>
     <label class="check"><input type="checkbox" name="no_entitlements"> PS5: skip reading add-on entitlement keys</label>
-    <p class="hint">PS5 dumps send ps5-entitlement-dumper to the console's payload loader (port 9021) while the
-      game runs, then save the keys to <code>entitlements.txt</code> and each add-on's <code>entitlement_key.dat</code>.</p>
     <label class="check"><input type="checkbox" name="verbose"> Log every file</label>
   </fieldset>
 </template>
@@ -340,21 +338,18 @@
     <label data-single>Add-on entitlement key (32 hex digits)
       <input type="text" name="entitlement_key" autocomplete="off" spellcheck="false"
              pattern="[0-9A-Fa-f]{32}" maxlength="32"></label>
-    <p class="hint" data-key-hint>Leave empty to use each add-on's <code>entitlement_key.dat</code>,
-      or zeroes when it has none. Some games pick the add-on to mount from this key.</p>
+    <p class="hint" data-key-hint>Default: the add-on's <code>entitlement_key.dat</code>, else zeroes.</p>
     <details>
       <summary>Advanced</summary>
       <label data-single>Reference package (builds a patch against it)
         <span class="row"><input type="text" name="reference_pkg">
         <button type="button" data-browse="reference_pkg" data-files="pkg">Browse</button></span></label>
-      <label>Temporary folder
+      <label>Scratch folder for img_create (default: wine's %TEMP%)
         <span class="row"><input type="text" name="ps5_temp_dir">
         <button type="button" data-browse="ps5_temp_dir">Browse</button></span></label>
       <label>Extract rebuilt pkgs into (default: next to each pkg)
         <span class="row"><input type="text" name="extract_dir">
         <button type="button" data-browse="extract_dir">Browse</button></span></label>
-      <p class="hint">Each pkg is extracted to <code>&lt;name&gt;-extract</code> there before
-        building; an existing extraction of the same title is reused instead of re-extracting.</p>
       <label class="check"><input type="checkbox" name="keep_intermediate"> Keep the GP5 and intermediate files</label>
     </details>
   </fieldset>
@@ -648,9 +643,9 @@ function syncSelection() {
   const chosen = chosenUnits();
   const platforms = new Set(chosen.map(u => u.platform));
   // Only the fieldsets for the selected dumps' platforms are shown; with
-  // nothing selected, both are, so the options can be set up first.
+  // nothing selected there is no build target, so both stay hidden.
   for (const node of $$("[data-options]", buildForm))
-    node.hidden = platforms.size > 0 && !platforms.has(node.dataset.options);
+    node.hidden = !platforms.has(node.dataset.options);
   const multi = chosen.length > 1;
   buildForm.classList.toggle("multi", multi);
   $("#single-hint").hidden = !multi;
@@ -799,16 +794,17 @@ for (const form of $$("form")) {
 }
 
 // Console detection fills the title list for that form. In the Dump+Build
-// tab the detected platform decides which build options are shown; without
-// a detection both stay visible.
+// tab the detected platform decides which build options are shown; until a
+// title with a known platform is chosen, both stay hidden.
 function syncConsolePlatform(form) {
   const select = form.elements.title;
   const platform = select.platforms?.get(select.value);
   for (const node of $$("[data-options]", form))
-    node.hidden = Boolean(platform) && node.dataset.options !== platform;
+    node.hidden = node.dataset.options !== platform;
   syncScLink(form, select.value);
 }
 dumpBuildForm.elements.title.addEventListener("change", () => syncConsolePlatform(dumpBuildForm));
+syncConsolePlatform(dumpBuildForm);
 document.addEventListener("click", async e => {
   const btn = e.target.closest("[data-detect]");
   if (!btn) return;
