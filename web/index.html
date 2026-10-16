@@ -334,6 +334,8 @@
       <button type="button" data-browse="sc_pkg" data-files="pkg">Browse</button></span></label>
     <p class="hint">Restores sce_sys metadata (param.json, icons, playgo files) from the retail
       metadata package before building, replacing what the dump has. Encrypted files are excluded.</p>
+    <p class="hint" data-sc-link hidden>Retail metadata packages for this title:
+      <a target="_blank" rel="noopener"></a></p>
     <label class="check"><input type="checkbox" name="force"> Replace existing outputs</label>
     <label data-single>Add-on entitlement key (32 hex digits)
       <input type="text" name="entitlement_key" autocomplete="off" spellcheck="false"
@@ -631,6 +633,17 @@ function prefillEntitlementKey(chosen) {
   else keyHint.innerHTML = keyHint.dataset.default;
 }
 
+function syncScLink(form, titleId) {
+  const wrap = $("[data-sc-link]", form);
+  if (!wrap) return;
+  wrap.hidden = !titleId;
+  if (titleId) {
+    const a = $("a", wrap);
+    a.href = "https://prosperopatches.com/" + encodeURIComponent(titleId);
+    a.textContent = "prosperopatches.com/" + titleId;
+  }
+}
+
 function syncSelection() {
   const chosen = chosenUnits();
   const platforms = new Set(chosen.map(u => u.platform));
@@ -647,6 +660,8 @@ function syncSelection() {
     ? `${chosen.length} selected` + (hiddenCount ? `, ${hiddenCount} hidden by the filter` : "") + "."
     : "";
   prefillEntitlementKey(chosen);
+  const single = chosen.length === 1 ? chosen[0] : null;
+  syncScLink(buildForm, single?.platform === "ps5" ? single.title_id : null);
   const submit = $("#build-submit");
   submit.disabled = !chosen.length;
   submit.textContent = chosen.length > 1 ? `Build ${chosen.length} titles` : "Build selected";
@@ -791,6 +806,7 @@ function syncConsolePlatform(form) {
   const platform = select.platforms?.get(select.value);
   for (const node of $$("[data-options]", form))
     node.hidden = Boolean(platform) && node.dataset.options !== platform;
+  syncScLink(form, select.value);
 }
 dumpBuildForm.elements.title.addEventListener("change", () => syncConsolePlatform(dumpBuildForm));
 document.addEventListener("click", async e => {
