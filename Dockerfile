@@ -22,6 +22,12 @@ ARG PKGTOOLS_REF=main
 RUN git clone --depth 1 --branch "$PKGTOOLS_REF" "$PKGTOOLS_REPO" /out-pkgtools \
     && rm -rf /out-pkgtools/.git
 
+ARG PS_PKG_INFO_REPO=https://github.com/MangoScango/ps-pkg-info
+ARG PS_PKG_INFO_REF=main
+RUN git init -q /src/ps-pkg-info \
+    && git -C /src/ps-pkg-info fetch -q --depth 1 "$PS_PKG_INFO_REPO" "$PS_PKG_INFO_REF" \
+    && git -C /src/ps-pkg-info checkout -q FETCH_HEAD
+
 FROM debian:trixie-slim
 
 ARG WINE_BRANCH=stable
@@ -66,6 +72,7 @@ ENV SDK_DIR=/opt/fpkger/PS4_Fake_PKG_Tools_3 \
 
 COPY --from=deps /out-sfo        /opt/fpkger/sfo
 COPY --from=deps /out-pkgtools   /opt/fpkger/PS4_Fake_PKG_Tools_3
+COPY --from=deps /src/ps-pkg-info/ps_pkg_info /opt/fpkger/ps_pkg_info
 # another-backporter is a git submodule: backport-ps5.py drives the web UI's
 # Backport tab, and its fwdb/ CSVs are backport-sdk.py's export tables. The
 # PS5 firmware dumps fakelibs are built from are not shipped; the Backport

@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 import ssl
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import pkg as pkgmod  # noqa: E402
+from ps_pkg_info import pkg as pkgmod  # noqa: E402
 
 EXCLUDED_BASENAMES = {"npbind.dat", "license.dat", "license.info"}
 EXCLUDED_SUFFIX = ".ucp"

@@ -47,7 +47,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.environ.get("FPKGER_DIR") or os.path.dirname(HERE)
 sys.path.insert(0, TOOLS)
 import pfsdump  # noqa: E402
-import pkg as pkgmod  # noqa: E402
+from ps_pkg_info import pkg as pkgmod  # noqa: E402
 
 sys.path.insert(0, HERE)
 import dumpscan  # noqa: E402

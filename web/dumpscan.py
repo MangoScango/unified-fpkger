@@ -5,10 +5,7 @@ content, and what it declares decides what it is: CATEGORY gd* is a base app,
 gp* an update, ac an add-on. Pieces are then grouped by the title ID they
 declare, so a base, its update and its add-ons come together wherever they sit
 and whatever their folders are called. Standalone PS5 .pkg files (parsed with
-the vendored pkg.py) are listed too, one unit each, tagged for rebuilding.
-
-The param.sfo and param.json readings follow MangoScango/ps-pkg-server
-(pkgtool/pkg.py), which in turn mirrors LibOrbisPkg's SFO/ParamSfo.cs.
+ps_pkg_info) are listed too, one unit each, tagged for rebuilding.
 """
 
 import json
@@ -19,7 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import pkg as pkgmod  # noqa: E402
+from ps_pkg_info import pkg as pkgmod  # noqa: E402
 import dlc_emu  # noqa: E402
 
 SCEC_MAGIC = 0x53434543
