@@ -24,15 +24,18 @@ container, the console's appmeta and its trophy and UDS conf directories.
 import argparse
 import collections
 import ftplib
+import json
 import os
 import re
 import shutil
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 
 import playgo_state
 
@@ -1624,6 +1627,208 @@ def dump_dlc(host, port, mount, title, out_dir, ac_mounts, decrypt=True,
     return done, problems, all_skipped, skip_total
 
 
+AL_CONTENT_ID = re.compile(
+    r"[A-Z]{2}[0-9]{4}-([A-Z]{4}[0-9]{5})_00-.{16}")
+ENTITLEMENT_DBS = (
+    "/system_data/priv/license/entitlement4.db",
+    "/system_data/priv/license/entitlement.db",
+)
+
+
+def write_ps5_al_param(path, content_id, title_id, title):
+    param = {
+        "contentId": content_id,
+        "contentVersion": "01.000.000",
+        "localizedParameters": {
+            "defaultLanguage": "en-US",
+            "en-US": {"titleName": title},
+        },
+        "masterVersion": "01.00",
+        "requiredSystemSoftwareVersion": "0x0100000000000000",
+        "titleId": title_id,
+    }
+    with open(path, "w", encoding="utf-8") as out:
+        json.dump(param, out, ensure_ascii=False, indent=2)
+        out.write("\n")
+
+
+def dump_dlc_entitlements(host, port, out_dir, filter_title=None,
+                          required=False, verbose=False):
+    """Builds unlocker directories for additional-content licenses.
+
+    Missing prerequisites skip an automatic dump with a warning, but fail an
+    explicitly requested one. Returns the number of licenses written.
+    """
+    def missing_prereq(message):
+        if required:
+            raise RuntimeError(message)
+        print(f"  warning: {message} Skipping DLC entitlement unlockers.",
+              file=sys.stderr)
+        return 0
+
+    tool = sfo_tool()
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as err:
+        raise RuntimeError(f"could not create output directory {out_dir}: {err}") from err
+
+    print("Downloading entitlement database ...")
+    data = None
+    error = None
+    for path in ENTITLEMENT_DBS:
+        try:
+            data = fetch_whole(host, port, path)
+            error = None
+        except (OSError, EOFError, ftplib.Error) as err:
+            error = err
+            continue
+        if data:
+            break
+    if not data:
+        if error is not None:
+            raise RuntimeError(
+                f"could not download entitlement database: {error}") from error
+        return missing_prereq(
+            "No entitlement data found at entitlement4.db or entitlement.db.")
+
+    with tempfile.TemporaryDirectory(prefix="pfsdump-entitlements-") as tmp:
+        db_path = os.path.join(tmp, "entitlement.db")
+        try:
+            with open(db_path, "wb") as out:
+                out.write(data)
+            db = sqlite3.connect(db_path)
+        except (OSError, sqlite3.Error) as err:
+            return missing_prereq(f"Could not read entitlement.db: {err}.")
+        try:
+            try:
+                tables = [row[0] for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name LIKE 'entitlement_%';")]
+            except sqlite3.Error as err:
+                return missing_prereq(
+                    f"Could not read tables from entitlement.db: {err} "
+                    "(corrupt download?).")
+            if not tables:
+                print("No entitlement tables found in entitlement.db.")
+                return 0
+
+            licenses = []
+            for table in tables:
+                if verbose:
+                    print(f"  entitlement table: {table}", file=sys.stderr)
+                quoted_table = table.replace('"', '""')
+                try:
+                    rows = db.execute(
+                        f'''SELECT json_extract(JSON, '$.id'),
+                                   coalesce(json_extract(JSON, '$.game_meta.name'),
+                                            json_extract(JSON, '$.name'), ''),
+                                   coalesce(json_extract(JSON, '$.game_meta.icon_url'), '')
+                            FROM "{quoted_table}" WHERE Package_type LIKE 'PS%AL';''').fetchall()
+                except sqlite3.Error as err:
+                    return missing_prereq(
+                        f"Could not read DLC entitlements from table {table}: {err}.")
+
+                for content_id, title, icon_url in rows:
+                    if not content_id:
+                        continue
+                    match = AL_CONTENT_ID.fullmatch(content_id)
+                    if match is None:
+                        if verbose:
+                            print(f"  skipping entitlement with unexpected content ID "
+                                  f"{content_id}", file=sys.stderr)
+                        continue
+                    title_id = match.group(1)
+                    if filter_title and title_id != filter_title:
+                        continue
+                    licenses.append((content_id, title or content_id,
+                                     icon_url, title_id))
+        finally:
+            db.close()
+
+    if tool is None and any(
+            not title_id.startswith("PPSA")
+            for _content_id, _title, _icon_url, title_id in licenses):
+        return missing_prereq(
+            "PS4 DLC entitlement unlockers require program \"sfo\" "
+            "(https://github.com/hippie68/sfo) to build param.sfo files. "
+            "Place it next to this script or set SFO_PATH.")
+
+    for content_id, title, icon_url, title_id in licenses:
+        dlc_dir = os.path.join(
+            out_dir, f"{title_id}-dlc", f"{content_id}-al")
+        sce_sys = os.path.join(dlc_dir, "sce_sys")
+        try:
+            os.makedirs(sce_sys, exist_ok=True)
+        except OSError as err:
+            raise RuntimeError(
+                f"could not create unlocker directory for {content_id}: {err}"
+            ) from err
+
+        if title_id.startswith("PPSA"):
+            try:
+                write_ps5_al_param(
+                    os.path.join(sce_sys, "param.json"),
+                    content_id, title_id, title)
+            except OSError as err:
+                raise RuntimeError(
+                    f"could not build param.json for {content_id}: {err}") from err
+            try:
+                os.unlink(os.path.join(sce_sys, "param.sfo"))
+            except FileNotFoundError:
+                pass
+            except OSError as err:
+                raise RuntimeError(
+                    f"could not remove stale param.sfo for {content_id}: {err}"
+                ) from err
+        else:
+            command = [
+                tool, os.path.join(sce_sys, "param.sfo"),
+                "--new-file", "--force",
+                "--set", "int", "ATTRIBUTE", "0",
+                "--set", "str", "CATEGORY", "ac",
+                "--set", "str", "CONTENT_ID", content_id,
+                "--set", "str", "FORMAT", "obs",
+                "--set", "str", "TITLE", title,
+                "--set", "str", "TITLE_ID", title_id,
+                "--set", "str", "VERSION", "01.00",
+            ]
+            try:
+                done = subprocess.run(command, check=False)
+            except OSError as err:
+                raise RuntimeError(
+                    f"could not run sfo for {content_id}: {err}") from err
+            if done.returncode != 0:
+                raise RuntimeError(f"could not build param.sfo for {content_id}")
+
+        if icon_url:
+            icon_path = os.path.join(sce_sys, "icon0.png")
+            try:
+                with urllib.request.urlopen(icon_url, timeout=30) as response:
+                    icon = response.read()
+                with open(icon_path, "wb") as out:
+                    out.write(icon)
+            except Exception as err:
+                try:
+                    os.unlink(icon_path)
+                except FileNotFoundError:
+                    pass
+                print(f"  warning: could not download icon0.png for "
+                      f"{content_id}: {err}", file=sys.stderr)
+
+        print(f"{content_id}  ({title_id})  {title}")
+
+    count = len(licenses)
+    if count == 0:
+        if filter_title:
+            print(f"No DLC entitlements found for {filter_title}.")
+        else:
+            print("No DLC entitlements found in entitlement.db.")
+    else:
+        print(f"Created {count} DLC unlocker template(s) under "
+              f"\"{out_dir}/<title_id>-dlc/\".")
+    return count
+
+
 def dump_ps4_metadata(host, port, mount, title, dest, has_patch,
                       verbose=False):
     """Writes sce_sys from the app and patch PKGs and fixes up the result.
@@ -2035,9 +2240,10 @@ def main():
         description="Dump a PS4 or PS5 title's tree by streaming its PFS images.")
     parser.add_argument("host", help="console address, optionally HOST:PORT")
     parser.add_argument("title", nargs="?",
-                        help="title ID; defaults to the running game")
+                        help="title ID; defaults to the running game, or no "
+                             "filter with --dlc-entitlements")
     parser.add_argument("-o", "--output-dir", default=".",
-                        help="directory to create <TITLE>-app in (default: .)")
+                        help="root directory for dump output (default: .)")
     parser.add_argument("-p", "--port", type=int, default=2121)
     parser.add_argument("--no-patch", action="store_true",
                         help="dump the base game only")
@@ -2048,8 +2254,12 @@ def main():
                         help="request every file instead of skipping those in "
                              "chunks the console never downloaded (PS5), and do "
                              "not report missing chunks")
+    parser.add_argument("--dlc-entitlements", action="store_true",
+                        help="build DLC unlocker templates from entitlement.db "
+                             "and exit; TITLE restricts output to one game")
     parser.add_argument("--no-dlc", action="store_true",
-                        help="skip installed add-on content")
+                        help="skip installed add-on content and AL unlocker "
+                             "templates")
     parser.add_argument("--no-entitlements", action="store_true",
                         help="do not read add-on entitlement keys from "
                              "the running game")
@@ -2067,6 +2277,16 @@ def main():
     if ":" in host:
         host, _, spec = host.partition(":")
         port = int(spec)
+
+    if args.dlc_entitlements:
+        try:
+            dump_dlc_entitlements(
+                host, port, args.output_dir, filter_title=args.title,
+                required=True, verbose=args.verbose)
+        except RuntimeError as err:
+            print(f"Could not dump DLC entitlements: {err}", file=sys.stderr)
+            return 1
+        return 0
 
     probe = FtpMount(host, port)
     try:
@@ -2273,6 +2493,14 @@ def main():
                 print(f"No DLC data found for {title}.")
         finally:
             mount.close()
+
+        if not ps5 and not args.no_dlc:
+            try:
+                dump_dlc_entitlements(
+                    host, port, args.output_dir, filter_title=title,
+                    verbose=args.verbose)
+            except RuntimeError as err:
+                problems.append(("DLC entitlement unlockers", str(err)))
 
         if skip_summary:
             print(f"\n{skip_count} uninstalled file(s) skipped "
