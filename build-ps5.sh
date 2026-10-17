@@ -37,7 +37,7 @@ usage() {
     echo "  --compression-level <-4..9> (default: 7)"
     echo "  --chunk-count <1..255>      apps only; used when the source has no sce_sys/playgo-chunk.dat (default: 100)"
     echo "  --playgo-languages <list>   apps only; e.g. en-US,ru-RU (default: the source's languages)"
-    echo "  --volume <auto|app|ac>      (default: auto; ac when there is no eboot.bin)"
+    echo "  --volume <auto|app|ac|al>   (default: auto; al for a *-al folder, else ac when there is no eboot.bin)"
     echo "  --entitlement-key <hex>     add-ons only (default: the source's $ENTITLEMENT_KEY_FILE, else 32 zeroes)"
     echo "  --keep-intermediate"
     echo "  --force"
@@ -76,9 +76,11 @@ fi
 SOURCE_FOLDER="$(realpath "$SOURCE_FOLDER")"
 
 case "$VOLUME" in
-    auto) if [[ -f "$SOURCE_FOLDER/eboot.bin" ]]; then VOLUME=app; else VOLUME=ac; fi ;;
-    app|ac) ;;
-    *) echo "--volume must be auto, app or ac" >&2; exit 1 ;;
+    auto) if [[ -f "$SOURCE_FOLDER/eboot.bin" ]]; then VOLUME=app
+          elif [[ "$SOURCE_FOLDER" == *-al ]]; then VOLUME=al
+          else VOLUME=ac; fi ;;
+    app|ac|al) ;;
+    *) echo "--volume must be auto, app, ac or al" >&2; exit 1 ;;
 esac
 echo "Volume: $VOLUME"
 
@@ -273,7 +275,7 @@ GP5_ARGS=(
 )
 
 # Keystone, chunk layout and size profile are application-only.
-if [[ "$VOLUME" == ac ]]; then
+if [[ "$VOLUME" != app ]]; then
     GP5_ARGS+=("--entitlement-key" "$ENTITLEMENT_KEY")
 else
     GP5_ARGS+=("--keep-keystone" "--chunk-count" "${CHUNK_COUNT:-100}")

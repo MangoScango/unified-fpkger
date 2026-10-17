@@ -637,7 +637,8 @@ def build_ps5(job, spec, src, out_dir):
     package = os.path.join(out_dir, ps5_package_name(src, requested) + ".pkg")
     job.step = f"building {os.path.basename(src)} (PS5 {'add-on' if addon else 'app'})"
     argv = [BUILD_PS5, "--source-folder", src, "--output-package", package,
-            "--volume", "ac" if addon else "app",
+            "--volume", ("al" if src.rstrip(os.sep).endswith("-al") else "ac")
+            if addon else "app",
             "--passcode", opts["passcode"],
             "--compression-level", str(opts["compression_level"])]
     # An SC package restores sce_sys for apps and add-ons alike.

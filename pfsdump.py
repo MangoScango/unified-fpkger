@@ -1636,8 +1636,9 @@ ENTITLEMENT_DBS = (
 )
 
 
-def write_ps5_al_param(path, content_id, title_id, title):
+def write_ps5_al_param(path, content_id, title_id, title, concept_id):
     param = {
+        "conceptId": concept_id,
         "contentId": content_id,
         "contentVersion": "01.000.000",
         "localizedParameters": {
@@ -1741,13 +1742,15 @@ def dump_dlc_entitlements(host, port, out_dir, filter_title=None,
                                             json_extract(JSON, '$.game_meta.name'),
                                             json_extract(JSON, '$.name'), ''),
                                    coalesce(json_extract(JSON, '$.gameMeta.iconUrl'),
-                                            json_extract(JSON, '$.game_meta.icon_url'), '')
+                                            json_extract(JSON, '$.game_meta.icon_url'), ''),
+                                   coalesce(json_extract(JSON, '$.conceptMeta.conceptId'),
+                                            json_extract(JSON, '$.titleMeta.conceptId'), '')
                             FROM "{quoted_table}" WHERE Package_type LIKE 'PS%AL';''').fetchall()
                 except sqlite3.Error as err:
                     return missing_prereq(
                         f"Could not read DLC entitlements from table {table}: {err}.")
 
-                for content_id, title, icon_url in rows:
+                for content_id, title, icon_url, concept_id in rows:
                     if not content_id:
                         continue
                     match = AL_CONTENT_ID.fullmatch(content_id)
@@ -1760,19 +1763,19 @@ def dump_dlc_entitlements(host, port, out_dir, filter_title=None,
                     if filter_title and title_id != filter_title:
                         continue
                     licenses.append((content_id, title or content_id,
-                                     icon_url, title_id))
+                                     icon_url, title_id, str(concept_id)))
         finally:
             db.close()
 
     if tool is None and any(
             not title_id.startswith("PPSA")
-            for _content_id, _title, _icon_url, title_id in licenses):
+            for _content_id, _title, _icon_url, title_id, _concept in licenses):
         return missing_prereq(
             "PS4 DLC entitlement unlockers require program \"sfo\" "
             "(https://github.com/hippie68/sfo) to build param.sfo files. "
             "Place it next to this script or set SFO_PATH.")
 
-    for content_id, title, icon_url, title_id in licenses:
+    for content_id, title, icon_url, title_id, concept_id in licenses:
         dlc_dir = os.path.join(
             out_dir, f"{title_id}-dlc", f"{content_id}-al")
         sce_sys = os.path.join(dlc_dir, "sce_sys")
@@ -1787,7 +1790,7 @@ def dump_dlc_entitlements(host, port, out_dir, filter_title=None,
             try:
                 write_ps5_al_param(
                     os.path.join(sce_sys, "param.json"),
-                    content_id, title_id, title)
+                    content_id, title_id, title, concept_id)
             except OSError as err:
                 raise RuntimeError(
                     f"could not build param.json for {content_id}: {err}") from err
