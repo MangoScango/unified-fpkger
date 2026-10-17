@@ -796,6 +796,36 @@ def recover_from_loose(host, port, loose_root, rel, dest, expected_size,
             mount.close()
 
 
+def resume_from_loose(host, port, loose_root, rel, dest, have, size,
+                      rest_workaround):
+    """Appends the rest of a file, from byte `have`, read through its mount.
+
+    For when the image stream gave out partway through a file. Only for files
+    the mount serves unchanged; a decrypted executable would differ from the
+    bytes already written. Returns (success, reason).
+    """
+    remote = FtpFile(host, port, f"{loose_root}/{rel}")
+    try:
+        conn, _skipped = open_stream_at(remote, have, rest_workaround)
+        try:
+            with open(dest, "ab") as out:
+                while have < size:
+                    chunk = conn.recv(min(CHUNK, size - have))
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    have += len(chunk)
+        finally:
+            remote.finish(conn)
+    except (OSError, EOFError, ftplib.Error) as err:
+        return False, str(err)
+    finally:
+        remote.close()
+    if os.path.getsize(dest) != size:
+        return False, f"mount returned {os.path.getsize(dest)} of {size} bytes"
+    return True, ""
+
+
 def open_stream_at(remote, target, rest_workaround):
     """Opens the image stream positioned at target.
 
@@ -982,16 +1012,34 @@ def extract(remote, dest_root, plan, label, verbose=False, progress=True,
                 if written == size:
                     continue
 
-                # The file left a zero-byte placeholder; drop it either way.
+                if conn is not None:
+                    conn.close()
+                    conn = None
+                # A file the stream gave out on partway keeps what it has, so
+                # the mount only supplies the rest.
+                if (loose_source is not None and 0 < written < size
+                        and not not_installed and not is_executable(rel)):
+                    host, port, loose_root = loose_source
+                    print(f"  warning: {label} image stopped in {rel} at "
+                          f"{written:,}/{size:,}; reading the rest from "
+                          f"{loose_root}", file=sys.stderr)
+                    ok, reason = resume_from_loose(
+                        host, port, loose_root, rel, path, written, size,
+                        rest_workaround)
+                    if ok:
+                        recovered += 1
+                        bar.advance(size - written)
+                        print(f"  recovered the rest of {rel} from the loose "
+                              f"mount", file=sys.stderr)
+                        continue
+                # An omitted file must be absent, not truncated, so verify and
+                # any later build never see a fragment.
                 if os.path.exists(path):
                     os.unlink(path)
                 if not_installed:
                     skipped_not_installed.append(rel)
                     continue
 
-                if conn is not None:
-                    conn.close()
-                    conn = None
                 if loose_source is not None:
                     host, port, loose_root = loose_source
                     print(f"  warning: {label} image could not finish {rel}; "
@@ -1246,6 +1294,8 @@ def dump_entitlements(host, injector, port=ELF_LOADER_PORT,
                 break
             output += data
     text = output.decode("utf-8", "replace")
+    if b"no add-on entitlements" in output:
+        return []
     if ENTITLEMENT_DONE not in output:
         last = next((line.strip() for line in reversed(text.splitlines())
                      if line.strip()), "no output")
@@ -1944,6 +1994,9 @@ def predict_missing(host, port, title, paths, plan=None, patch_plan=None):
         return set()
     found, counts, exact, unknown, patch_unknown = set(), None, True, False, False
     if state.files is not None:
+        # Empty files hold no data, so they are never missing.
+        if plan is not None:
+            paths = [rel for rel, _offset, size in plan if size > 0]
         by_chunk = state.missing_files(paths)
         found = {path for paths_ in by_chunk.values() for path in paths_}
         counts = {chunk: len(files) for chunk, files in by_chunk.items()}
@@ -2088,7 +2141,7 @@ def main():
         if not args.no_entitlements:
             entitlement_keys = running_game_entitlements(
                 host, title, candidates, args.injector)
-            if entitlement_keys is not None:
+            if entitlement_keys:
                 write_entitlements(dest, entitlement_keys)
             if not args.no_dlc:
                 ac_mounts, added = relist_dlc_mounts(host, port, title, ac_mounts)
@@ -2136,8 +2189,6 @@ def main():
             stream_unresolved.extend(unresolved)
             skipped_paths.update(skipped)
             skip_count += len(skipped)
-            for line in summarize_skips(skipped, layer_plan):
-                skip_summary.append(line)
             note = f", {rewound:,} rewound" if rewound else ""
             if recovered:
                 note += f", {recovered} recovered from loose mount"
@@ -2146,6 +2197,8 @@ def main():
             print(f"  {label}: {len(layer_plan)} file(s), {runs} run(s), "
                   f"{discarded:,} bytes discarded{note}")
 
+        # Summed over both layers so a folder split between them reads as one.
+        skip_summary.extend(summarize_skips(skipped_paths, patch_plan + app_plan))
         unresolved_paths = {rel for rel, _reason in stream_unresolved} | skipped_paths
         bad = verify(dest, patch_plan + app_plan)
         unexpected = [item for item in bad if item[0] not in unresolved_paths]
@@ -2160,15 +2213,12 @@ def main():
         if stream_unresolved:
             print(f"  warning: {len(stream_unresolved)} file(s) omitted after "
                   f"both image and loose extraction failed", file=sys.stderr)
-        if stream_unresolved:
-            checked_paths = {rel for rel, _expected, _actual in bad}
-            verified = len(patch_plan) + len(app_plan) - len(
-                checked_paths | unresolved_paths)
-            print(f"  verified {verified} of "
-                  f"{len(patch_plan) + len(app_plan)} file(s) against the plan")
-        else:
-            print(f"  verified {len(patch_plan) + len(app_plan)} file(s) "
-                  f"against the plan")
+        planned = len(patch_plan) + len(app_plan)
+        verified = planned - len(
+            {rel for rel, _expected, _actual in bad} | unresolved_paths)
+        print(f"  verified {verified} of {planned} file(s) against the plan"
+              if verified != planned else
+              f"  verified {planned} file(s) against the plan")
 
         problems = []
         mount = FtpMount(host, port)
