@@ -85,6 +85,7 @@
   .dump-title { font-weight: 600; overflow-wrap: anywhere; }
   .playgo-warning { margin-top: 8px; padding: 6px 10px; border: 1px solid #7a6530;
     border-left-width: 4px; border-radius: 4px; }
+  .playgo-warning.quiet { border-color: var(--line); }
   .playgo-warning p { margin: 4px 0; font-size: 13px; }
   .playgo-warning ul { margin: 4px 0; padding-left: 18px; font-size: 13px; }
   .playgo-warning li { margin: 2px 0; }
@@ -822,12 +823,12 @@ function playgoLine(tag, text, className) {
   return p;
 }
 function renderPlaygo(box, report) {
-  if (report.status === "installing")
-    return [playgoLine("p", "Still installing: chunks may still arrive, so wait before dumping.", "warn")];
   if (report.status !== "ok") return report.detail ? [playgoLine("p", report.detail, "hint")] : [];
   const nodes = [];
+  if (!report.chunks.length && !report.partial.length)
+    return [playgoLine("p", "Installation status: complete. Every PlayGo chunk is on the console, so the dump will be complete.", "hint")];
   if (report.chunks.length) {
-    nodes.push(playgoLine("p", `${plural(report.chunks.length, "PlayGo chunk")} of ${report.chunk_count} ` +
+    nodes.push(playgoLine("p", `Installation status: ${plural(report.chunks.length, "PlayGo chunk")} of ${report.chunk_count} ` +
       `(${gib(report.bytes)}${report.files === null ? "" : ", " + plural(report.files, "file")}) ` +
       "are not on this console. A dump will leave their files out.", "warn"));
     const list = document.createElement("ul");
@@ -875,18 +876,22 @@ async function showPlaygo(form) {
   const platforms = select.platforms;
   const title = select.value || (platforms ? [...platforms.keys()][0] : "");
   if (!title) return;
-  let report;
+  const paint = (nodes, quiet) => {
+    if (box.token !== token) return;
+    box.className = "playgo-warning" + (quiet ? " quiet" : "");
+    box.removeAttribute("aria-busy");
+    box.replaceChildren(...nodes);
+    box.hidden = nodes.length === 0;
+  };
+  paint([playgoLine("p", "Checking installation status...", "hint")], true);
+  box.setAttribute("aria-busy", "true");
   try {
-    report = await api("/api/playgo?host=" + encodeURIComponent(form.elements.host.value.trim()) +
+    const report = await api("/api/playgo?host=" + encodeURIComponent(form.elements.host.value.trim()) +
       "&title=" + encodeURIComponent(title));
+    paint(renderPlaygo(box, report), !report.chunks?.length);
   } catch (err) {
-    return;
+    paint([playgoLine("p", "Could not check installation status: " + err.message, "hint")], true);
   }
-  if (box.token !== token) return;
-  const nodes = renderPlaygo(box, report);
-  if (!nodes.length) return;
-  box.append(...nodes);
-  box.hidden = false;
 }
 document.addEventListener("change", e => {
   const select = e.target.closest("select[name=title]");

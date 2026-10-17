@@ -1760,10 +1760,6 @@ def dump_ps5_metadata(host, port, mount, title, dest, verbose=False):
     return problems
 
 
-# A bitmap that moves within this long means an install is still running.
-INSTALL_SETTLE_SECONDS = 5
-
-
 class RemotePackage:
     """Package bytes read over FTP, in the shape ps_pkg_info reads from."""
 
@@ -1790,8 +1786,7 @@ def fetch_whole(host, port, path):
 def install_state(host, port, title):
     """(InstallState, status, detail) for a title's package on the console.
 
-    status is "ok", "installing" (blocks are still arriving, so absent chunks
-    may yet appear) or "unavailable"; detail says why when it is not "ok".
+    status is "ok" or "unavailable"; detail says why when it is not "ok".
     """
     try:
         from ps_pkg_info import Pkg, PkgError
@@ -1835,10 +1830,6 @@ def install_state(host, port, title):
                     if info.get("title")}
             except ValueError:
                 pass
-        if state.incomplete:
-            time.sleep(INSTALL_SETTLE_SECONDS)
-            if fetch_whole(host, port, f"{base}/app.pbm") != bitmap_bytes:
-                return None, "installing", "the install is still running"
         wanted = fetch_whole(host, port, f"{base}/app.xml")
         state.wanted = playgo_state.wanted_chunks(
             wanted.decode("utf-8", "replace")) if wanted else None
@@ -1920,10 +1911,9 @@ def install_report(host, port, title):
 
 def read_install_state(host, port, title):
     """The InstallState, or None (with a note) when it cannot be told."""
-    state, status, detail = install_state(host, port, title)
+    state, _status, detail = install_state(host, port, title)
     if state is None and detail:
-        suffix = "; not skipping any files" if status == "installing" else ""
-        print(f"  note: {detail}{suffix}")
+        print(f"  note: {detail}")
     return state
 
 
