@@ -1653,6 +1653,20 @@ def write_ps5_al_param(path, content_id, title_id, title):
         out.write("\n")
 
 
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def to_png(data):
+    """The CDN recodes icon0.png to JPEG; Publishing Tools needs a real PNG."""
+    if data.startswith(PNG_SIGNATURE):
+        return data
+    from PIL import Image
+    import io
+    out = io.BytesIO()
+    Image.open(io.BytesIO(data)).convert("RGB").save(out, "PNG", optimize=True)
+    return out.getvalue()
+
+
 def dump_dlc_entitlements(host, port, out_dir, filter_title=None,
                           required=False, verbose=False, keys=None):
     """Builds unlocker directories for additional-content licenses.
@@ -1809,7 +1823,7 @@ def dump_dlc_entitlements(host, port, out_dir, filter_title=None,
             icon_path = os.path.join(sce_sys, "icon0.png")
             try:
                 with urllib.request.urlopen(icon_url, timeout=30) as response:
-                    icon = response.read()
+                    icon = to_png(response.read())
                 with open(icon_path, "wb") as out:
                     out.write(icon)
             except Exception as err:

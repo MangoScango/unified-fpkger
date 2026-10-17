@@ -45,7 +45,7 @@ RUN dpkg --add-architecture i386 \
         https://dl.winehq.org/wine-builds/debian/dists/trixie/winehq-trixie.sources \
     && apt-get update && apt-get install -y --no-install-recommends \
         "winehq-${WINE_BRANCH}" \
-        python3 \
+        python3 python3-pil \
         bash coreutils sed grep findutils \
         xvfb gosu \
         curl sqlite3 lftp binutils \
