@@ -1723,9 +1723,11 @@ def dump_dlc_entitlements(host, port, out_dir, filter_title=None,
                 try:
                     rows = db.execute(
                         f'''SELECT json_extract(JSON, '$.id'),
-                                   coalesce(json_extract(JSON, '$.game_meta.name'),
+                                   coalesce(json_extract(JSON, '$.gameMeta.name'),
+                                            json_extract(JSON, '$.game_meta.name'),
                                             json_extract(JSON, '$.name'), ''),
-                                   coalesce(json_extract(JSON, '$.game_meta.icon_url'), '')
+                                   coalesce(json_extract(JSON, '$.gameMeta.iconUrl'),
+                                            json_extract(JSON, '$.game_meta.icon_url'), '')
                             FROM "{quoted_table}" WHERE Package_type LIKE 'PS%AL';''').fetchall()
                 except sqlite3.Error as err:
                     return missing_prereq(
