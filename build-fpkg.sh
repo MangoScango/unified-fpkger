@@ -1027,9 +1027,11 @@ build_one_al() {
   # The project sits beside sce_sys and img_create runs from there, so the
   # file entries need no orig_path.
   local gp4="$stage/unlocker.gp4"
+  local ent_key; ent_key="$(ent_key_of "$al")"
+  log "dlc: entitlement key $ent_key"
   wine_run "$ORBIS_PUB_CMD" gp4_proj_create \
     --volume_type pkg_ps4_ac_nodata --content_id "$cid" \
-    --passcode "$FAKE_PASSCODE" --entitlement_key "$DLC_ENT_KEY" \
+    --passcode "$FAKE_PASSCODE" --entitlement_key "$ent_key" \
     "$(winpath "$gp4")" >/dev/null 2>&1 || die "dlc: gp4_proj_create failed for $cid"
 
   local frag; frag="$(mktemp)"

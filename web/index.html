@@ -37,6 +37,8 @@
   button.primary { background: #2c4f86; border-color: #3f6db3; }
   button.danger { background: #5a2a30; border-color: #874049; }
   button:disabled { opacity: .5; cursor: default; }
+  label:has(> select:disabled) { opacity: .5; }
+  select:disabled { cursor: not-allowed; }
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   .hint { color: var(--muted); font-size: 12px; margin: 2px 0 0; }
   .warn { color: var(--warn); }

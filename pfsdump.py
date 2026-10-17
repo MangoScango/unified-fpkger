@@ -1248,8 +1248,9 @@ def relist_dlc_mounts(host, port, title, known):
     return current, [name for name in current if name not in known]
 
 
-def entitlement_label(ac_mount):
-    return ac_mount[:-len("-ac")][-16:]
+def entitlement_label(name):
+    """The 16-character label from an add-on's content ID or -ac/-al folder."""
+    return re.sub(r"-a[cl]$", "", name)[-16:]
 
 
 # The payload loader's port. ps5-entitlement-dumper's injector finds the
@@ -1653,11 +1654,13 @@ def write_ps5_al_param(path, content_id, title_id, title):
 
 
 def dump_dlc_entitlements(host, port, out_dir, filter_title=None,
-                          required=False, verbose=False):
+                          required=False, verbose=False, keys=None):
     """Builds unlocker directories for additional-content licenses.
 
     Missing prerequisites skip an automatic dump with a warning, but fail an
-    explicitly requested one. Returns the number of licenses written.
+    explicitly requested one. keys maps entitlement labels to keys, and each
+    unlocker found in it gets an entitlement_key.dat. Returns the number of
+    licenses written.
     """
     def missing_prereq(message):
         if required:
@@ -1816,6 +1819,14 @@ def dump_dlc_entitlements(host, port, out_dir, filter_title=None,
                       f"{content_id}: {err}", file=sys.stderr)
 
         print(f"{content_id}  ({title_id})  {title}")
+        if keys is not None:
+            label = entitlement_label(content_id)
+            if label in keys:
+                write_entitlement_key(dlc_dir, keys[label])
+                print(f"    entitlement key: {keys[label]}")
+            else:
+                print(f"    warning: the game reported no entitlement key for "
+                      f"{label}", file=sys.stderr)
 
     count = len(licenses)
     if count == 0:
@@ -2406,7 +2417,7 @@ def main():
             patch_dest = dest
 
         entitlement_keys = None
-        if not args.no_entitlements and (dump_game or dump_ac):
+        if not args.no_entitlements and (dump_game or dump_ac or dump_al):
             entitlement_keys = running_game_entitlements(
                 host, title, candidates, args.injector)
             if entitlement_keys:
@@ -2568,7 +2579,7 @@ def main():
             try:
                 dump_dlc_entitlements(
                     host, port, args.output_dir, filter_title=title,
-                    verbose=args.verbose)
+                    verbose=args.verbose, keys=entitlement_keys)
             except RuntimeError as err:
                 problems.append(("DLC entitlement unlockers", str(err)))
 
