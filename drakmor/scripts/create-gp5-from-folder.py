@@ -108,6 +108,7 @@ PLAYGO_LANGUAGES = (
 )
 # Runtime API limit in the supported Prospero SDK (SCE_PLAYGO_MAX_SCENARIO).
 MAX_PLAYGO_SCENARIO_COUNT = 5
+ALL_LANGUAGES_MASK = (1 << 64) - 1
 VOLUME_TYPES = {
     "app": "prospero_app",
     "patch": "prospero_patch",
@@ -990,8 +991,8 @@ def read_source_playgo_layout(
                      if mask >> (63 - bit) & 1]
         # Retail leaves unused chunks fully blank: no label, no languages.
         known_mask = sum(1 << (63 - bit) for bit in range(len(PLAYGO_LANGUAGES)))
-        if mask & ~known_mask:
-            print(f"\nChunk {chunk_id} in {chunk_path} sets unrecognized language bits "
+        if mask & ~known_mask and mask != ALL_LANGUAGES_MASK:
+            print(f"[Warn] PlayGo chunk {chunk_id} in {chunk_path} sets unrecognized language bits "
                   f"(mask {mask:#x}); the chunk is emitted for its known languages only.")
         chunks.append((label or (f"Chunk #{chunk_id}" if languages else ""), languages))
 

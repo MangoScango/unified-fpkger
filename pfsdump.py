@@ -1658,8 +1658,9 @@ PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 def to_png(data):
-    """The CDN recodes icon0.png to JPEG; Publishing Tools needs a real PNG."""
-    if data.startswith(PNG_SIGNATURE):
+    """Return icon0 as an 8-bit RGB PNG, the only form Publishing Tools accepts."""
+    # IHDR holds bit depth at byte 24 and color type at byte 25; type 2 is RGB.
+    if data.startswith(PNG_SIGNATURE) and data[24:26] == b"\x08\x02":
         return data
     from PIL import Image
     import io
