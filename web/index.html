@@ -83,6 +83,11 @@
     border: 1px solid var(--line); display: grid; place-items: center; color: var(--muted); font-size: 11px; }
   .dump-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
   .dump-title { font-weight: 600; overflow-wrap: anywhere; }
+  .playgo-warning { margin-top: 8px; padding: 6px 10px; border: 1px solid #7a6530;
+    border-left-width: 4px; border-radius: 4px; }
+  .playgo-warning p { margin: 4px 0; font-size: 13px; }
+  .playgo-warning ul { margin: 4px 0; padding-left: 18px; font-size: 13px; }
+  .playgo-warning li { margin: 2px 0; }
   .tags { display: flex; flex-wrap: wrap; gap: 4px; }
   .tag { font-size: 11.5px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line); color: var(--muted); }
   .tag.ps4 { color: #8ab4ff; border-color: #3f6db3; } .tag.ps5 { color: #e6e8ec; border-color: #8a8f9c; }
@@ -251,6 +256,7 @@
     <label>Title ID
       <select name="title"><option value="">Whatever game is running</option></select></label>
     <p class="hint" data-detect-result></p>
+    <div class="playgo-warning" data-playgo role="status" aria-live="polite" hidden></div>
   </fieldset>
 </template>
 
@@ -805,6 +811,87 @@ function syncConsolePlatform(form) {
 }
 dumpBuildForm.elements.title.addEventListener("change", () => syncConsolePlatform(dumpBuildForm));
 syncConsolePlatform(dumpBuildForm);
+
+// The console's own record of which PlayGo chunks of a PS5 title it holds. A
+// dump leaves out the files of chunks that never arrived, so say so up front.
+const gib = bytes => (bytes / 2 ** 30).toFixed(2) + " GiB";
+function playgoLine(tag, text, className) {
+  const p = document.createElement(tag);
+  p.className = className || "";
+  p.textContent = text;
+  return p;
+}
+function renderPlaygo(box, report) {
+  if (report.status === "installing")
+    return [playgoLine("p", "Still installing: chunks may still arrive, so wait before dumping.", "warn")];
+  if (report.status !== "ok") return report.detail ? [playgoLine("p", report.detail, "hint")] : [];
+  const nodes = [];
+  if (report.chunks.length) {
+    nodes.push(playgoLine("p", `${plural(report.chunks.length, "PlayGo chunk")} of ${report.chunk_count} ` +
+      `(${gib(report.bytes)}${report.files === null ? "" : ", " + plural(report.files, "file")}) ` +
+      "are not on this console. A dump will leave their files out.", "warn"));
+    const list = document.createElement("ul");
+    for (const c of report.chunks) {
+      const shown = c.languages.slice(0, 6).join(", ") +
+        (c.languages.length > 6 ? ` and ${c.languages.length - 6} more` : "");
+      const li = document.createElement("li");
+      li.textContent = `${c.label || "Chunk " + c.id}` + (shown ? ` [${shown}]` : "") +
+        `: ${c.files === null ? "" : (report.files_approximate ? "~" : "") + plural(c.files, "file") + ", "}${gib(c.size)}`;
+      if (c.requested === true) {
+        const flag = document.createElement("span");
+        flag.className = "error";
+        flag.textContent = " (requested by the console, but missing)";
+        li.append(flag);
+      } else if (c.requested === false) {
+        li.append(" (not requested by the console)");
+      }
+      list.append(li);
+    }
+    nodes.push(list);
+    for (const s of report.scenarios) {
+      const label = s.title || s.name || "#" + s.id;
+      const line = playgoLine("p", `${/^scenario/i.test(label) ? "" : "Scenario "}${label}: ` +
+        `${s.missing.length} of ${s.total} chunks missing`, "hint");
+      if (s.needed_for_launch) {
+        const flag = document.createElement("span");
+        flag.className = "error";
+        flag.textContent = " (needed to launch)";
+        line.append(flag);
+      }
+      nodes.push(line);
+    }
+  }
+  if (report.partial.length)
+    nodes.push(playgoLine("p", `Chunk(s) ${report.partial.join(", ")} are only partly on the console.`, "hint"));
+  return nodes;
+}
+async function showPlaygo(form) {
+  const box = $("[data-playgo]", form);
+  if (!box) return;
+  const token = box.token = (box.token || 0) + 1;
+  box.hidden = true;
+  box.replaceChildren();
+  const select = form.elements.title;
+  const platforms = select.platforms;
+  const title = select.value || (platforms ? [...platforms.keys()][0] : "");
+  if (!title) return;
+  let report;
+  try {
+    report = await api("/api/playgo?host=" + encodeURIComponent(form.elements.host.value.trim()) +
+      "&title=" + encodeURIComponent(title));
+  } catch (err) {
+    return;
+  }
+  if (box.token !== token) return;
+  const nodes = renderPlaygo(box, report);
+  if (!nodes.length) return;
+  box.append(...nodes);
+  box.hidden = false;
+}
+document.addEventListener("change", e => {
+  const select = e.target.closest("select[name=title]");
+  if (select?.form) showPlaygo(select.form);
+});
 document.addEventListener("click", async e => {
   const btn = e.target.closest("[data-detect]");
   if (!btn) return;
@@ -822,9 +909,11 @@ document.addEventListener("click", async e => {
     if (titles.length) select.value = titles[0].title;
     syncConsolePlatform(form);
     out.textContent = titles.length ? `${titles.length} title(s) mounted.` : "No game is mounted.";
+    showPlaygo(form);
   } catch (err) {
     select.platforms = null;
     syncConsolePlatform(form);
+    showPlaygo(form);
     out.className = "hint error";
     out.textContent = err.message;
   } finally {

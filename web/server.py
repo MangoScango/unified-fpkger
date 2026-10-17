@@ -47,6 +47,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.environ.get("FPKGER_DIR") or os.path.dirname(HERE)
 sys.path.insert(0, TOOLS)
 import pfsdump  # noqa: E402
+import playgo_state  # noqa: E402
 from ps_pkg_info import pkg as pkgmod  # noqa: E402
 
 sys.path.insert(0, HERE)
@@ -78,12 +79,7 @@ PASSCODE_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 FILENAME_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 ANSI_RE = re.compile(r"\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|[@-Z\\-_])")
 NEWLINE_RE = re.compile(r"\r+\n")
-# create-gp5-from-folder.py's PLAYGO_LANGUAGES, compared case-insensitively.
-PLAYGO_LANGUAGES = {code.casefold() for code in (
-    "ja-JP", "en-US", "fr-FR", "es-ES", "de-DE", "it-IT", "nl-NL", "pt-PT",
-    "ru-RU", "ko-KR", "zh-Hant", "zh-Hans", "fi-FI", "sv-SE", "da-DK", "no-NO",
-    "pl-PL", "pt-BR", "en-GB", "tr-TR", "es-419", "ar-AE", "fr-CA", "cs-CZ",
-    "hu-HU", "el-GR", "ro-RO", "th-TH", "vi-VN", "id-ID", "uk-UA")}
+PLAYGO_LANGUAGES = {code.casefold() for code in playgo_state.PLAYGO_LANGUAGES}
 
 
 def read_env_files():
@@ -1376,6 +1372,12 @@ class Handler(BaseHTTPRequestHandler):
                 except (OSError, EOFError, pfsdump.ftplib.Error) as err:
                     raise BadRequest(f"could not reach {host}:{port}: {err}") from None
                 self._send(HTTPStatus.OK, {"titles": found})
+            elif url.path == "/api/playgo":
+                host, port = parse_host(arg("host"))
+                title = checked({"title": arg("title")}, "title", TITLE_RE, "title")
+                if not title:
+                    raise BadRequest("a title ID is required")
+                self._send(HTTPStatus.OK, pfsdump.install_report(host, port, title))
             elif url.path == "/api/jobs":
                 with JOBS_LOCK:
                     jobs = sorted(JOBS.values(), key=lambda j: -j.id)

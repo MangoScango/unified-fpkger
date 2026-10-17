@@ -34,6 +34,8 @@ import sys
 import tempfile
 import time
 
+import playgo_state
+
 BLOCK_SIG_SIZE = 40
 DINODE_D32_SIZE = 0xA8
 DIRENT_FILE, DIRENT_DIR = 2, 3
@@ -98,6 +100,7 @@ STREAM_RETRIES = 2
 # seen so far; this leaves room for titles with millions of files.
 V2_SUPERBLOCK_SCAN_LIMIT = 2 << 30
 V2_SCAN_CHUNK = 8 << 20
+V2_HOLE_STEP = 1 << 16
 # Directories spread wider than this are fetched one by one instead of in a
 # single read covering all of them.
 DIRECTORY_SPAN_LIMIT = 256 << 20
@@ -462,6 +465,30 @@ class PfsImage:
                                   "be searched")
             self._load_from_tail()
 
+    def _read_tolerant(self, start, stop):
+        """Bytes of start..stop, with an unreadable lead-in zeroed.
+
+        Chunks the console never downloaded leave holes in the image, and a
+        read that starts inside one returns nothing. The tail we scan for the
+        superblock is readable from the hole's end onward.
+        """
+        try:
+            return self.remote.read(start, stop - start)
+        except IOError:
+            pass
+        low, high = start, stop
+        while high - low > V2_HOLE_STEP:
+            middle = low + (high - low) // 2
+            try:
+                self.remote.read(middle, 1)
+                high = middle
+            except IOError:
+                low = middle
+        try:
+            return bytes(high - start) + self.remote.read(high, stop - high)
+        except IOError:
+            return bytes(stop - start)
+
     def _load_from_tail(self):
         """Finds the version 2 superblock by searching back from the end.
 
@@ -475,8 +502,8 @@ class PfsImage:
         while end > floor:
             start = max(floor, end - V2_SCAN_CHUNK)
             # Overlap so a needle straddling two chunks is still seen.
-            chunk = self.remote.read(start, min(end + len(needle), self.image_size)
-                                     - start)
+            chunk = self._read_tolerant(
+                start, min(end + len(needle), self.image_size))
             # Matches starting at or past end were tried with the previous chunk.
             hit = min(len(chunk), end - start + len(needle) - 1)
             while True:
@@ -837,12 +864,13 @@ def _ancestors(rel):
 
 def extract(remote, dest_root, plan, label, verbose=False, progress=True,
             rest_workaround=False, loose_source=None,
-            allow_decrypted_fallback=True):
+            allow_decrypted_fallback=True, known_missing=frozenset()):
     """Writes every entry in plan, resuming short image transfers as needed.
 
     loose_source is (host, port, mount root). If the image cannot finish a file
     after STREAM_RETRIES resumptions, that file is fetched through the loose
     mount. Failure of both sources is returned as a warning, not raised.
+    Paths in known_missing are not requested and are reported as not installed.
     """
     for rel, _offset, size in plan:
         if size == 0:
@@ -850,16 +878,18 @@ def extract(remote, dest_root, plan, label, verbose=False, progress=True,
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             open(path, "wb").close()
 
-    ordered = sorted((entry for entry in plan if entry[2] > 0),
+    skipped_not_installed = sorted(
+        rel for rel, _offset, size in plan if size > 0 and rel in known_missing)
+    ordered = sorted((entry for entry in plan
+                      if entry[2] > 0 and entry[0] not in known_missing),
                      key=lambda entry: entry[1])
     if not ordered:
-        return 0, 0, 0, 0, [], []
+        return 0, 0, 0, 0, [], skipped_not_installed
 
     runs = group_runs(ordered, rest_workaround)
     bar = Progress(sum(size for _rel, _offset, size in ordered), label, progress)
     discarded = rewound = recovered = 0
     unresolved = []
-    skipped_not_installed = []
 
     for run in runs:
         conn = None
@@ -1730,6 +1760,233 @@ def dump_ps5_metadata(host, port, mount, title, dest, verbose=False):
     return problems
 
 
+# A bitmap that moves within this long means an install is still running.
+INSTALL_SETTLE_SECONDS = 5
+
+
+class RemotePackage:
+    """Package bytes read over FTP, in the shape ps_pkg_info reads from."""
+
+    def __init__(self, remote):
+        self.remote = remote
+
+    def read(self, offset, size):
+        return self.remote.read(offset, size)
+
+    def close(self):
+        self.remote.close()
+
+
+def fetch_whole(host, port, path):
+    """The full contents of a small remote file, or None if it is not there."""
+    remote = FtpFile(host, port, path)
+    try:
+        size = remote.size()
+        return None if size is None else remote.read(0, size)
+    finally:
+        remote.close()
+
+
+def install_state(host, port, title):
+    """(InstallState, status, detail) for a title's package on the console.
+
+    status is "ok", "installing" (blocks are still arriving, so absent chunks
+    may yet appear) or "unavailable"; detail says why when it is not "ok".
+    """
+    try:
+        from ps_pkg_info import Pkg, PkgError
+        from ps_pkg_info.pkg import (
+            ENTRY_PLAYGO_CHUNK_DAT, ENTRY_PLAYGO_FICM_DAT,
+            ENTRY_PLAYGO_HASH_TABLE_DAT, ENTRY_PLAYGO_SCENARIO_JSON,
+            parse_scenario_names)
+    except ImportError:
+        return None, "unavailable", "ps_pkg_info is not installed"
+    try:
+        for root in playgo_state.APP_ROOTS:
+            base = f"{root}/{title}"
+            bitmap_bytes = fetch_whole(host, port, f"{base}/app.pbm")
+            if bitmap_bytes is not None:
+                break
+        else:
+            return None, "unavailable", ""
+        bitmap = playgo_state.Bitmap(bitmap_bytes)
+        package = FtpFile(host, port, f"{base}/app.pkg")
+        try:
+            pkg = Pkg.from_source(RemotePackage(package))
+            entries = [pkg.read_entry(entry) for entry in (
+                ENTRY_PLAYGO_CHUNK_DAT, ENTRY_PLAYGO_HASH_TABLE_DAT,
+                ENTRY_PLAYGO_FICM_DAT)]
+            scenario_json = pkg.read_entry(ENTRY_PLAYGO_SCENARIO_JSON)
+        finally:
+            package.close()
+        if entries[0] is None:
+            return None, "unavailable", ""
+        # PS4 packages have no file-to-chunk map, so only whole chunks are known.
+        files = (playgo_state.FileChunks(entries[1], entries[2])
+                 if entries[1] is not None and entries[2] is not None else None)
+        state = playgo_state.InstallState(
+            playgo_state.chunk_extents(entries[0]), bitmap, files)
+        state.layout = playgo_state.read_layout(entries[0])
+        if scenario_json:
+            try:
+                state.scenario_titles = {
+                    index: info["title"] for index, info
+                    in parse_scenario_names(scenario_json).items()
+                    if info.get("title")}
+            except ValueError:
+                pass
+        if state.incomplete:
+            time.sleep(INSTALL_SETTLE_SECONDS)
+            if fetch_whole(host, port, f"{base}/app.pbm") != bitmap_bytes:
+                return None, "installing", "the install is still running"
+        wanted = fetch_whole(host, port, f"{base}/app.xml")
+        state.wanted = playgo_state.wanted_chunks(
+            wanted.decode("utf-8", "replace")) if wanted else None
+        return state, "ok", ""
+    except (OSError, EOFError, ftplib.Error, ValueError, PkgError) as err:
+        return None, "unavailable", f"could not read the install state: {err}"
+
+
+def pfs_bitmap(host, port, title, layer="app"):
+    """The PS4 title's image bitmap for a layer ("app" or "patch"), or None.
+
+    pfs.pbm records the block count of the package each layer came from, and
+    the bitmap is used only if that matches the package's own bitmap file.
+    """
+    roots, name = ((playgo_state.APP_ROOTS, "app.pbm") if layer == "app"
+                   else (playgo_state.PATCH_ROOTS, "patch.pbm"))
+    try:
+        data = fetch_whole(host, port, f"/system_data/playgo/{title}/pfs.pbm")
+        if data is None:
+            return None
+        bitmap = playgo_state.PfsBitmap(data, layer)
+        for root in roots:
+            record = fetch_whole(host, port, f"{root}/{title}/{name}")
+            if record is not None:
+                same = playgo_state.Bitmap(record).blocks == bitmap.pkg_blocks
+                return bitmap if same else None
+        return None
+    except (OSError, EOFError, ftplib.Error, ValueError):
+        return None
+
+
+def ps4_missing(host, port, title, state, plan, patch_plan=None):
+    """(unreadable paths, per-chunk counts, exact, patch checked) for PS4, or None.
+
+    Uses the console's image bitmaps (pfs.pbm), so a file is unreadable exactly
+    when one of its blocks is not set; nothing needs probing. The per-chunk
+    counts, for the base package, are None when the holes cannot be matched to
+    the missing chunks. patch_plan files are checked against the update's
+    bitmap; patch checked says whether that was possible.
+    """
+    bitmap = pfs_bitmap(host, port, title, "app")
+    if bitmap is None:
+        return None
+    gone = bitmap.unreadable(plan)
+    split = playgo_state.attribute_files(state, bitmap, plan, gone)
+    counts, exact = split if split else (None, True)
+    patch_checked = True
+    if patch_plan:
+        patch_bitmap = pfs_bitmap(host, port, title, "patch")
+        patch_checked = patch_bitmap is not None
+        if patch_checked:
+            gone = gone | patch_bitmap.unreadable(patch_plan)
+    return gone, counts, exact, patch_checked
+
+
+def install_report(host, port, title):
+    """install_state as a JSON-ready dict: status, detail and, if ok, chunks."""
+    state, status, detail = install_state(host, port, title)
+    report = {"status": status, "detail": detail}
+    if state is None:
+        return report
+    counts, exact = None, True
+    if state.files is None and state.incomplete:
+        # Counting files needs the image's manifest, which exists only while
+        # the title is mounted.
+        image = FtpFile(host, port, nest_path(title, "app0"), timeout=15)
+        try:
+            found = ps4_missing(host, port, title, state,
+                                PfsImage(image).manifest())
+            if found:
+                counts, exact = found[1], found[2]
+        except (OSError, EOFError, ftplib.Error, Unsupported):
+            pass
+        finally:
+            image.close()
+    report.update(playgo_state.describe(state, counts, exact))
+    return report
+
+
+def read_install_state(host, port, title):
+    """The InstallState, or None (with a note) when it cannot be told."""
+    state, status, detail = install_state(host, port, title)
+    if state is None and detail:
+        suffix = "; not skipping any files" if status == "installing" else ""
+        print(f"  note: {detail}{suffix}")
+    return state
+
+
+def describe_chunk(entry, approximate=False):
+    """One line naming a missing chunk, its languages and why it is missing."""
+    name = entry["label"] or f"chunk {entry['id']}"
+    languages = ", ".join(entry["languages"][:6])
+    if len(entry["languages"]) > 6:
+        languages += f" and {len(entry['languages']) - 6} more"
+    asked = {None: "", True: ", requested by the console",
+             False: ", not requested by the console"}[entry["requested"]]
+    files = ("" if entry["files"] is None
+             else f"{'~' if approximate else ''}{entry['files']} file(s) ")
+    return (f"chunk {entry['id']} {name}"
+            + (f" [{languages}]" if languages else "")
+            + f" ({entry['size'] / 2 ** 30:.2f} GiB): {files}"
+              f"never downloaded{asked}")
+
+
+def predict_missing(host, port, title, paths, plan=None, patch_plan=None):
+    """Paths whose chunk never reached the console, from its own records.
+
+    Without a file-to-chunk map (PS4), plan and patch_plan are checked against
+    the console's image bitmaps instead.
+    """
+    state = read_install_state(host, port, title)
+    if state is None:
+        return set()
+    found, counts, exact, unknown, patch_unknown = set(), None, True, False, False
+    if state.files is not None:
+        by_chunk = state.missing_files(paths)
+        found = {path for paths_ in by_chunk.values() for path in paths_}
+        counts = {chunk: len(files) for chunk, files in by_chunk.items()}
+    elif state.incomplete and plan is not None:
+        result = ps4_missing(host, port, title, state, plan, patch_plan)
+        if result is None:
+            unknown = True
+        else:
+            found, counts, exact, patch_checked = result
+            patch_unknown = not patch_checked
+    report = playgo_state.describe(state, counts, exact)
+    for entry in report["chunks"]:
+        print("  " + describe_chunk(entry, report["files_approximate"]))
+    for scenario in report["scenarios"]:
+        label = scenario["title"] or scenario["name"] or f"#{scenario['id']}"
+        launch = " (needed to launch)" if scenario["needed_for_launch"] else ""
+        print(f"  scenario {label} lacks chunk(s) "
+              f"{', '.join(map(str, scenario['missing']))}{launch}")
+    if report["partial"]:
+        print(f"  chunk(s) {', '.join(map(str, report['partial']))} only partly "
+              f"downloaded; their files are requested as usual")
+    if unknown:
+        print("  could not tell which files the missing chunks hold; "
+              "each unreadable file will be retried")
+    elif state.files is None and found:
+        print(f"  {len(found)} file(s) have blocks missing from the image "
+              f"and will be left out")
+    if patch_unknown:
+        print("  could not check the update's files against the console's "
+              "bitmap; any unreadable ones will be retried")
+    return found
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Dump a PS4 or PS5 title's tree by streaming its PFS images.")
@@ -1744,6 +2001,10 @@ def main():
     parser.add_argument("--no-decrypt", action="store_true",
                         help="leave the executables as the encrypted SELFs the "
                              "image stores")
+    parser.add_argument("--no-install-check", action="store_true",
+                        help="request every file instead of skipping those in "
+                             "chunks the console never downloaded (PS5), and do "
+                             "not report missing chunks")
     parser.add_argument("--no-dlc", action="store_true",
                         help="skip installed add-on content")
     parser.add_argument("--no-entitlements", action="store_true",
@@ -1805,6 +2066,11 @@ def main():
 
         patch_plan, app_plan, superseded, recased = build_plan(
             app_manifest, patch_manifest)
+        known_missing = set()
+        if not args.no_install_check and not args.manifest:
+            known_missing = predict_missing(
+                host, port, title, [rel for rel, _o, _s in app_plan],
+                plan=app_plan, patch_plan=patch_plan)
         metadata = app.metadata_bytes + (patch.metadata_bytes if patch else 0)
         total = sum(size for _d, _o, size in patch_plan + app_plan)
 
@@ -1875,7 +2141,8 @@ def main():
                 remote, dest, layer_plan, label, args.verbose,
                 rest_workaround=rest_bug,
                 loose_source=(host, port, loose_root),
-                allow_decrypted_fallback=not args.no_decrypt)
+                allow_decrypted_fallback=not args.no_decrypt,
+                known_missing=known_missing)
             stream_unresolved.extend(unresolved)
             skipped_paths.update(skipped)
             skip_count += len(skipped)
