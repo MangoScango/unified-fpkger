@@ -447,9 +447,15 @@ def dump_step(job, spec, title, method):
     dump_dir = spec["dump_dir"]
     os.makedirs(dump_dir, exist_ok=True)
     job.step = f"dumping {title}"
+    dump_game = spec.get("dump_game", True)
+    patch_mode = "skip" if spec.get("no_patch") else spec.get("patch_mode", "combined")
+    addon_mode = "skip" if spec.get("no_dlc") else spec.get("addon_mode", "all")
     if method == "pfs":
         argv = [sys.executable, PFSDUMP, f"{host}:{port}", title, "-o", dump_dir]
-        for flag in ("no_patch", "no_decrypt", "no_dlc", "no_entitlements"):
+        if not dump_game:
+            argv.append("--no-game")
+        argv += ["--patch-mode", patch_mode, "--addon-mode", addon_mode]
+        for flag in ("no_decrypt", "no_entitlements"):
             if spec.get(flag):
                 argv.append("--" + flag.replace("_", "-"))
         if spec.get("verbose"):
@@ -466,10 +472,17 @@ def dump_step(job, spec, title, method):
         raise JobError(f"{method} dump failed (exit {rc})"
                        + "".join(f"\n  {line}" for line in detail))
     app_dir = os.path.join(dump_dir, f"{title}-app")
-    if not os.path.isdir(app_dir):
-        raise JobError(f"the dump finished but {app_dir} is missing")
-    job.outputs.append(app_dir)
-    return app_dir
+    patch_dir = os.path.join(dump_dir, f"{title}-patch")
+    dlc_dir = os.path.join(dump_dir, f"{title}-dlc")
+    if dump_game:
+        if not os.path.isdir(app_dir):
+            raise JobError(f"the dump finished but {app_dir} is missing")
+        job.outputs.append(app_dir)
+        if patch_mode == "separate" and os.path.isdir(patch_dir):
+            job.outputs.append(patch_dir)
+    if addon_mode != "skip" and os.path.isdir(dlc_dir):
+        job.outputs.append(dlc_dir)
+    return app_dir if dump_game else None
 
 
 def source_platform(src):
@@ -761,21 +774,28 @@ def execute(job):
             raise JobError(f"{platform.upper()} build options: "
                            f"{spec['option_problems'][platform]}")
         method = "pfs"
+        dump_game = spec["dump_game"]
         if platform == "ps4":
             ps4 = spec["ps4"]
-            if ps4["mode"] in ("remaster", "separate"):
+            if dump_game and ps4["mode"] in ("remaster", "separate"):
                 job.say(f"--{ps4['mode']} needs the base and patch apart: "
                         "mirroring with ftpdump.sh instead of streaming")
                 method = "ftp"
             elif ps4["no_update"]:
                 spec["no_patch"] = True
+                spec["patch_mode"] = "skip"
         app_dir = dump_step(job, spec, title, method)
-        build_step(job, spec, app_dir, platform)
-        # build-fpkg.sh finds a PS4 title's sibling -dlc itself; build-ps5.sh
-        # takes one tree at a time.
+        if dump_game:
+            build_step(job, spec, app_dir, platform)
+        # A PS4 app build finds its sibling -dlc itself. A game-less PS4 run
+        # names the add-on container directly; PS5 always builds one tree at a time.
         dlc_dir = os.path.join(spec["dump_dir"], f"{title}-dlc")
-        if platform == "ps5" and not spec["no_dlc"] and ps5_addons(dlc_dir):
-            build_step(job, spec, dlc_dir, platform)
+        if not spec["no_dlc"]:
+            if platform == "ps5" and ps5_addons(dlc_dir):
+                build_step(job, spec, dlc_dir, platform)
+            elif (platform == "ps4" and not dump_game
+                  and not spec["ps4"]["no_dlc"] and os.path.isdir(dlc_dir)):
+                build_step(job, spec, dlc_dir, platform)
         if spec["delete_dumps"]:
             delete_dumps(job, spec["dump_dir"], title, spec["out_dir"])
 
@@ -789,7 +809,24 @@ def console_spec(params, spec):
 
 def dump_spec(params, spec):
     spec["dump_dir"] = resolve_path(params.get("dump_dir"), "dump directory", create=True)
-    for flag in ("no_patch", "no_decrypt", "no_dlc", "no_entitlements", "verbose"):
+    spec["dump_game"] = bool(params.get("dump_game", True))
+    patch_mode = params.get("patch_mode") or "combined"
+    addon_mode = params.get("addon_mode") or "all"
+    if patch_mode not in ("combined", "separate", "skip"):
+        raise BadRequest(f"unknown patch dump mode: {patch_mode}")
+    if addon_mode not in ("all", "ac", "al", "skip"):
+        raise BadRequest(f"unknown add-on dump mode: {addon_mode}")
+    if params.get("no_patch"):
+        patch_mode = "skip"
+    if params.get("no_dlc"):
+        addon_mode = "skip"
+    if not spec["dump_game"] and addon_mode == "skip":
+        raise BadRequest("nothing to dump: enable the game or an add-on mode")
+    spec["patch_mode"] = patch_mode
+    spec["addon_mode"] = addon_mode
+    spec["no_patch"] = patch_mode == "skip"
+    spec["no_dlc"] = addon_mode == "skip"
+    for flag in ("no_decrypt", "no_entitlements", "verbose"):
         spec[flag] = bool(params.get(flag))
 
 
@@ -1243,6 +1280,9 @@ def config():
     defaults = {
         "host": setting("HOST"),
         "dump_dir": usable_path(setting("DUMP_DIR"), ROOTS[0]),
+        "dump_game": True,
+        "patch_mode": "combined",
+        "addon_mode": "all",
         "scan_dir": usable_path(setting("SCAN_DIR") or setting("DUMP_DIR"), ROOTS[0]),
         "out_dir": usable_path(setting("PKG_DIR") or setting("OUT_DIR"),
                                os.path.join(ROOTS[0], "out")),

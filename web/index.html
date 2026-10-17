@@ -267,8 +267,22 @@
     <label>Dump into
       <span class="row"><input type="text" name="dump_dir" required>
       <button type="button" data-browse="dump_dir">Browse</button></span></label>
-    <label class="check"><input type="checkbox" name="no_patch"> Base game only (PS4: skip the patch)</label>
-    <label class="check"><input type="checkbox" name="no_dlc"> Skip installed DLC</label>
+    <label class="check"><input type="checkbox" name="dump_game" checked> Dump game</label>
+    <div class="grid2">
+      <label>Patch dump mode
+        <select name="patch_mode">
+          <option value="combined">Combined</option>
+          <option value="separate">Separated</option>
+          <option value="skip">Skip</option>
+        </select></label>
+      <label>Add-on dump mode
+        <select name="addon_mode">
+          <option value="all">All</option>
+          <option value="ac">AC only</option>
+          <option value="al">AL only</option>
+          <option value="skip">Skip</option>
+        </select></label>
+    </div>
     <label class="check"><input type="checkbox" name="no_decrypt"> Leave executables encrypted</label>
     <label class="check"><input type="checkbox" name="no_entitlements"> Skip reading add-on entitlement keys</label>
     <label class="check"><input type="checkbox" name="verbose"> Log every file</label>
@@ -752,13 +766,15 @@ function fill(defaults) {
   }
   const lastScan = localStorage.getItem(SCAN_KEY);
   if (lastScan) scanInput.value = lastScan;
+  for (const form of $$("form[data-kind=dump], form[data-kind=dump-build]"))
+    syncConsolePlatform(form);
   syncSelection();
 }
 
 function params(form) {
   const out = {};
   for (const el of form.elements) {
-    // Disabled fields are the per-dump options while several are selected.
+    // Disabled options are inapplicable here; the server uses their defaults.
     if (!el.name || el.disabled) continue;
     out[el.name] = el.type === "checkbox" ? el.checked : el.value.trim();
   }
@@ -805,13 +821,19 @@ for (const form of $$("form")) {
 // title with a known platform is chosen, both stay hidden.
 function syncConsolePlatform(form) {
   const select = form.elements.title;
-  const platform = select.platforms?.get(select.value);
+  const title = select.value || [...(select.platforms?.keys() || [])][0] || "";
+  const platform = select.platforms?.get(title);
   for (const node of $$("[data-options]", form))
     node.hidden = node.dataset.options !== platform;
+  const patch = form.elements.patch_mode;
+  if (patch) patch.disabled = platform === "ps5" || !form.elements.dump_game.checked;
   syncScLink(form, select.value);
 }
-dumpBuildForm.elements.title.addEventListener("change", () => syncConsolePlatform(dumpBuildForm));
-syncConsolePlatform(dumpBuildForm);
+for (const form of $$("form[data-kind=dump], form[data-kind=dump-build]")) {
+  form.elements.title.addEventListener("change", () => syncConsolePlatform(form));
+  form.elements.dump_game.addEventListener("change", () => syncConsolePlatform(form));
+  syncConsolePlatform(form);
+}
 
 // The console's own record of which PlayGo chunks of a PS5 title it holds. A
 // dump leaves out the files of chunks that never arrived, so say so up front.

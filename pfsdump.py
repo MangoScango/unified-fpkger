@@ -1830,10 +1830,11 @@ def dump_dlc_entitlements(host, port, out_dir, filter_title=None,
 
 
 def dump_ps4_metadata(host, port, mount, title, dest, has_patch,
-                      verbose=False):
-    """Writes sce_sys from the app and patch PKGs and fixes up the result.
+                      verbose=False, patch_only=False):
+    """Writes sce_sys from PKGs and fixes up the result.
 
-    Covers the merged param.sfo, the np files and the trophy files. Returns
+    Covers the merged param.sfo, the np files and the trophy files. patch_only
+    selects just patch.pkg and leaves its patch metadata unmerged. Returns
     [(item, reason)] for whatever could not be resolved.
     """
     problems = []
@@ -1842,7 +1843,8 @@ def dump_ps4_metadata(host, port, mount, title, dest, has_patch,
     # supersede each other everywhere else.
     base_category = None
     ciphertext = {}
-    for kind in ("app", "patch"):
+    kinds = ("patch",) if patch_only else ("app", "patch")
+    for kind in kinds:
         if kind == "patch" and not has_patch:
             continue
         pkg, pkg_path = find_pkg(host, port, title, kind)
@@ -1874,7 +1876,7 @@ def dump_ps4_metadata(host, port, mount, title, dest, has_patch,
                 print(f"  param.sfo: clearing remaster flag {remaster_type}")
                 sfo_delete(sfo_path, "remaster_type")
 
-    if has_patch:
+    if has_patch and not patch_only:
         reason = fix_merged_sfo(sfo_path, base_category or "gd")
         if reason:
             problems.append(("sce_sys/param.sfo", reason))
@@ -2245,8 +2247,18 @@ def main():
     parser.add_argument("-o", "--output-dir", default=".",
                         help="root directory for dump output (default: .)")
     parser.add_argument("-p", "--port", type=int, default=2121)
+    parser.add_argument("--no-game", action="store_true",
+                        help="dump only the selected add-on content")
+    parser.add_argument("--patch-mode",
+                        choices=("combined", "separate", "skip"), default="combined",
+                        help="combine the PS4 patch into the app, dump it separately, "
+                             "or skip it (default: combined)")
     parser.add_argument("--no-patch", action="store_true",
-                        help="dump the base game only")
+                        help="alias for --patch-mode skip")
+    parser.add_argument("--addon-mode", choices=("all", "ac", "al", "skip"),
+                        default="all",
+                        help="dump installed AC content, AL licenses, both, or neither "
+                             "(default: all)")
     parser.add_argument("--no-decrypt", action="store_true",
                         help="leave the executables as the encrypted SELFs the "
                              "image stores")
@@ -2258,8 +2270,7 @@ def main():
                         help="build DLC unlocker templates from entitlement.db "
                              "and exit; TITLE restricts output to one game")
     parser.add_argument("--no-dlc", action="store_true",
-                        help="skip installed add-on content and AL unlocker "
-                             "templates")
+                        help="alias for --addon-mode skip")
     parser.add_argument("--no-entitlements", action="store_true",
                         help="do not read add-on entitlement keys from "
                              "the running game")
@@ -2268,7 +2279,7 @@ def main():
                              "(default: $ENTITLEMENT_INJECTOR, else beside this "
                              "script)")
     parser.add_argument("--manifest", action="store_true",
-                        help="print the merged write plan and exit")
+                        help="print the game write plan and exit")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="name every file as it is written")
     args = parser.parse_args()
@@ -2288,6 +2299,16 @@ def main():
             return 1
         return 0
 
+    dump_game = not args.no_game
+    patch_mode = "skip" if args.no_patch else args.patch_mode
+    addon_mode = "skip" if args.no_dlc else args.addon_mode
+    dump_ac = addon_mode in ("all", "ac")
+    dump_al = addon_mode in ("all", "al")
+    if not dump_game and addon_mode == "skip":
+        parser.error("--no-game requires an add-on mode other than skip")
+    if not dump_game and args.manifest:
+        parser.error("--manifest requires game dumping")
+
     probe = FtpMount(host, port)
     try:
         title = args.title
@@ -2302,108 +2323,137 @@ def main():
                 print(f"Several titles are mounted ({', '.join(candidates)}); "
                       f"using {title}.", file=sys.stderr)
             print(f"Running game: {title}")
-        ac_mounts = [] if args.no_dlc else find_dlc_mounts(probe, title)
+        ac_mounts = find_dlc_mounts(probe, title) if dump_ac else []
     finally:
         probe.close()
 
-    app = FtpFile(host, port, nest_path(title, "app0"))
+    app = None
     patch = None
     try:
-        app_image = PfsImage(app)
-        app_manifest = app_image.manifest()
-        # A PS5 update replaces the whole image, so there is no patch layer.
-        ps5 = app_image.version == 2
-        if ps5:
-            print(f"  PS5 image: superblock at {app_image.superblock_offset:,}")
-
+        app_manifest = []
         patch_manifest = []
-        if not args.no_patch and not ps5:
-            try:
-                patch = FtpFile(host, port, nest_path(title, "patch0"))
-                patch_manifest = PfsImage(patch).manifest()
-            except ftplib.all_errors:
-                print(f"No patch image for {title}; dumping the base game only.")
-                if patch is not None:
-                    patch.close()
-                    patch = None
+        ps5 = False
+        if dump_game:
+            app = FtpFile(host, port, nest_path(title, "app0"))
+            app_image = PfsImage(app)
+            app_manifest = app_image.manifest()
+            # A PS5 update replaces the whole image, so there is no patch layer.
+            ps5 = app_image.version == 2
+            if ps5:
+                print(f"  PS5 image: superblock at {app_image.superblock_offset:,}")
+        elif dump_ac:
+            app = FtpFile(host, port, nest_path(title, "app0"))
+            header = app.read(0, 16)
+            version, magic = struct.unpack("<qq", header)
+            ps5 = not (version == 1 and magic == PFS_MAGIC)
+            app.close()
+            app = None
 
-        patch_plan, app_plan, superseded, recased = build_plan(
-            app_manifest, patch_manifest)
-        known_missing = set()
-        if not args.no_install_check and not args.manifest:
-            known_missing = predict_missing(
-                host, port, title, [rel for rel, _o, _s in app_plan],
-                plan=app_plan, patch_plan=patch_plan)
-        metadata = app.metadata_bytes + (patch.metadata_bytes if patch else 0)
-        total = sum(size for _d, _o, size in patch_plan + app_plan)
+        separate = dump_game and patch_mode == "separate" and not ps5
+        if dump_game:
+            if patch_mode != "skip" and not ps5:
+                try:
+                    patch = FtpFile(host, port, nest_path(title, "patch0"))
+                    patch_manifest = PfsImage(patch).manifest()
+                except ftplib.all_errors:
+                    print(f"No patch image for {title}; dumping the base game only.")
+                    if patch is not None:
+                        patch.close()
+                        patch = None
 
-        # Phrased the way ftpdump.sh phrases it, because dump-build.sh reads the
-        # title back out of this line.
-        print(f"Dumping {title} app data ({total // 1000000} MB):")
-        print(f"  {len(app_manifest)} base file(s), "
-              f"{len(patch_manifest)} patch file(s), {superseded} superseded")
-        print(f"  merged tree: {len(patch_plan) + len(app_plan)} file(s), "
-              f"{total:,} bytes; metadata cost {metadata / 1048576:.1f} MiB")
-        if recased:
-            print(f"  {recased} patch path(s) recased to the base game's spelling")
+            if separate:
+                patch_plan, app_plan = patch_manifest, app_manifest
+                superseded = recased = 0
+            else:
+                patch_plan, app_plan, superseded, recased = build_plan(
+                    app_manifest, patch_manifest)
+            known_missing = set()
+            if not args.no_install_check and not args.manifest:
+                known_missing = predict_missing(
+                    host, port, title, [rel for rel, _o, _s in app_plan],
+                    plan=app_plan, patch_plan=patch_plan)
+            metadata = app.metadata_bytes + (patch.metadata_bytes if patch else 0)
+            total = sum(size for _d, _o, size in patch_plan + app_plan)
 
-        if args.manifest:
-            for rel, offset, size in sorted(patch_plan):
-                print(f"patch\t{offset}\t{size}\t{rel}")
-            for rel, offset, size in sorted(app_plan):
-                print(f"app\t{offset}\t{size}\t{rel}")
-            return 0
+            # Phrased the way ftpdump.sh phrases it, because dump-build.sh reads
+            # the title back out of this line.
+            print(f"Dumping {title} app data ({total // 1000000} MB):")
+            print(f"  {len(app_manifest)} base file(s), "
+                  f"{len(patch_manifest)} patch file(s), {superseded} superseded")
+            layout = "separate layers" if separate else "merged tree"
+            print(f"  {layout}: {len(patch_plan) + len(app_plan)} file(s), "
+                  f"{total:,} bytes; metadata cost {metadata / 1048576:.1f} MiB")
+            if recased:
+                print(f"  {recased} patch path(s) recased to the base game's spelling")
 
-        dest = os.path.join(args.output_dir, f"{title}-app")
-        os.makedirs(dest, exist_ok=True)
+            if args.manifest:
+                for rel, offset, size in sorted(patch_plan):
+                    print(f"patch\t{offset}\t{size}\t{rel}")
+                for rel, offset, size in sorted(app_plan):
+                    print(f"app\t{offset}\t{size}\t{rel}")
+                return 0
+
+            dest = os.path.join(args.output_dir, f"{title}-app")
+            patch_dest = (os.path.join(args.output_dir, f"{title}-patch")
+                          if separate else dest)
+            os.makedirs(dest, exist_ok=True)
+            if separate and patch_manifest:
+                os.makedirs(patch_dest, exist_ok=True)
+        else:
+            patch_plan = app_plan = []
+            known_missing = set()
+            dest = os.path.join(args.output_dir, f"{title}-dlc")
+            patch_dest = dest
 
         entitlement_keys = None
-        if not args.no_entitlements:
+        if not args.no_entitlements and (dump_game or dump_ac):
             entitlement_keys = running_game_entitlements(
                 host, title, candidates, args.injector)
             if entitlement_keys:
+                os.makedirs(dest, exist_ok=True)
                 write_entitlements(dest, entitlement_keys)
-            if not args.no_dlc:
+            if dump_ac:
                 ac_mounts, added = relist_dlc_mounts(host, port, title, ac_mounts)
                 if added:
                     print(f"  the injector mounted {len(added)} more add-on(s): "
                           f"{', '.join(added)}")
 
-        # Probe whichever image reaches furthest into its PFS. A small patch is
-        # not evidence either way because the failing 2 GiB offset lies outside
-        # it. The capability is server-wide, so one conclusive probe covers all
-        # layers.
-        probes = [(nest_path(title, "app0"), app_manifest)]
-        if patch_manifest:
-            probes.append((nest_path(title, "patch0"), patch_manifest))
-        probe_path, probe_manifest = max(
-            probes, key=lambda item: max(
-                (offset + size for _rel, offset, size in item[1]), default=0))
-        probe_extent = max(
-            (offset + size for _rel, offset, size in probe_manifest), default=0)
-        rest_bug = detect_rest_bug(host, port, probe_path, probe_extent)
-        if rest_bug:
-            print("  note: FTP server has the REST sign-bit bug; "
-                  "applying workaround")
+        rest_bug = None
+        if dump_game:
+            # Probe whichever image reaches furthest into its PFS. A small patch
+            # is not evidence either way because the failing 2 GiB offset lies
+            # outside it. One conclusive probe covers all layers.
+            probes = [(nest_path(title, "app0"), app_manifest)]
+            if patch_manifest:
+                probes.append((nest_path(title, "patch0"), patch_manifest))
+            probe_path, probe_manifest = max(
+                probes, key=lambda item: max(
+                    (offset + size for _rel, offset, size in item[1]), default=0))
+            probe_extent = max(
+                (offset + size for _rel, offset, size in probe_manifest), default=0)
+            rest_bug = detect_rest_bug(host, port, probe_path, probe_extent)
+            if rest_bug:
+                print("  note: FTP server has the REST sign-bit bug; "
+                      "applying workaround")
 
+        problems = []
         stream_unresolved = []
         skip_summary = []
         skip_count = 0
-        # Patch data is written first, then the base fills everything the patch
-        # did not supersede. Each layer falls back only to its own loose mount.
-        layers = (
-            ("patch", patch, patch_plan, f"{PFSMNT}/{title}-patch0"),
-            ("app", app, app_plan, f"{PFSMNT}/{title}-app0"),
-        )
         skipped_paths = set()
-        for label, remote, layer_plan, loose_root in layers:
+        layer_results = []
+        layers = (
+            ("patch", patch, patch_plan, patch_dest, f"{title}-patch0"),
+            ("app", app, app_plan, dest, f"{title}-app0"),
+        ) if dump_game else ()
+        for label, remote, layer_plan, layer_dest, mount_name in layers:
             if not layer_plan:
                 continue
             (runs, discarded, rewound, recovered, unresolved,
              skipped) = extract(
-                remote, dest, layer_plan, label, args.verbose,
+                remote, layer_dest, layer_plan, label, args.verbose,
                 rest_workaround=rest_bug,
-                loose_source=(host, port, loose_root),
+                loose_source=(host, port, f"{PFSMNT}/{mount_name}"),
                 allow_decrypted_fallback=not args.no_decrypt,
                 known_missing=known_missing)
             stream_unresolved.extend(unresolved)
@@ -2417,84 +2467,104 @@ def main():
             print(f"  {label}: {len(layer_plan)} file(s), {runs} run(s), "
                   f"{discarded:,} bytes discarded{note}")
 
-        # Summed over both layers so a folder split between them reads as one.
-        skip_summary.extend(summarize_skips(skipped_paths, patch_plan + app_plan))
-        unresolved_paths = {rel for rel, _reason in stream_unresolved} | skipped_paths
-        bad = verify(dest, patch_plan + app_plan)
-        unexpected = [item for item in bad if item[0] not in unresolved_paths]
-        if unexpected:
-            print(f"{len(unexpected)} file(s) did not match the plan:",
-                  file=sys.stderr)
-            for rel, expected, actual in unexpected[:20]:
-                got = "missing" if actual is None else f"{actual} bytes"
-                print(f"  {rel}: expected {expected} bytes, got {got}",
+            unresolved_paths = {rel for rel, _reason in unresolved} | set(skipped)
+            bad = verify(layer_dest, layer_plan)
+            unexpected = [item for item in bad if item[0] not in unresolved_paths]
+            if unexpected:
+                print(f"{len(unexpected)} {label} file(s) did not match the plan:",
                       file=sys.stderr)
-            return 1
+                for rel, expected, actual in unexpected[:20]:
+                    got = "missing" if actual is None else f"{actual} bytes"
+                    print(f"  {rel}: expected {expected} bytes, got {got}",
+                          file=sys.stderr)
+                return 1
+            planned = len(layer_plan)
+            verified = planned - len(
+                {rel for rel, _expected, _actual in bad} | unresolved_paths)
+            print(f"  verified {verified} of {planned} {label} file(s) against the plan"
+                  if verified != planned else
+                  f"  verified {planned} {label} file(s) against the plan")
+            available = [entry for entry in layer_plan
+                         if entry[0] not in unresolved_paths]
+            layer_results.append((layer_dest, mount_name, available))
+            if separate:
+                for line in summarize_skips(skipped, layer_plan):
+                    skip_summary.append(f"{label}: {line}")
+
+        if dump_game and not separate:
+            skip_summary.extend(summarize_skips(
+                skipped_paths, patch_plan + app_plan))
         if stream_unresolved:
             print(f"  warning: {len(stream_unresolved)} file(s) omitted after "
                   f"both image and loose extraction failed", file=sys.stderr)
-        planned = len(patch_plan) + len(app_plan)
-        verified = planned - len(
-            {rel for rel, _expected, _actual in bad} | unresolved_paths)
-        print(f"  verified {verified} of {planned} file(s) against the plan"
-              if verified != planned else
-              f"  verified {planned} file(s) against the plan")
 
-        problems = []
-        mount = FtpMount(host, port)
+        mount = FtpMount(host, port) if dump_game or dump_ac else None
         try:
-            if args.no_decrypt:
-                print("  executables left encrypted (--no-decrypt)")
-            else:
-                if not mount.enable_decryption():
-                    print("  warning: the server did not confirm SELF "
-                          "decryption; check the executables before building",
-                          file=sys.stderr)
-                available_patch = [entry for entry in patch_plan
-                                   if entry[0] not in unresolved_paths]
-                available_app = [entry for entry in app_plan
-                                 if entry[0] not in unresolved_paths]
-                replaced, problems = replace_executables(
-                    mount, dest, {f"{title}-patch0": available_patch,
-                                  f"{title}-app0": available_app}, args.verbose)
-                print(f"  decrypted {replaced} executable(s) via the PFS mounts")
-                if replaced:
-                    damaged = [rel for rel, _o, size
-                               in available_patch + available_app
-                               if size > 0 and is_executable(rel)
-                               and elf_truncated(os.path.join(dest, rel))]
-                    keystone = os.path.join(dest, "sce_sys", "keystone")
-                    if keystone_is_generated(keystone):
-                        print("  warning: keystone is not the retail one",
+            if mount is not None:
+                if args.no_decrypt:
+                    print("  executables left encrypted (--no-decrypt)")
+                else:
+                    if not mount.enable_decryption():
+                        print("  warning: the server did not confirm SELF "
+                              "decryption; check the executables before building",
                               file=sys.stderr)
-                    problems += [(rel, "decrypted executable is truncated")
-                                 for rel in damaged]
+                    replaced_total = 0
+                    for layer_dest, mount_name, available in layer_results:
+                        replaced, issues = replace_executables(
+                            mount, layer_dest, {mount_name: available}, args.verbose)
+                        replaced_total += replaced
+                        problems += issues
+                        if replaced:
+                            damaged = [
+                                rel for rel, _offset, size in available
+                                if size > 0 and is_executable(rel)
+                                and elf_truncated(os.path.join(layer_dest, rel))]
+                            problems += [
+                                (rel, "decrypted executable is truncated")
+                                for rel in damaged]
+                    if dump_game:
+                        print(f"  decrypted {replaced_total} executable(s) via the PFS mounts")
+                        if replaced_total:
+                            keystone = os.path.join(dest, "sce_sys", "keystone")
+                            if keystone_is_generated(keystone):
+                                print("  warning: keystone is not the retail one",
+                                      file=sys.stderr)
 
-            if ps5:
-                problems += dump_ps5_metadata(
-                    host, port, mount, title, dest, args.verbose)
-            else:
-                problems += dump_ps4_metadata(
-                    host, port, mount, title, dest, bool(patch_manifest),
-                    args.verbose)
+                if dump_game:
+                    if ps5:
+                        problems += dump_ps5_metadata(
+                            host, port, mount, title, dest, args.verbose)
+                    elif separate:
+                        problems += dump_ps4_metadata(
+                            host, port, mount, title, dest, False, args.verbose)
+                        if patch_manifest:
+                            problems += dump_ps4_metadata(
+                                host, port, mount, title, patch_dest, True,
+                                args.verbose, patch_only=True)
+                    else:
+                        problems += dump_ps4_metadata(
+                            host, port, mount, title, dest, bool(patch_manifest),
+                            args.verbose)
 
-            if ac_mounts:
-                print(f"Dumping {title} DLC data ({len(ac_mounts)} add-on(s)):")
-                done, dlc_problems, dlc_skipped, dlc_skip_count = dump_dlc(
-                    host, port, mount, title, args.output_dir, ac_mounts,
-                    decrypt=not args.no_decrypt, verbose=args.verbose,
-                    rest_workaround=rest_bug, sce_sys_from_pkg=not ps5,
-                    keys=entitlement_keys)
-                print(f"  {done} of {len(ac_mounts)} add-on(s) dumped")
-                problems += dlc_problems
-                skip_summary.extend(dlc_skipped)
-                skip_count += dlc_skip_count
-            elif not args.no_dlc:
-                print(f"No DLC data found for {title}.")
+                if dump_ac:
+                    if ac_mounts:
+                        print(f"Dumping {title} DLC data ({len(ac_mounts)} add-on(s)):")
+                        done, dlc_problems, dlc_skipped, dlc_skip_count = dump_dlc(
+                            host, port, mount, title, args.output_dir, ac_mounts,
+                            decrypt=not args.no_decrypt, verbose=args.verbose,
+                            rest_workaround=rest_bug, sce_sys_from_pkg=not ps5,
+                            keys=entitlement_keys)
+                        print(f"  {done} of {len(ac_mounts)} add-on(s) dumped")
+                        problems += dlc_problems
+                        skip_summary.extend(dlc_skipped)
+                        skip_count += dlc_skip_count
+                    else:
+                        print(f"No DLC data found for {title}.")
         finally:
-            mount.close()
+            if mount is not None:
+                mount.close()
 
-        if not ps5 and not args.no_dlc:
+        if dump_al:
             try:
                 dump_dlc_entitlements(
                     host, port, args.output_dir, filter_title=title,
@@ -2519,7 +2589,8 @@ def main():
         print(f"Unsupported PFS image: {err}", file=sys.stderr)
         return 2
     finally:
-        app.close()
+        if app is not None:
+            app.close()
         if patch is not None:
             patch.close()
 
