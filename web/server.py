@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Web front end for dumping titles off a console and building fake packages.
 
-Serves one page with Dump, Build and Dump+Build tabs. Each submission becomes a
-job that drives the same tools the terminal workflow uses: pfsdump.py (or
-ftpdump.sh when a PS4 build needs the base and patch apart), then build-fpkg.sh
-for PS4 or build-ps5.sh for PS5. Jobs run one at a time, since they compete for
-the console's FTP server and for the disk.
+Serves one page with Dump, Build and Backport tabs; the Dump tab can
+optionally build straight from its dump. Each submission becomes a job that
+drives the same tools the terminal workflow uses: pfsdump.py, then
+build-fpkg.sh for PS4 or build-ps5.sh for PS5. Jobs run one at a time, since
+they compete for the console's FTP server and for the disk.
 
 Configuration comes from the environment, or a .env beside the tools:
   WEB_BIND      address to listen on (default 0.0.0.0)
@@ -55,7 +55,6 @@ import dumpscan  # noqa: E402
 import dlc_emu  # noqa: E402
 
 PFSDUMP = os.path.join(TOOLS, "pfsdump.py")
-FTPDUMP = os.environ.get("FTPDUMP") or os.path.join(TOOLS, "ftpdump.sh")
 BUILD_FPKG = os.environ.get("BUILD_FPKG") or os.path.join(TOOLS, "build-fpkg.sh")
 BUILD_PS5 = os.environ.get("BUILD_PS5") or os.path.join(TOOLS, "build-ps5.sh")
 BACKPORT_PS5 = (os.environ.get("BACKPORT_PS5")
@@ -442,7 +441,7 @@ def probe(job, host, port, title):
 
 # --- steps ---------------------------------------------------------------------
 
-def dump_step(job, spec, title, method):
+def dump_step(job, spec, title):
     host, port = spec["host"], spec["port"]
     dump_dir = spec["dump_dir"]
     os.makedirs(dump_dir, exist_ok=True)
@@ -450,26 +449,20 @@ def dump_step(job, spec, title, method):
     dump_game = spec.get("dump_game", True)
     patch_mode = "skip" if spec.get("no_patch") else spec.get("patch_mode", "combined")
     addon_mode = "skip" if spec.get("no_dlc") else spec.get("addon_mode", "all")
-    if method == "pfs":
-        argv = [sys.executable, PFSDUMP, f"{host}:{port}", title, "-o", dump_dir]
-        if not dump_game:
-            argv.append("--no-game")
-        argv += ["--patch-mode", patch_mode, "--addon-mode", addon_mode]
-        for flag in ("no_decrypt", "no_entitlements"):
-            if spec.get(flag):
-                argv.append("--" + flag.replace("_", "-"))
-        if spec.get("verbose"):
-            argv.append("-v")
-    else:
-        # dump-build.sh's mirror invocation, minus --union: this path is only
-        # taken when the build needs the layers apart.
-        argv = [FTPDUMP, f"{host}:{port}", "-a", "-d", "-k", "-p", "-r",
-                "-j", str(spec["jobs"]), "-o", dump_dir]
+    argv = [sys.executable, PFSDUMP, f"{host}:{port}", title, "-o", dump_dir]
+    if not dump_game:
+        argv.append("--no-game")
+    argv += ["--patch-mode", patch_mode, "--addon-mode", addon_mode]
+    for flag in ("no_decrypt", "no_entitlements"):
+        if spec.get(flag):
+            argv.append("--" + flag.replace("_", "-"))
+    if spec.get("verbose"):
+        argv.append("-v")
     start = job.line_count
     rc = run(job, argv, cwd=dump_dir)
     if rc != 0:
         detail = job.tail(start)
-        raise JobError(f"{method} dump failed (exit {rc})"
+        raise JobError(f"dump failed (exit {rc})"
                        + "".join(f"\n  {line}" for line in detail))
     app_dir = os.path.join(dump_dir, f"{title}-app")
     patch_dir = os.path.join(dump_dir, f"{title}-patch")
@@ -761,7 +754,7 @@ def execute(job):
     spec = job.plan
     if job.kind == "dump":
         title, _platform = probe(job, spec["host"], spec["port"], spec["title"])
-        dump_step(job, spec, title, "pfs")
+        dump_step(job, spec, title)
     elif job.kind == "build":
         build_step(job, spec, spec["source_dir"], spec["platform"])
     elif job.kind == "dlc-split":
@@ -773,18 +766,18 @@ def execute(job):
         if platform in spec["option_problems"]:
             raise JobError(f"{platform.upper()} build options: "
                            f"{spec['option_problems'][platform]}")
-        method = "pfs"
         dump_game = spec["dump_game"]
         if platform == "ps4":
             ps4 = spec["ps4"]
             if dump_game and ps4["mode"] in ("remaster", "separate"):
                 job.say(f"--{ps4['mode']} needs the base and patch apart: "
-                        "mirroring with ftpdump.sh instead of streaming")
-                method = "ftp"
+                        "dumping the patch as a separate layer")
+                spec["patch_mode"] = "separate"
+                spec["no_patch"] = False
             elif ps4["no_update"]:
                 spec["no_patch"] = True
                 spec["patch_mode"] = "skip"
-        app_dir = dump_step(job, spec, title, method)
+        app_dir = dump_step(job, spec, title)
         if dump_game:
             build_step(job, spec, app_dir, platform)
         # A PS4 app build finds its sibling -dlc itself. A game-less PS4 run
@@ -1032,7 +1025,6 @@ def build_job(kind, params):
         dump_spec(params, spec)
         spec["no_decrypt"] = False
         spec["out_dir"] = resolve_path(params.get("out_dir"), "output directory", create=True)
-        spec["jobs"] = int_in(params, "jobs", 1, 64, 8, "ftp jobs")
         spec["delete_dumps"] = bool(params.get("delete_dumps"))
         # The platform is only known once the console is asked, so a problem
         # with one platform's options is held until then rather than refused.
@@ -1295,7 +1287,6 @@ def config():
         "content_id": setting("CONTENT_ID"),
         "ps2_tid": setting("PS2_TID"),
         "tmp_dir": usable_path(setting("IMG_TMP_DIR")),
-        "jobs": setting("JOBS", "8"),
         "ps5_temp_dir": usable_path(setting("LIBPROSPERO_TEMP_DIR")),
         "compression_level": "7",
         "chunk_count": "",
@@ -1303,7 +1294,7 @@ def config():
         "tier": "7xx",
     }
     tools = {name: os.path.exists(path) for name, path in
-             (("pfsdump", PFSDUMP), ("ftpdump", FTPDUMP),
+             (("pfsdump", PFSDUMP),
               ("build-fpkg", BUILD_FPKG), ("build-ps5", BUILD_PS5),
               ("backport-ps5", BACKPORT_PS5),
               ("prospero-pub-cmd", PROSPERO_PUB_CMD))}

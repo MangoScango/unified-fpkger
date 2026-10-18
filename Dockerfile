@@ -78,8 +78,6 @@ COPY --from=deps /src/ps-pkg-info/ps_pkg_info /opt/fpkger/ps_pkg_info
 # PS5 firmware dumps fakelibs are built from are not shipped; the Backport
 # tab takes them at runtime (PS5BACKPORT_LIBS).
 COPY another-backporter /opt/fpkger/another-backporter
-# ftpdump takes sfo from its own directory when sfo_path is unset, so they ship
-# side by side.
 COPY *.sh *.py \
      /opt/fpkger/
 # pfsdump sends this to the console's payload loader to read PS5 add-on
@@ -100,14 +98,11 @@ RUN off=$((0x3681B)) \
     && printf '\353' \
        | dd of="$ORBIS_PUB_CMD" bs=1 seek=$off conv=notrunc status=none
 
-RUN chmod +x /opt/fpkger/build-fpkg.sh /opt/fpkger/dump-build.sh \
-        /opt/fpkger/build-ps5.sh \
-        /opt/fpkger/ftpdump.sh /opt/fpkger/pkg-set-appver.py \
+RUN chmod +x /opt/fpkger/build-fpkg.sh /opt/fpkger/build-ps5.sh \
+        /opt/fpkger/pkg-set-appver.py \
         /opt/fpkger/pfsdump.py /opt/fpkger/sfo \
         /usr/local/bin/entrypoint.sh \
-    && for t in build-fpkg dump-build ftpdump; do \
-         ln -s "/opt/fpkger/$t.sh" "/usr/local/bin/$t.sh"; \
-       done \
+    && ln -s /opt/fpkger/build-fpkg.sh /usr/local/bin/build-fpkg.sh \
     && ln -s /opt/fpkger/sfo /usr/local/bin/sfo \
     && ln -s /opt/fpkger/pkg-set-appver.py /usr/local/bin/pkg-set-appver.py \
     && ln -s /opt/fpkger/pfsdump.py /usr/local/bin/pfsdump.py

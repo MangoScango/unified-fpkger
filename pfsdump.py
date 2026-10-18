@@ -2406,8 +2406,6 @@ def main():
             metadata = app.metadata_bytes + (patch.metadata_bytes if patch else 0)
             total = sum(size for _d, _o, size in patch_plan + app_plan)
 
-            # Phrased the way ftpdump.sh phrases it, because dump-build.sh reads
-            # the title back out of this line.
             print(f"Dumping {title} app data ({total // 1000000} MB):")
             print(f"  {len(app_manifest)} base file(s), "
                   f"{len(patch_manifest)} patch file(s), {superseded} superseded")

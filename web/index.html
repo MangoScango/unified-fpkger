@@ -123,7 +123,6 @@
   <div role="tablist" aria-label="Job type">
     <button role="tab" id="tab-dump" aria-controls="panel-dump" aria-selected="true">Dump</button>
     <button role="tab" id="tab-build" aria-controls="panel-build" aria-selected="false" tabindex="-1">Build</button>
-    <button role="tab" id="tab-dump-build" aria-controls="panel-dump-build" aria-selected="false" tabindex="-1">Dump+Build</button>
     <button role="tab" id="tab-backport" aria-controls="panel-backport" aria-selected="false" tabindex="-1">Backport</button>
   </div>
 
@@ -131,6 +130,18 @@
     <form data-kind="dump">
       <div data-use="t-console"></div>
       <div data-use="t-dump"></div>
+      <label class="check"><input type="checkbox" name="build_fpkgs"> Build fpkgs from the dump</label>
+      <div data-build-options hidden>
+        <div data-use="t-out"></div>
+        <p class="hint" data-detect-hint>Detect the console to show its platform's build options.</p>
+        <div data-use="t-ps4" data-options="ps4"></div>
+        <div data-use="t-ps5" data-options="ps5"></div>
+        <fieldset>
+          <legend>After the build</legend>
+          <label class="check"><input type="checkbox" name="delete_dumps"> Delete the dump once the build succeeds</label>
+          <p class="hint warn">Irreversible. The console becomes the only other copy.</p>
+        </fieldset>
+      </div>
       <button class="primary" type="submit">Start dump</button>
       <p class="status" role="status"></p>
     </form>
@@ -161,28 +172,6 @@
       <div data-use="t-ps5" data-options="ps5"></div>
       <p class="hint" id="single-hint" hidden>Options marked "one dump only" are off while several dumps are selected.</p>
       <button class="primary" type="submit" id="build-submit" disabled>Build selected</button>
-      <p class="status" role="status"></p>
-    </form>
-  </div>
-
-  <div role="tabpanel" id="panel-dump-build" aria-labelledby="tab-dump-build" hidden>
-    <form data-kind="dump-build">
-      <div data-use="t-console"></div>
-      <div data-use="t-dump"></div>
-      <div data-use="t-out"></div>
-      <p class="hint">Detect the console to show its platform's build options.</p>
-      <div data-use="t-ps4" data-options="ps4"></div>
-      <div data-use="t-ps5" data-options="ps5"></div>
-      <fieldset>
-        <legend>After the build</legend>
-        <label>ftpdump parallel downloads
-          <input type="number" name="jobs" min="1" max="64"></label>
-        <p class="hint">Only used for a PS4 remaster or separate build, which needs the base and patch
-          mirrored apart instead of streamed.</p>
-        <label class="check"><input type="checkbox" name="delete_dumps"> Delete the dump once the build succeeds</label>
-        <p class="hint warn">Irreversible. The console becomes the only other copy.</p>
-      </fieldset>
-      <button class="primary" type="submit">Start dump and build</button>
       <p class="status" role="status"></p>
     </form>
   </div>
@@ -402,10 +391,26 @@ for (const slot of $$("[data-use]")) {
   wrap.append(frag);
   slot.replaceWith(wrap);
 }
-const dumpBuildForm = $("form[data-kind=dump-build]");
-// A dump that feeds straight into a build must be decrypted, so the
-// Dump+Build tab drops the plain Dump tab's encrypted-executables option.
-$("input[name=no_decrypt]", dumpBuildForm).closest("label").remove();
+const dumpForm = $("form[data-kind=dump]");
+// The Dump tab can feed its dump straight into a build: the toggle reveals the
+// same option panels the Build tab uses (its dump picker excepted), so both
+// tabs share the templates. A dump bound for a build must be decrypted, so
+// that option is forced off while the toggle is on.
+const buildToggle = dumpForm.elements.build_fpkgs;
+const buildOptions = $("[data-build-options]", dumpForm);
+function syncBuildToggle() {
+  const on = buildToggle.checked;
+  buildOptions.hidden = !on;
+  for (const field of $$("input, select, button", buildOptions)) field.disabled = !on;
+  const noDecrypt = dumpForm.elements.no_decrypt;
+  noDecrypt.disabled = on;
+  if (on) noDecrypt.checked = false;
+  noDecrypt.closest("label").hidden = on;
+  $("button[type=submit]", dumpForm).textContent = on ? "Start dump and build" : "Start dump";
+  syncConsolePlatform(dumpForm);
+}
+buildToggle.addEventListener("change", syncBuildToggle);
+syncBuildToggle();
 $$("[data-key-hint]").forEach((hint, i) => {
   hint.id = "key-hint-" + i;
   const input = hint.previousElementSibling.querySelector("input");
@@ -768,7 +773,7 @@ function fill(defaults) {
   }
   const lastScan = localStorage.getItem(SCAN_KEY);
   if (lastScan) scanInput.value = lastScan;
-  for (const form of $$("form[data-kind=dump], form[data-kind=dump-build]"))
+  for (const form of $$("form[data-kind=dump]"))
     syncConsolePlatform(form);
   syncSelection();
 }
@@ -803,7 +808,8 @@ for (const form of $$("form")) {
           : `Queued job ${ids[0]}.`;
         showJob(jobs[0].id);
       } else {
-        const job = await api("/api/jobs", {kind: form.dataset.kind, params: p});
+        const kind = form === dumpForm && buildToggle.checked ? "dump-build" : form.dataset.kind;
+        const job = await api("/api/jobs", {kind, params: p});
         status.textContent = `Queued job #${job.id}.`;
         showJob(job.id);
       }
@@ -818,20 +824,22 @@ for (const form of $$("form")) {
   });
 }
 
-// Console detection fills the title list for that form. In the Dump+Build
-// tab the detected platform decides which build options are shown; until a
-// title with a known platform is chosen, both stay hidden.
+// Console detection fills the title list for that form. In the Dump tab the
+// detected platform decides which build options the "Build fpkgs" toggle
+// shows; until a title with a known platform is chosen, both stay hidden.
 function syncConsolePlatform(form) {
   const select = form.elements.title;
   const title = select.value || [...(select.platforms?.keys() || [])][0] || "";
   const platform = select.platforms?.get(title);
   for (const node of $$("[data-options]", form))
     node.hidden = node.dataset.options !== platform;
+  const hint = $("[data-detect-hint]", form);
+  if (hint) hint.hidden = Boolean(platform) || !buildToggle.checked;
   const patch = form.elements.patch_mode;
   if (patch) patch.disabled = platform === "ps5" || !form.elements.dump_game.checked;
   syncScLink(form, select.value);
 }
-for (const form of $$("form[data-kind=dump], form[data-kind=dump-build]")) {
+for (const form of $$("form[data-kind=dump]")) {
   form.elements.title.addEventListener("change", () => syncConsolePlatform(form));
   form.elements.dump_game.addEventListener("change", () => syncConsolePlatform(form));
   syncConsolePlatform(form);
