@@ -196,8 +196,8 @@ def read_meta(folder):
             version=param.get("contentVersion") or param.get("masterVersion") or None,
             category=category,
             # An add-on's param.json has no applicationCategoryType, and only
-            # an application has an eboot.bin. build-ps5 builds either alone,
-            # so a PS5 add-on keeps the "base" role and its own unit.
+            # an application has an eboot.bin. The PS5 builder takes either
+            # alone, so a PS5 add-on keeps the "base" role and its own unit.
             kind=("Game" if category == 0 else "App" if category is not None
                   else "Unknown" if os.path.isfile(os.path.join(folder, "eboot.bin"))
                   else "Add-on"),
@@ -228,8 +228,9 @@ def read_meta(folder):
         # backport-sdk.py's <TITLE>-bp output carries the dump's param.sfo
         # unmodified next to only the executables it restamped, so its sfo reads
         # as a base. A dump's sce_sys always holds more than param.sfo.
-        # build-fpkg has no way to build from such a folder yet (--base-pkg
-        # regenerates it from the -app dump), so it is marked and left out.
+        # The PS4 builder has no way to build from such a folder yet
+        # (--base-pkg regenerates it from the -app dump), so it is marked and
+        # left out.
         if meta["role"] == "base":
             try:
                 only_sfo = os.listdir(sce) == ["param.sfo"]
@@ -327,9 +328,9 @@ def group(trees):
     """Buildable units from the trees found.
 
     PS4: each base collects the updates and add-ons declaring its title ID.
-    Add-ons with no base found form an add-on only unit, which build-fpkg can
-    build alone; updates with no base are listed but cannot be built. PS5: each
-    tree is its own unit, since build-ps5 builds one folder.
+    Add-ons with no base found form an add-on only unit, which the PS4 builder
+    can build alone; updates with no base are listed but cannot be built. PS5:
+    each tree is its own unit, since the PS5 builder takes one folder.
     """
     units = []
     by_title = {}

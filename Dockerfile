@@ -55,7 +55,7 @@ RUN dpkg --add-architecture i386 \
 # clang + lld are only for another-backporter's --unpeg-shim, which assembles
 # ps5backport/vrr_shim.s at build time.
 
-# Consumed by build-fpkg.sh's ${VAR:-default} tool-path hooks.
+# Consumed by build-pkg.py's tool-path env hooks.
 ENV SDK_DIR=/opt/fpkger/PS4_Fake_PKG_Tools_3 \
     SFO_TOOL=/opt/fpkger/sfo \
     MAKE_FSELF=/opt/fpkger/make_fself.py \
@@ -78,7 +78,7 @@ COPY --from=deps /src/ps-pkg-info/ps_pkg_info /opt/fpkger/ps_pkg_info
 # PS5 firmware dumps fakelibs are built from are not shipped; the Backport
 # tab takes them at runtime (PS5BACKPORT_LIBS).
 COPY another-backporter /opt/fpkger/another-backporter
-COPY *.sh *.py \
+COPY *.py \
      /opt/fpkger/
 # pfsdump sends this to the console's payload loader to read PS5 add-on
 # entitlement keys from the running game.
@@ -98,11 +98,11 @@ RUN off=$((0x3681B)) \
     && printf '\353' \
        | dd of="$ORBIS_PUB_CMD" bs=1 seek=$off conv=notrunc status=none
 
-RUN chmod +x /opt/fpkger/build-fpkg.sh /opt/fpkger/build-ps5.sh \
+RUN chmod +x /opt/fpkger/build-pkg.py \
         /opt/fpkger/pkg-set-appver.py \
         /opt/fpkger/pfsdump.py /opt/fpkger/sfo \
         /usr/local/bin/entrypoint.sh \
-    && ln -s /opt/fpkger/build-fpkg.sh /usr/local/bin/build-fpkg.sh \
+    && ln -s /opt/fpkger/build-pkg.py /usr/local/bin/build-pkg.py \
     && ln -s /opt/fpkger/sfo /usr/local/bin/sfo \
     && ln -s /opt/fpkger/pkg-set-appver.py /usr/local/bin/pkg-set-appver.py \
     && ln -s /opt/fpkger/pfsdump.py /usr/local/bin/pfsdump.py

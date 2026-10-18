@@ -4,7 +4,7 @@
 Serves one page with Dump, Build and Backport tabs; the Dump tab can
 optionally build straight from its dump. Each submission becomes a job that
 drives the same tools the terminal workflow uses: pfsdump.py, then
-build-fpkg.sh for PS4 or build-ps5.sh for PS5. Jobs run one at a time, since
+build-pkg.py (ps4 or ps5 subcommand). Jobs run one at a time, since
 they compete for the console's FTP server and for the disk.
 
 Configuration comes from the environment, or a .env beside the tools:
@@ -55,8 +55,7 @@ import dumpscan  # noqa: E402
 import dlc_emu  # noqa: E402
 
 PFSDUMP = os.path.join(TOOLS, "pfsdump.py")
-BUILD_FPKG = os.environ.get("BUILD_FPKG") or os.path.join(TOOLS, "build-fpkg.sh")
-BUILD_PS5 = os.environ.get("BUILD_PS5") or os.path.join(TOOLS, "build-ps5.sh")
+BUILD_PKG = os.environ.get("BUILD_PKG") or os.path.join(TOOLS, "build-pkg.py")
 BACKPORT_PS5 = (os.environ.get("BACKPORT_PS5")
                 or os.path.join(TOOLS, "another-backporter", "backport-ps5.py"))
 MAKE_FSELF = os.path.join(TOOLS, "make_fself.py")
@@ -481,8 +480,9 @@ def dump_step(job, spec, title):
 def source_platform(src):
     """'ps5' when the tree carries PS5 metadata, else 'ps4'.
 
-    build-fpkg.sh does its own identification of PS4 trees, including add-on
-    containers with no param.sfo at all, so anything not PS5 goes to it.
+    The PS4 side of build-pkg.py does its own identification of PS4 trees,
+    including add-on containers with no param.sfo at all, so anything not PS5
+    goes to it.
     """
     platform = dumpscan.platform_of(src)
     if platform is None and ps5_addons(src):
@@ -525,7 +525,7 @@ def package_mtimes(directory):
 
 
 def extract_step(job, spec, pkg_path):
-    """Extract a PS5 pkg into a tree build-ps5.sh can take, and return the tree.
+    """Extract a PS5 pkg into a tree build-pkg.py can take, and return the tree.
 
     prospero-pub-cmd's img_extract writes the whole image (sce_sys included) to
     <stem>-extract next to the pkg, or under the extraction folder when one is
@@ -581,7 +581,7 @@ def build_step(job, spec, src, platform):
         before = package_mtimes(out_dir)
         job.step = f"building {os.path.basename(src)} (PS4)"
         opts = spec["ps4"]
-        argv = [BUILD_FPKG, "--" + opts["mode"]]
+        argv = [sys.executable, BUILD_PKG, "ps4", "--" + opts["mode"]]
         if not opts["backport"]:
             argv.append("--no-backport")
         for key, flag in (("sdk", "--sdk"), ("keystone", "--keystone"),
@@ -592,7 +592,7 @@ def build_step(job, spec, src, platform):
                 argv += [flag, opts[key]]
         layers = spec.get("layers")
         if layers is not None:
-            # From a scan: every layer is named, so build-fpkg's sibling
+            # From a scan: every layer is named, so the builder's sibling
             # lookup is turned off. Named add-ons still build under --no-dlc,
             # which only stops it looking for a -dlc folder.
             if not layers["update"]:
@@ -629,7 +629,8 @@ def build_ps5(job, spec, src, out_dir):
     requested = None if addon else opts["name"]
     package = os.path.join(out_dir, ps5_package_name(src, requested) + ".pkg")
     job.step = f"building {os.path.basename(src)} (PS5 {'add-on' if addon else 'app'})"
-    argv = [BUILD_PS5, "--source-folder", src, "--output-package", package,
+    argv = [sys.executable, BUILD_PKG, "ps5", "--source-folder", src,
+            "--output-package", package,
             "--volume", "ac" if addon else "app",
             "--passcode", opts["passcode"],
             "--compression-level", str(opts["compression_level"])]
@@ -1103,10 +1104,10 @@ def scanned_pkg(path):
 def unit_layers(source, params):
     """(platform, layers, title) for one selected scan unit.
 
-    layers is {"base", "update", "addons"}: folders handed to build-fpkg by
+    layers is {"base", "update", "addons"}: folders handed to build-pkg.py by
     name, so it builds what the param files say rather than guessing siblings.
-    A pkg source instead gives {"base": pkg_path, "rebuild": True}: build-ps5
-    runs against the extracted image.
+    A pkg source instead gives {"base": pkg_path, "rebuild": True}: the ps5
+    build runs against the extracted image.
     """
     if not isinstance(source, dict):
         raise BadRequest("each source must be an object")
@@ -1294,8 +1295,7 @@ def config():
         "tier": "7xx",
     }
     tools = {name: os.path.exists(path) for name, path in
-             (("pfsdump", PFSDUMP),
-              ("build-fpkg", BUILD_FPKG), ("build-ps5", BUILD_PS5),
+             (("pfsdump", PFSDUMP), ("build-pkg", BUILD_PKG),
               ("backport-ps5", BACKPORT_PS5),
               ("prospero-pub-cmd", PROSPERO_PUB_CMD))}
     tools["wine"] = shutil.which("wine") is not None

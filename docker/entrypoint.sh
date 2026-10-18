@@ -80,7 +80,7 @@ case "${1:-idle}" in
     exit 0 ;;
   web)           shift; set -- python3 /opt/fpkger/web/server.py ${@+"$@"} ;;
   bash|sh|shell) shift; set -- bash ${@+"$@"} ;;
-  *)             set -- build-fpkg.sh ${@+"$@"} ;;
+  *)             set -- build-pkg.py ${@+"$@"} ;;
 esac
 
 if [ "$DO_DROP" = "1" ]; then

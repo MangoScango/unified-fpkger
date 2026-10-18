@@ -2,7 +2,7 @@
 #
 #   docker compose up -d        then open http://<server>:8080/
 #
-# One-off terminal jobs still work, with build-fpkg.sh args after the service:
+# One-off terminal jobs still work, with build-pkg.py args after the service:
 #
 #   docker compose run --rm fpkger --out /work/out /work/CUSA28863-app
 services:
