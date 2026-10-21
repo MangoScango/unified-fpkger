@@ -150,6 +150,7 @@ SC_OVERLAY = env("SC_OVERLAY", os.path.join(SELF_DIR, "sc-overlay.py"))
 FAKE_PASSCODE = "00000000000000000000000000000000"
 DLC_ENT_KEY = "00000000000000000000000000000000"   # zero entitlement key (kstuff fakes the check)
 WINE_OVERRIDES = "wineps.drv,localspl.dll,spoolss.dll=d"
+ON_WINDOWS = os.name == "nt"
 
 # PS2-emu auth-info templates (authinfo_emu.txt, FW=501). The first 2 bytes
 # (4 hex chars) are replaced with the PS2 title-id decimal bytes.
@@ -224,6 +225,8 @@ def wine_env():
 # typescript makes script(1) stream to our stdout instead of buffering to a
 # file.
 def wine_argv(argv):
+    if ON_WINDOWS:
+        return list(argv), dict(os.environ)
     if shutil.which("script"):
         cmd = ("WINEDEBUG=%s WINEDLLOVERRIDES=%s wine %s"
                % (env("WINEDEBUG", "-all"), WINE_OVERRIDES, shlex.join(argv)))
@@ -250,6 +253,8 @@ def wine_popen(argv):
 
 
 def winpath(path):
+    if ON_WINDOWS:
+        return path
     out = subprocess.run(["winepath", "-w", path], stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL)
     return out.stdout.decode(errors="replace").strip()
@@ -436,8 +441,11 @@ def img_tmp_init():
 def ps4pub_dir():
     global IMG_PS4PUB
     if not IMG_PS4PUB:
-        base = os.path.join(env("WINEPREFIX", os.path.expanduser("~/.wine")),
-                            "drive_c")
+        if ON_WINDOWS:
+            base = env("TEMP") or tempfile.gettempdir()
+        else:
+            base = os.path.join(env("WINEPREFIX", os.path.expanduser("~/.wine")),
+                                "drive_c")
         for root, dirs, _files in os.walk(base):
             depth = 0 if root == base else os.path.relpath(root, base).count(os.sep) + 1
             if "ps4pub" in dirs:
@@ -1222,7 +1230,7 @@ def cmd_ps4(args):
     KEYSTONE_MODE = args.keystone
     if KEYSTONE_MODE not in ("kscreate", "retail"):
         die("--keystone must be kscreate or retail")
-    if not shutil.which("wine"):
+    if not ON_WINDOWS and not shutil.which("wine"):
         die("wine not found")
     OUT_DIR = args.out
     try:
@@ -1733,6 +1741,8 @@ def free_space_line(directory):
 def cmd_ps5(args):
     if not re.fullmatch(r"[0-9A-Fa-f]{32}", args.passcode):
         die("The passcode must be 32 hex digits")
+    if not ON_WINDOWS and not shutil.which("wine"):
+        die("wine not found")
 
     source = args.source_folder
     if not os.path.isdir(source):
@@ -1923,10 +1933,12 @@ def cmd_ps5(args):
     if py_exit:
         die(f"GP5 creation failed with exit code {py_exit}")
 
-    with open(gp5, "rb") as handle:
-        data = handle.read()
-    with open(gp5, "wb") as handle:
-        handle.write(data.replace(b'src_path="', b'src_path="Z:'))
+    if not ON_WINDOWS:
+        # wine reaches the host filesystem through its Z: drive
+        with open(gp5, "rb") as handle:
+            data = handle.read()
+        with open(gp5, "wb") as handle:
+            handle.write(data.replace(b'src_path="', b'src_path="Z:'))
 
     if reference:
         log(f"[2/2] Building plaintext/no-auth patch against: {reference}")
@@ -1945,8 +1957,8 @@ def cmd_ps5(args):
         publisher_args += ["--ref_pkg_path", reference]
     publisher_args += [gp5, partial]
 
-    sdk_exit = subprocess.run(["wine", publisher, *publisher_args],
-                              stdout=sys.stderr).returncode
+    sdk_exit = subprocess.run(([publisher] if ON_WINDOWS else ["wine", publisher])
+                              + publisher_args, stdout=sys.stderr).returncode
 
     sdk_finished = datetime.datetime.now(datetime.timezone.utc)
     elapsed = int(time.time()) - sdk_started_epoch
@@ -2142,21 +2154,44 @@ def build_parser():
     return parser
 
 
-def detect_platform(argv):
+def detect_platform(argv, parser):
     # No subcommand: sniff the source tree the args point at.
-    for token in argv:
-        if os.path.isdir(token):
-            if os.path.isfile(os.path.join(token, "sce_sys", "param.json")):
-                return "ps5"
+    takes_value = set()
+    subs = (a for a in parser._actions
+            if isinstance(a, argparse._SubParsersAction))
+    for sub_action in subs:
+        for sub in sub_action.choices.values():
+            for action in sub._actions:
+                if action.option_strings and action.nargs != 0:
+                    takes_value.update(action.option_strings)
+
+    sources = []
+    i = 0
+    while i < len(argv):
+        name, sep, inline = argv[i].partition("=")
+        i += 1
+        if name in takes_value:
+            if name in ("-s", "--source-folder"):
+                sources.append(inline if sep else argv[i] if i < len(argv)
+                               else "")
+            if not sep:
+                i += 1
+        elif not name.startswith("-"):
+            sources.append(name)
+
+    for source in sources:
+        if os.path.isfile(os.path.join(source, "sce_sys", "param.sfo")):
             return "ps4"
+        if os.path.isfile(os.path.join(source, "sce_sys", "param.json")):
+            return "ps5"
     return "ps4"
 
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv or argv[0] not in ("ps4", "ps5", "-h", "--help"):
-        argv.insert(0, detect_platform(argv))
     parser = build_parser()
+    if not argv or argv[0] not in ("ps4", "ps5", "-h", "--help"):
+        argv.insert(0, detect_platform(argv, parser))
     args = parser.parse_args(argv)
     if args.platform == "ps5":
         cmd_ps5(args)

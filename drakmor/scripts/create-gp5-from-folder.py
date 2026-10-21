@@ -21,7 +21,7 @@ pic0, and pic1, and RGBA for pic2; only pic2 preserves the alpha channel.
 For PSAL (`--volume al`), the project instead contains only its normalized metadata
 (param.json and a validated 512x512 RGB icon0.png) and requires an entitlement key.
 Application projects read the PlayGo chunk count from sce_sys/playgo-chunk.dat when present.
-Without it, the fallback is 100 chunks, configurable from 1 through 255.
+Without it, the fallback is 100 chunks, configurable from 1 through 800.
 When the source also has playgo-hash-table.dat and playgo-ficm.dat, its chunk labels,
 chunk languages and file-to-chunk assignments are kept.
 Otherwise game files remain in chunk zero; each language declared by playgo-scenario.json
@@ -1723,7 +1723,7 @@ def main() -> None:
     parser.add_argument("--auto-size-profile", choices=("sdk279", "sdk313"),
                         help="select attributePub from unpacked inputs for this SDK")
     parser.add_argument("--chunk-count", type=int, default=DEFAULT_PLAYGO_CHUNK_COUNT,
-                        metavar="1..255",
+                        metavar="1..800",
                         help="fallback APP PlayGo chunk count without source "
                              "sce_sys/playgo-chunk.dat (default: 100)")
     parser.add_argument("--passcode", default="0" * 32,

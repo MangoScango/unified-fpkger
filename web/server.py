@@ -558,10 +558,13 @@ def extract_step(job, spec, pkg_path):
     else:
         os.makedirs(dest, exist_ok=True)
         job.step = f"extracting {os.path.basename(pkg_path)}"
-        argv = ["wine", PROSPERO_PUB_CMD, "img_extract", "--passcode",
+        argv = [PROSPERO_PUB_CMD, "img_extract", "--passcode",
                 spec["ps5"]["passcode"], pkg_path, dest]
+        if os.name != "nt":
+            argv.insert(0, "wine")
         start = job.line_count
-        rc = run(job, argv, cwd=dest, env_extra={"WINEDEBUG": "-all"})
+        rc = run(job, argv, cwd=dest,
+                 env_extra=None if os.name == "nt" else {"WINEDEBUG": "-all"})
         if rc != 0:
             detail = job.tail(start)
             raise JobError(f"pkg extraction failed (exit {rc})"
@@ -898,7 +901,7 @@ def ps5_spec(params):
         "sc_pkg": sc_pkg,
         "compression_level": int_in(params, "compression_level", -4, 9, 7,
                                     "compression level"),
-        "chunk_count": int_in(params, "chunk_count", 1, 255, None, "chunk count"),
+        "chunk_count": int_in(params, "chunk_count", 1, 800, None, "chunk count"),
         "playgo_languages": playgo_languages,
         "temp_dir": (resolve_path(params["ps5_temp_dir"], "PS5 temp directory",
                                   create=True) if params.get("ps5_temp_dir") else None),
@@ -1298,7 +1301,7 @@ def config():
              (("pfsdump", PFSDUMP), ("build-pkg", BUILD_PKG),
               ("backport-ps5", BACKPORT_PS5),
               ("prospero-pub-cmd", PROSPERO_PUB_CMD))}
-    tools["wine"] = shutil.which("wine") is not None
+    tools["wine"] = os.name == "nt" or shutil.which("wine") is not None
     return {"defaults": defaults, "roots": ROOTS, "tools": tools,
             "log_dir": LOG_DIR}
 

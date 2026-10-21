@@ -4,7 +4,7 @@ Dockerized ftp dumper, fpkg builder, and backport creator for PS4 & PS5 games. S
 
 ## pfsdump.py
 - Dumps games by streaming from the pfs image directly over any standard ftp server (with SELF decryption support), rather than walking the folder mount. This make dumping games with thousands of files much faster.
-- Reads playgo installtion status to identify and warn about missing chunks, and identfies which content is missng. Missing chunks are automatically skipped without error if chosen to continue dumping.
+- Reads playgo installation status to identify and warn about missing chunks, and identifies which content is missing. Missing chunks are automatically skipped without error if chosen to continue dumping.
 - Dump PS4 games as a unified app+patch without having to download duplicate files.
 - Automatically injects [ps5-entitlement-dumper](https://github.com/MangoScango/ps5-entitlement-dumper) to force all DLC to mount for dumping, and saves DLC entitlement keys.
 - Parses the entitlements database to generate stub dumps for AL type DLC, with correct entitlement keys.
@@ -20,9 +20,9 @@ Dockerized ftp dumper, fpkg builder, and backport creator for PS4 & PS5 games. S
 ## another-backporter
 - Experimental automatic backport creator. See [another-backporter](https://github.com/MangoScango/another-backporter) for more information.
 
-## Requiremnets
+## Requirements
 
-See docker-compose.yaml for docker deployment. This is the intended deployment method, but the project can run on bare metal in Windows, or any other enviornment where Wine is available.
+See docker-compose.yaml for docker deployment. This is the intended deployment method, but the project can run on bare metal in Windows, or any other environment where Wine is available.
 
 ## Special Thanks
 
