@@ -124,6 +124,7 @@
     <button role="tab" id="tab-dump" aria-controls="panel-dump" aria-selected="true">Dump</button>
     <button role="tab" id="tab-build" aria-controls="panel-build" aria-selected="false" tabindex="-1">Build</button>
     <button role="tab" id="tab-backport" aria-controls="panel-backport" aria-selected="false" tabindex="-1">Backport</button>
+    <button role="tab" id="tab-unlockers" aria-controls="panel-unlockers" aria-selected="false" tabindex="-1">Unlockers</button>
   </div>
 
   <div role="tabpanel" id="panel-dump" aria-labelledby="tab-dump">
@@ -166,6 +167,9 @@
         <p class="hint" id="scan-status" role="status" aria-live="polite"></p>
         <ul id="dumps" aria-label="Dumps found" hidden></ul>
         <p class="hint" id="scan-selected" aria-live="polite"></p>
+        <label class="check"><input type="checkbox" name="psn_al"> Grab missing AL content from PSN for the selected titles</label>
+        <p class="hint">Unlocker trees are created next to each selected dump and built
+          with it; add-ons already on disk are kept as-is.</p>
       </fieldset>
       <div data-use="t-out"></div>
       <div data-use="t-ps4" data-options="ps4"></div>
@@ -174,6 +178,27 @@
       <button class="primary" type="submit" id="build-submit" disabled>Build selected</button>
       <p class="status" role="status"></p>
     </form>
+    <details id="psn-unlockers">
+      <summary>DLC unlockers from the PSN store</summary>
+      <form data-kind="psn-unlockers">
+        <label>Title IDs (space or comma separated)
+          <input type="text" name="titles" required autocomplete="off" spellcheck="false"
+                 placeholder="PPSA01289 CUSA07211"></label>
+        <p class="hint">Both the PS4 and PS5 add-on entitlements on each title's store
+          page are built into <code>&lt;title&gt;-dlc</code> folders. No console needed —
+          but PSN has no entitlement keys or concept IDs, so the packages build with
+          zeroed keys.</p>
+        <label>Write the DLC folders into (default: the scan folder)
+          <span class="row"><input type="text" name="out_dir">
+          <button type="button" data-browse="out_dir">Browse</button></span></label>
+        <div class="grid2">
+          <label>Store region <input type="text" name="region" value="us" maxlength="2"></label>
+          <label>Store language <input type="text" name="language" value="en" maxlength="2"></label>
+        </div>
+        <button class="primary" type="submit">Fetch and build unlockers</button>
+        <p class="status" role="status"></p>
+      </form>
+    </details>
   </div>
 
   <div role="tabpanel" id="panel-backport" aria-labelledby="tab-backport" hidden>
@@ -207,6 +232,33 @@
         <label class="check"><input type="checkbox" name="unpeg_shim"> Experimental: VideoOut fakelib unpegs VRR for VRR-aware apps</label>
       </fieldset>
       <button class="primary" type="submit">Start backport</button>
+      <p class="status" role="status"></p>
+    </form>
+  </div>
+
+  <div role="tabpanel" id="panel-unlockers" aria-labelledby="tab-unlockers" hidden>
+    <form data-kind="psn-unlockers">
+      <fieldset>
+        <legend>DLC unlockers from the PSN store</legend>
+        <label>Title IDs (space or comma separated)
+          <input type="text" name="titles" required autocomplete="off" spellcheck="false"
+                 placeholder="PPSA01289 CUSA07211"></label>
+        <p class="hint">Any title IDs work — no console or dump needed. The title's
+          add-on entitlements are built into a <code>&lt;title&gt;-dlc</code> folder.
+          PSN has no entitlement keys or concept IDs, so the packages build with
+          zeroed keys.</p>
+        <label class="check"><input type="checkbox" name="siblings"> Also build the other platform's sibling title (PS4↔PS5)</label>
+        <p class="hint">A store page can carry the sibling's entitlements too — and a
+          delisted sibling's own page may be gone, making this the only way to get them.</p>
+        <label>Write the DLC folders into
+          <span class="row"><input type="text" name="out_dir" required>
+          <button type="button" data-browse="out_dir">Browse</button></span></label>
+        <div class="grid2">
+          <label>Store region <input type="text" name="region" value="us" maxlength="2"></label>
+          <label>Store language <input type="text" name="language" value="en" maxlength="2"></label>
+        </div>
+      </fieldset>
+      <button class="primary" type="submit">Fetch and build unlockers</button>
       <p class="status" role="status"></p>
     </form>
   </div>
@@ -274,6 +326,9 @@
           <option value="skip">Skip</option>
         </select></label>
     </div>
+    <label class="check"><input type="checkbox" name="psn_al"> Grab missing AL content from PSN</label>
+    <p class="hint">Fills in add-on entitlements the console has no record of, from the
+      store. What the console's own license database provides is kept as-is.</p>
     <label class="check"><input type="checkbox" name="no_decrypt"> Leave executables encrypted</label>
     <label class="check"><input type="checkbox" name="no_entitlements"> Skip reading add-on entitlement keys</label>
     <label class="check"><input type="checkbox" name="verbose"> Log every file</label>

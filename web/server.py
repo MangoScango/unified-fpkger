@@ -48,6 +48,7 @@ TOOLS = os.environ.get("FPKGER_DIR") or os.path.dirname(HERE)
 sys.path.insert(0, TOOLS)
 import pfsdump  # noqa: E402
 import playgo_state  # noqa: E402
+import psn_entitlements  # noqa: E402
 from ps_pkg_info import pkg as pkgmod  # noqa: E402
 
 sys.path.insert(0, HERE)
@@ -59,6 +60,7 @@ BUILD_PKG = os.environ.get("BUILD_PKG") or os.path.join(TOOLS, "build-pkg.py")
 BACKPORT_PS5 = (os.environ.get("BACKPORT_PS5")
                 or os.path.join(TOOLS, "another-backporter", "backport-ps5.py"))
 MAKE_FSELF = os.path.join(TOOLS, "make_fself.py")
+PSN_ENTITLEMENTS = os.path.join(TOOLS, "psn_entitlements.py")
 SC_OVERLAY = os.environ.get("SC_OVERLAY") or os.path.join(TOOLS, "sc-overlay.py")
 PROSPERO_PUB_CMD = os.path.join(TOOLS, "drakmor", "toolchain", "prospero-pub-cmd.exe")
 # another-backporter's SOURCE_FW: the firmware whose modules the fakelibs are
@@ -703,6 +705,66 @@ def dlc_split_step(job, spec):
     job.say("rescan the folder to build the base and its new add-ons")
 
 
+def psn_al_fill(job, title_id, parent_dir):
+    """Adds PSN AL unlocker trees for a title under parent_dir. Returns them.
+
+    Trees already on disk are kept. A store failure logs a warning and returns
+    [] rather than failing the job.
+    """
+    job.step = f"fetching PSN entitlements for {title_id}"
+    try:
+        return psn_entitlements.build_unlockers(
+            [title_id], parent_dir, skip_existing=True, log=job.say)
+    except (RuntimeError, OSError) as err:
+        job.say(f"warning: could not fetch PSN entitlements for {title_id}: {err}")
+        return []
+
+
+def psn_al_target(spec):
+    """(title_id, folder the <title>-dlc container belongs in) for a build."""
+    layers = spec.get("layers")
+    if layers and layers.get("addons"):
+        anchor = layers["addons"][0]
+        candidates = [layers.get("base"), *layers["addons"]]
+    elif layers:
+        anchor = layers["base"]
+        candidates = [anchor]
+    else:
+        anchor = spec["source_dir"]
+        candidates = [anchor]
+    parent = os.path.dirname(anchor)
+    # Add-ons live one level below the -dlc container the new trees belong beside.
+    if os.path.basename(parent).endswith("-dlc"):
+        parent = os.path.dirname(parent)
+    for path in candidates:
+        if not path:
+            continue
+        meta = dumpscan.read_meta(path)
+        if not meta:
+            continue
+        title_id = meta["title_id"] or dumpscan.title_id_from_content_id(
+            meta["content_id"] or "")
+        if title_id:
+            return title_id, parent
+    return None, parent
+
+
+def psn_unlockers_step(job, spec):
+    """Builds AL unlocker trees from the PSN store; see psn_entitlements.py."""
+    out_dir = spec["out_dir"]
+    os.makedirs(out_dir, exist_ok=True)
+    titles = spec["titles"]
+    job.step = f"fetching PSN entitlements for {', '.join(titles)}"
+    try:
+        created = psn_entitlements.build_unlockers(
+            titles, out_dir, region=spec["region"], language=spec["language"],
+            include_siblings=spec["siblings"], log=job.say)
+    except (RuntimeError, OSError) as err:
+        raise JobError(str(err)) from None
+    job.outputs += sorted({os.path.dirname(path) for path in created})
+    job.say("scan the output folder in the Build tab to package the unlockers")
+
+
 def backport_step(job, spec):
     """another-backporter's end-to-end run: acquire, unwrap, plan, build.
 
@@ -759,10 +821,29 @@ def execute(job):
     if job.kind == "dump":
         title, _platform = probe(job, spec["host"], spec["port"], spec["title"])
         dump_step(job, spec, title)
+        if spec.get("psn_al"):
+            psn_al_fill(job, title, spec["dump_dir"])
     elif job.kind == "build":
+        created = []
+        if spec.get("psn_al"):
+            title_id, parent = psn_al_target(spec)
+            if title_id:
+                created = psn_al_fill(job, title_id, parent)
+            else:
+                job.say("note: the source's title ID is unknown; "
+                        "skipping the PSN entitlement lookup")
+            if created and spec["platform"] == "ps4" and spec.get("layers"):
+                spec["layers"]["addons"] += created
         build_step(job, spec, spec["source_dir"], spec["platform"])
+        if created and spec["platform"] == "ps5":
+            # A typed-in key belongs to the selected dump, not the new trees.
+            sub = dict(spec, ps5={**spec["ps5"], "entitlement_key": ""})
+            for tree in created:
+                build_ps5(job, sub, tree, spec["out_dir"])
     elif job.kind == "dlc-split":
         dlc_split_step(job, spec)
+    elif job.kind == "psn-unlockers":
+        psn_unlockers_step(job, spec)
     elif job.kind == "backport":
         backport_step(job, spec)
     else:
@@ -782,6 +863,8 @@ def execute(job):
                 spec["no_patch"] = True
                 spec["patch_mode"] = "skip"
         app_dir = dump_step(job, spec, title)
+        if spec.get("psn_al"):
+            psn_al_fill(job, title, spec["dump_dir"])
         if dump_game:
             build_step(job, spec, app_dir, platform)
         # A PS4 app build finds its sibling -dlc itself. A game-less PS4 run
@@ -819,6 +902,10 @@ def dump_spec(params, spec):
         addon_mode = "skip"
     if not spec["dump_game"] and addon_mode == "skip":
         raise BadRequest("nothing to dump: enable the game or an add-on mode")
+    spec["psn_al"] = bool(params.get("psn_al"))
+    if spec["psn_al"] and addon_mode == "skip":
+        raise BadRequest("grabbing AL content from PSN needs an add-on dump "
+                         "mode other than skip")
     spec["patch_mode"] = patch_mode
     spec["addon_mode"] = addon_mode
     spec["no_patch"] = patch_mode == "skip"
@@ -1022,6 +1109,10 @@ def build_job(kind, params):
             spec["ps4"] = ps4_spec(params, with_sources=True)
         else:
             spec["ps5"] = ps5_spec(params)
+        spec["psn_al"] = bool(params.get("psn_al"))
+        if spec["psn_al"] and spec["platform"] == "ps4" and spec["ps4"]["no_dlc"]:
+            raise BadRequest("grabbing AL content from PSN conflicts with "
+                             "'Do not build DLC packages'")
         summary = (f"Build {os.path.basename(spec['source_dir'])} "
                    f"({spec['platform'].upper()})")
     elif kind == "dump-build":
@@ -1039,6 +1130,9 @@ def build_job(kind, params):
                 spec[platform] = parse()
             except BadRequest as err:
                 problems[platform] = str(err)
+        if (spec["psn_al"] and "ps4" not in problems and spec["ps4"]["no_dlc"]):
+            problems["ps4"] = ("grabbing AL content from PSN conflicts with "
+                               "'Do not build DLC packages'")
         if len(problems) == 2:
             raise BadRequest("; ".join(f"{p.upper()}: {e}" for p, e in problems.items()))
         spec["option_problems"] = problems
@@ -1052,6 +1146,31 @@ def build_job(kind, params):
         spec.update(dlc_split_spec(params))
         base = os.path.basename(spec["source"].rstrip(os.sep))
         summary = f"Split {len(spec['entries'])} DLC out of {base}"
+    elif kind == "psn-unlockers":
+        raw = re.split(r"[\s,]+", (params.get("titles") or "").strip())
+        titles = []
+        for value in raw:
+            if not value:
+                continue
+            title = value.upper()
+            if title.endswith("_00"):
+                title = title[:-3]
+            if not TITLE_RE.match(title):
+                raise BadRequest(f"not a title ID: {value}")
+            if title not in titles:
+                titles.append(title)
+        if not titles:
+            raise BadRequest("at least one title ID is required")
+        spec["titles"] = titles
+        spec["out_dir"] = resolve_path(params.get("out_dir"), "output directory",
+                                       create=True)
+        for key in ("region", "language"):
+            value = (params.get(key) or "").strip().lower() or {"region": "us", "language": "en"}[key]
+            if not re.fullmatch(r"[a-z]{2}", value):
+                raise BadRequest(f"{key} must be a two-letter code")
+            spec[key] = value
+        spec["siblings"] = bool(params.get("siblings"))
+        summary = f"PSN unlockers for {', '.join(titles)}"
     else:
         raise BadRequest(f"unknown job kind: {kind}")
     return Job(kind, spec, summary)
@@ -1161,6 +1280,9 @@ def build_jobs(params, sources):
         raise BadRequest("params must be an object")
     if not isinstance(sources, list) or not sources:
         raise BadRequest("choose at least one dump to build")
+    if params.get("psn_al") and params.get("build_no_dlc"):
+        raise BadRequest("grabbing AL content from PSN conflicts with "
+                         "'Do not build DLC packages'")
     if len(sources) > MAX_BATCH:
         raise BadRequest(f"at most {MAX_BATCH} dumps per submission")
     if len(sources) > 1:
@@ -1181,6 +1303,7 @@ def build_jobs(params, sources):
     for platform, layers, title in units:
         spec = {"source_dir": layers["base"] or layers["addons"][0],
                 "platform": platform, "out_dir": out_dir, "layers": layers,
+                "psn_al": bool(params.get("psn_al")),
                 platform: options[platform]}
         verb = "Rebuild" if layers.get("rebuild") else "Build"
         jobs.append(Job("build", spec, f"{verb} {title} ({platform.upper()})"))
@@ -1299,7 +1422,7 @@ def config():
     }
     tools = {name: os.path.exists(path) for name, path in
              (("pfsdump", PFSDUMP), ("build-pkg", BUILD_PKG),
-              ("backport-ps5", BACKPORT_PS5),
+              ("backport-ps5", BACKPORT_PS5), ("psn-entitlements", PSN_ENTITLEMENTS),
               ("prospero-pub-cmd", PROSPERO_PUB_CMD))}
     tools["wine"] = os.name == "nt" or shutil.which("wine") is not None
     return {"defaults": defaults, "roots": ROOTS, "tools": tools,
