@@ -902,7 +902,9 @@ def read_source_playgo_layout(
 ) -> SourcePlayGoLayout | None:
     """Read the layout from sce_sys/playgo-{chunk,hash-table,ficm}.dat.
 
-    Returns None when any of the three is missing or every file is in chunk 0.
+    Returns None when any of the three is missing, or when several chunks exist
+    but every file is in chunk 0: the later chunks are then empty and the
+    generated language payloads fill them.
     The ficm holds one chunk per entry of the sorted hash table.
     """
     system = root / "sce_sys"
@@ -949,7 +951,7 @@ def read_source_playgo_layout(
                     raise ValueError(f"{ficm_path}: invalid chunk id/reserved byte: {chunk_id}")
                 previous = path_hash
                 file_chunks[path_hash] = chunk_id
-    if not any(file_chunks.values()):
+    if chunk_count > 1 and not any(file_chunks.values()):
         return None
 
     # Only the chunk attributes and labels are needed, not the extent/scenario tables.
