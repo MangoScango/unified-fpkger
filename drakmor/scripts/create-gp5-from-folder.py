@@ -41,6 +41,7 @@ AC requires a 16-byte entitlement key and omits application-only param.json fiel
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -85,6 +86,8 @@ GENERATED_ROOT_DIRECTORIES = frozenset({"sce_suppl", "sce_sc", "playgo-languages
 EXCLUDED_ROOT_DIRECTORIES = {"decrypted": "host decryption artifacts"}
 RESERVED_SCE_SYS_SUFFIXES = frozenset({".dds", ".auth_info"})
 PROJECT_SUFFIXES = frozenset({".gp4", ".gp5", ".esbak"})
+EXCLUDED_PATH_PATTERNS = {"*/saved/config/*/*.ini": "runtime artifacts"}
+UNEXPECTED_FILES_SHOWN = 25
 EXCLUDED_ROOT_FILES = {
     "ampr_emu.index": "host emulator index",
     # pfsdump writes these beside the dumped content.
@@ -367,6 +370,10 @@ def collect_files(root: Path, output: Path, keep_service_paths: set[str]) -> tup
                 skipped.append(relative + " (generated GP5 scenario sidecar)")
                 continue
             normalized = relative.casefold()
+            pattern = next((p for p in EXCLUDED_PATH_PATTERNS if fnmatch.fnmatchcase(normalized, p)), None)
+            if pattern is not None:
+                skipped.append(relative + f" ({EXCLUDED_PATH_PATTERNS[pattern]})")
+                continue
             if normalized in EXCLUDED_ROOT_FILES:
                 skipped.append(relative + f" ({EXCLUDED_ROOT_FILES[normalized]})")
                 continue
@@ -1433,6 +1440,7 @@ def build_gp5(
     files_node = ET.SubElement(project, "files")
     unmapped_count = 0
     unmapped_sample: list[str] = []
+    unexpected_unmapped: list[str] = []
     placed: set[int] = set()
 
     def mapped_chunk(destination: str) -> str:
@@ -1454,6 +1462,8 @@ def build_gp5(
         unmapped_count += 1
         if len(unmapped_sample) < 5:
             unmapped_sample.append(destination)
+        if not normalized.startswith("sce_sys/"):
+            unexpected_unmapped.append(destination)
         return "0"
 
     if has_scenario:
@@ -1498,6 +1508,13 @@ def build_gp5(
         if unmapped_count:
             shown = ", ".join(unmapped_sample) + (", ..." if unmapped_count > 5 else "")
             print(f"PlayGo: {unmapped_count} file(s) not in the source map went to chunk 0: {shown}")
+        if unexpected_unmapped:
+            print(f"[Warn] PlayGo: {len(unexpected_unmapped)} file(s) outside sce_sys are not in the "
+                  "retail file map and were added to chunk 0:")
+            for path in unexpected_unmapped[:UNEXPECTED_FILES_SHOWN]:
+                print(f"  {path}")
+            if len(unexpected_unmapped) > UNEXPECTED_FILES_SHOWN:
+                print(f"  ... and {len(unexpected_unmapped) - UNEXPECTED_FILES_SHOWN} more")
         incomplete = layout.missing_by_chunk(placed)
         for chunk_id, (count, expected) in sorted(incomplete.items()):
             label, languages = layout.chunks[chunk_id]
