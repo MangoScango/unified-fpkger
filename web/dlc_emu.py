@@ -1,14 +1,21 @@
 """Split a dlc_emu-based PS5 dump into a clean base plus per-DLC add-on trees.
 
 drakmor's dlc_emu replacement modules serve DLC to a game from a dlc_emu.ini
-in the app tree: each [PSAC] section names a content_id, an entitlement_key
+in the app tree. Each [PSAC] section names a content_id, an entitlement_key
 and a mount_point (such as /app0/dlc00) whose folder inside the app tree
-holds the DLC payload. A rebuild undoes that layout: each mounted folder
-becomes its own add-on tree <content-id>-ac under the sibling <title>-dlc
-folder pfsdump also writes, with its sce_sys restored from the DLC's retail
-SC package (sc-overlay.py) and the ini's entitlement key saved as
-entitlement_key.dat. The base tree loses the DLC folders, the dlc_emu
-fakelibs and the ini itself, so a rescan sees a normal base plus add-ons.
+holds the DLC payload; each [PSAL] section names only a content_id (and maybe
+an entitlement_key), serving a license with no files at all.
+
+A rebuild undoes that layout: each PSAC mount folder becomes its own add-on
+tree <content-id>-ac under the sibling <title>-dlc folder pfsdump also writes,
+with its sce_sys restored from the DLC's retail SC package (sc-overlay.py).
+Each PSAL section becomes a metadata-only <content-id>-al tree, its metadata
+taken from the first source that works: a supplied SC package, the SC package
+the base param.json's version.xml points to (an AL listing whose content is
+really AC), or the PSN store's name and icon (psn_entitlements.py). Either way
+the ini's entitlement key is saved as entitlement_key.dat. The base tree loses
+the DLC folders, the dlc_emu fakelibs and the ini itself, so a rescan sees a
+normal base plus add-ons.
 """
 
 import os
@@ -16,6 +23,9 @@ import re
 import shutil
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import psn_entitlements  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SC_OVERLAY = os.path.join(os.path.dirname(HERE), "sc-overlay.py")
@@ -68,11 +78,12 @@ def mount_relative(mount_point):
 
 
 def read_entries(tree):
-    """The PSAC entries of a tree's dlc_emu.ini; [] when there is none.
+    """The PSAC and PSAL entries of a tree's dlc_emu.ini; [] when there is none.
 
-    Splittable entries carry files, so they need a mount_point landing inside
-    the tree; anything else (a license-only PSAC, a bad key) still shows up,
-    with its problems listed, so the caller can show rather than silently drop.
+    Splittable PSAC entries carry files, so they need a mount_point landing
+    inside the tree; anything else (a bad key, a missing folder) still shows
+    up, with its problems listed, so the caller can show rather than silently
+    drop. PSAL entries are license-only: no mount_point, no files to check.
     """
     try:
         with open(os.path.join(tree, INI_NAME), "rb") as handle:
@@ -81,13 +92,15 @@ def read_entries(tree):
         return []
     entries = []
     for section, values in parse_ini(text):
-        if section.upper() != "PSAC":
+        kind = {"PSAC": "ac", "PSAL": "al"}.get(section.upper())
+        if kind is None:
             continue
         content_id = values.get("content_id", "")
-        mount_point = values.get("mount_point", "")
+        mount_point = values.get("mount_point", "") if kind == "ac" else ""
         key = values.get("entitlement_key", "")
         entry = {
             "content_id": content_id,
+            "kind": kind,
             # dlc_emu's own default label: the content ID's final 16 chars.
             "label": (values.get("label") or values.get("entitlement_label")
                       or content_id[-16:]),
@@ -98,12 +111,13 @@ def read_entries(tree):
         }
         if len(content_id) != CONTENT_ID_LEN:
             entry["problems"].append("content_id must be 36 characters")
-        if not mount_point:
-            entry["problems"].append("no mount_point, so there is nothing to split")
-        elif entry["mount_rel"] is None:
-            entry["problems"].append("mount_point is not a folder under /app0")
-        elif not os.path.isdir(os.path.join(tree, entry["mount_rel"])):
-            entry["problems"].append(f"{entry['mount_rel']} is missing from the dump")
+        if kind == "ac":
+            if not mount_point:
+                entry["problems"].append("no mount_point, so there is nothing to split")
+            elif entry["mount_rel"] is None:
+                entry["problems"].append("mount_point is not a folder under /app0")
+            elif not os.path.isdir(os.path.join(tree, entry["mount_rel"])):
+                entry["problems"].append(f"{entry['mount_rel']} is missing from the dump")
         if key and not entry["entitlement_key"]:
             entry["problems"].append("entitlement_key is not 32 hex digits")
         entries.append(entry)
@@ -131,33 +145,97 @@ def clean_base(tree, dlc_root, log):
         log(f"moved {INI_NAME} to {kept}")
 
 
-def split(tree, title_id, entries, overlay=None, log=print):
-    """Move each entry's mount folder into a sibling -dlc tree and restore sce_sys.
+def al_metadata(tree, title_id, entry, dest, cache, overlay, log):
+    """Write an AL entry's metadata into dest's sce_sys.
 
-    entries are read_entries() dicts narrowed to the ones to split, each with
-    its SC package (path or URL) in "sc_pkg". overlay(sc_pkg, ac_dir) defaults
+    AL entries ship no files, so the metadata comes from the first source that
+    works: a caller-supplied SC package, the SC package the base param.json's
+    version.xml links through its ac_tag manifests (an AL listing whose
+    content is really AC), or the PSN store's name and icon. cache carries the
+    version.xml map and the store page across a split's entries.
+    """
+    content_id = entry["content_id"]
+    sc_pkg = entry.get("sc_pkg") or ""
+    if sc_pkg:
+        log(f"{content_id}: restoring sce_sys from the supplied SC package")
+        overlay(sc_pkg, dest)
+        return
+    if "manifests" not in cache:
+        manifests = {}
+        uri = psn_entitlements.version_file_uri(
+            os.path.join(tree, "sce_sys", "param.json"))
+        if uri:
+            try:
+                manifests = psn_entitlements.fetch_ac_manifests(uri)
+            except RuntimeError as err:
+                log(f"warning: {err}")
+        cache["manifests"] = manifests
+    manifest = cache["manifests"].get(content_id)
+    if manifest:
+        try:
+            url = psn_entitlements.sc_pkg_url(manifest)
+        except RuntimeError as err:
+            log(f"warning: {err}")
+        else:
+            log(f"{content_id}: restoring sce_sys from the version.xml SC package")
+            overlay(url, dest)
+            return
+    if "store" not in cache:
+        try:
+            cache["store"] = {row[0]: row
+                              for row in psn_entitlements.fetch_addons(title_id)}
+        except RuntimeError as err:
+            log(f"warning: {err}")
+            cache["store"] = {}
+    found = cache["store"].get(content_id)
+    if found:
+        _cid, title, icon_url, store_title_id = found
+        log(f"{content_id}: metadata from the PSN store ({title})")
+        try:
+            psn_entitlements.write_unlocker(dest, content_id, store_title_id,
+                                            title, icon_url, log)
+        except RuntimeError as err:
+            raise SplitError(str(err)) from None
+        return
+    raise SplitError(
+        f"{content_id}: no metadata source worked (no SC package given, not "
+        "in the base's version.xml, not on the PSN store)")
+
+
+def split(tree, title_id, entries, overlay=None, log=print):
+    """Move/create each entry's add-on tree in a sibling -dlc folder.
+
+    entries are read_entries() dicts narrowed to the ones to split. PSAC
+    entries move their mount folder into <content-id>-ac; PSAL entries create
+    a metadata-only <content-id>-al (see al_metadata). Either way "sc_pkg"
+    (path or URL) is overlaid when given, with overlay(sc_pkg, dir) defaulting
     to running sc-overlay.py; the web server passes one that streams into the
     job log. Returns the new add-on trees.
     """
     overlay = overlay or overlay_default
     parent = os.path.dirname(tree.rstrip(os.sep))
     dlc_root = os.path.join(parent, f"{title_id}-dlc")
+    cache = {}
     built = []
     for entry in entries:
-        src = os.path.join(tree, entry["mount_rel"])
-        dest = os.path.join(dlc_root, entry["content_id"] + "-ac")
+        dest = os.path.join(dlc_root, entry["content_id"] + "-" + entry["kind"])
         if os.path.exists(dest):
             raise SplitError(f"{dest} already exists; move it away or finish it by hand")
-        if not os.path.isdir(src):
-            raise SplitError(f"the mount folder is missing: {src}")
         os.makedirs(dlc_root, exist_ok=True)
-        log(f"moving {src} -> {dest}")
-        try:
-            os.rename(src, dest)
-        except OSError:  # across filesystems
-            shutil.move(src, dest)
-        os.makedirs(os.path.join(dest, "sce_sys"), exist_ok=True)
-        overlay(entry["sc_pkg"], dest)
+        if entry["kind"] == "al":
+            os.makedirs(os.path.join(dest, "sce_sys"), exist_ok=True)
+            al_metadata(tree, title_id, entry, dest, cache, overlay, log)
+        else:
+            src = os.path.join(tree, entry["mount_rel"])
+            if not os.path.isdir(src):
+                raise SplitError(f"the mount folder is missing: {src}")
+            log(f"moving {src} -> {dest}")
+            try:
+                os.rename(src, dest)
+            except OSError:  # across filesystems
+                shutil.move(src, dest)
+            os.makedirs(os.path.join(dest, "sce_sys"), exist_ok=True)
+            overlay(entry["sc_pkg"], dest)
         key = entry.get("entitlement_key")
         if key:
             with open(os.path.join(dest, "entitlement_key.dat"), "wb") as handle:

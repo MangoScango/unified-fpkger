@@ -572,12 +572,14 @@ function layerControls(u, c) {
 
 // A dlc_emu dump ships its DLC inside the app folder; this panel splits each
 // dlc_emu.ini entry into a real add-on tree, one row per DLC with its own SC
-// package box.
+// package box. PSAL rows are license-only: no files to move, and their
+// metadata comes from PSN when no SC package is given.
 function dlcSplitPanel(u) {
   const entries = u.base?.dlc_emu || [];
   if (!entries.length) return null;
   const status = el("span", {className: "hint"});
   const rows = entries.map(e => {
+    const al = e.kind === "al";
     const box = el("input", {type: "checkbox", checked: !e.problems.length,
                              disabled: !!e.problems.length});
     const sc = el("input", {type: "text", id: "dlcsc-" + e.content_id,
@@ -591,11 +593,13 @@ function dlcSplitPanel(u) {
     const node = el("div", {className: "dlc-entry"},
       el("label", {className: "check"}, box,
         el("span", {}, el("b", {textContent: e.label || e.content_id}),
+           al ? tag("AL", "rebuild") : null,
            e.mount_point ? el("span", {className: "dump-id",
                                        textContent: " · " + e.mount_point}) : null)),
       ...e.problems.map(p => el("p", {className: "hint warn", textContent: p})),
       e.problems.length ? null : el("div", {className: "grid2"},
-        el("label", {}, "SC package (URL or local .pkg)",
+        el("label", {}, al ? "SC package (optional — empty: metadata from PSN)"
+                           : "SC package (URL or local .pkg)",
           el("span", {className: "row"}, sc, browse)),
         el("label", {}, "Entitlement key", key)));
     return {e, box, sc, key, node};

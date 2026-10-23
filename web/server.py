@@ -1001,11 +1001,12 @@ def ps5_spec(params):
 
 
 def dlc_split_spec(params):
-    """A dlc_emu dump plus, per PSAC entry, the SC package and key to split it with.
+    """A dlc_emu dump plus, per entry, the SC package and key to split it with.
 
     The ini is re-read here and the page's entries are matched against it by
     content ID: only the SC package and entitlement key are taken from the
-    submission.
+    submission. PSAL (license-only) entries may omit the SC package; their
+    metadata is resolved from PSN at job time.
     """
     src = resolve_path(params.get("source"), "dlc_emu dump")
     meta = dumpscan.read_meta(src)
@@ -1015,7 +1016,7 @@ def dlc_split_spec(params):
         raise BadRequest(f"the dump's title ID is unknown: {src}")
     entries = dlc_emu.read_entries(src)
     if not entries:
-        raise BadRequest(f"{src} has no dlc_emu.ini with PSAC entries")
+        raise BadRequest(f"{src} has no dlc_emu.ini with PSAC or PSAL entries")
     choices = params.get("dlc")
     if not isinstance(choices, dict):
         raise BadRequest("dlc must be an object keyed by content ID")
@@ -1034,7 +1035,7 @@ def dlc_split_spec(params):
         if entry["problems"]:
             raise BadRequest(f"{name}: " + "; ".join(entry["problems"]))
         sc_pkg = sc_pkg_checked(choice.get("sc_pkg"), f"SC package for {name}")
-        if not sc_pkg:
+        if not sc_pkg and entry["kind"] == "ac":
             raise BadRequest(f"{name}: the SC package is required "
                              "(prosperopatches has them; match the DLC's version)")
         key = (choice.get("entitlement_key") or "").strip()
