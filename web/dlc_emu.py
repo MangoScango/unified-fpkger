@@ -12,10 +12,12 @@ with its sce_sys restored from the DLC's retail SC package (sc-overlay.py).
 Each PSAL section becomes a metadata-only <content-id>-al tree, its metadata
 taken from the first source that works: a supplied SC package, the SC package
 the base param.json's version.xml points to (an AL listing whose content is
-really AC), or the PSN store's name and icon (psn_entitlements.py). Either way
-the ini's entitlement key is saved as entitlement_key.dat. The base tree loses
-the DLC folders, the dlc_emu fakelibs and the ini itself, so a rescan sees a
-normal base plus add-ons.
+really AC), or the PSN store's name and icon (psn_entitlements.py), queried in
+the region the content ID's prefix belongs to. Entitlements no store carries
+still get a bare unlocker named after their ini label. Either way the ini's
+entitlement key is saved as entitlement_key.dat. The base tree loses the DLC
+folders, the dlc_emu fakelibs and the ini itself, so a rescan sees a normal
+base plus add-ons.
 """
 
 import os
@@ -151,8 +153,11 @@ def al_metadata(tree, title_id, entry, dest, cache, overlay, log):
     AL entries ship no files, so the metadata comes from the first source that
     works: a caller-supplied SC package, the SC package the base param.json's
     version.xml links through its ac_tag manifests (an AL listing whose
-    content is really AC), or the PSN store's name and icon. cache carries the
-    version.xml map and the store page across a split's entries.
+    content is really AC), or the PSN store's name and icon. Entitlements that
+    were never sold (pre-order and edition bonuses) are in no store catalog;
+    those still get an unlocker, named after the ini label, just without a
+    store title or icon. cache carries the version.xml map and the store
+    pages (keyed by region) across a split's entries.
     """
     content_id = entry["content_id"]
     sc_pkg = entry.get("sc_pkg") or ""
@@ -180,14 +185,17 @@ def al_metadata(tree, title_id, entry, dest, cache, overlay, log):
             log(f"{content_id}: restoring sce_sys from the version.xml SC package")
             overlay(url, dest)
             return
-    if "store" not in cache:
+    store = cache.setdefault("store", {})
+    region, language = psn_entitlements.region_for_content_id(content_id)
+    if region not in store:
         try:
-            cache["store"] = {row[0]: row
-                              for row in psn_entitlements.fetch_addons(title_id)}
+            store[region] = {row[0]: row for row in
+                             psn_entitlements.fetch_addons(title_id, region,
+                                                           language)}
         except RuntimeError as err:
             log(f"warning: {err}")
-            cache["store"] = {}
-    found = cache["store"].get(content_id)
+            store[region] = {}
+    found = store[region].get(content_id)
     if found:
         _cid, title, icon_url, store_title_id = found
         log(f"{content_id}: metadata from the PSN store ({title})")
@@ -197,9 +205,12 @@ def al_metadata(tree, title_id, entry, dest, cache, overlay, log):
         except RuntimeError as err:
             raise SplitError(str(err)) from None
         return
-    raise SplitError(
-        f"{content_id}: no metadata source worked (no SC package given, not "
-        "in the base's version.xml, not on the PSN store)")
+    log(f"{content_id}: no metadata found; writing a bare unlocker")
+    try:
+        psn_entitlements.write_unlocker(dest, content_id, title_id,
+                                        entry["label"], "", log)
+    except RuntimeError as err:
+        raise SplitError(str(err)) from None
 
 
 def split(tree, title_id, entries, overlay=None, log=print):

@@ -32,6 +32,16 @@ PAGE_SIZE = 255
 
 TITLE_ID = re.compile(r"^[A-Z]{4}[0-9]{5}$")
 
+# Content ID prefix -> store region/language. UP is US, EP Europe, JP Japan,
+# HP Asia; anything unrecognized defaults to the US store.
+CONTENT_ID_REGIONS = {"UP": ("us", "en"), "EP": ("gb", "en"),
+                      "JP": ("jp", "ja"), "HP": ("hk", "en")}
+
+
+def region_for_content_id(content_id):
+    """The store region/language a content ID's prefix belongs to."""
+    return CONTENT_ID_REGIONS.get(content_id[:2], ("us", "en"))
+
 
 def _open(request, timeout=30):
     """urlopen that skips certificate verification on playstation.net hosts.
