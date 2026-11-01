@@ -9,14 +9,14 @@ the publisher to regenerate unless explicitly retained. Extracted `sce_suppl` an
 The root decrypted/ tree is omitted because it contains host-side decryption copies.
 Actual input metadata such as param.json, presentation media,
 trophy/UCP and game payloads remain included; extracted license.info/license.dat files are
-excluded by default. A sce_sys/uds UCP container that is missing or fails validation
-against the NPWR ids in npbind.dat is replaced by a generated stub, so the package keeps
-a well-formed (if empty) trophy/UDS data set.
+excluded by default. Missing or unreadable UDS UCP containers are replaced with empty,
+well-formed stubs derived from NPWR ids in sce_sys/uds/npbind.dat. A stale UCP digest is repaired
+without discarding its member data.
 
 The source tree is never modified. A normalized param.json with
-applicationDrmType=standard, repaired SELF headers, PNG files recovered from
-sce_sys/*.dds when a suitable PNG is missing, and the UCP stubs are written below
-the .gp5-assets directory beside the generated GP5. SDK presentation PNGs use RGB for icon0,
+applicationDrmType=standard, repaired SELF headers, and PNG files recovered from
+sce_sys/*.dds when a suitable PNG is missing are written below a .gp5-assets
+directory beside the generated GP5. SDK presentation PNGs use RGB for icon0,
 pic0, and pic1, and RGBA for pic2; only pic2 preserves the alpha channel.
 For PSAL (`--volume al`), the project instead contains only its normalized metadata
 (param.json and a validated 512x512 RGB icon0.png) and requires an entitlement key.
@@ -28,9 +28,8 @@ Otherwise game files remain in chunk zero; each language declared by playgo-scen
 gets a small generated, uncompressed payload. Languages share a chunk when the configured
 count is too small to assign each a separate chunk. Remaining chunks are empty placeholders.
 Source scenarios and localized presentation strings are retained. When the source
-playgo-chunk.dat has valid scenario tables, each scenario keeps its label, chunk list
-and initial chunk count; otherwise every scenario contains all configured chunks and
-marks all of them as initial/required.
+descriptor has valid scenario tables, the generated GP5 keeps their labels, ordered
+chunk lists and initial chunk counts; otherwise each scenario includes all chunks.
 
 With --build, APP and AC projects produce a new directory containing the GP5, a verified copy of
 the patched SDK runtime, build logs, the directly generated LibProsperoPkg-compatible
@@ -87,7 +86,6 @@ EXCLUDED_ROOT_DIRECTORIES = {"decrypted": "host decryption artifacts"}
 RESERVED_SCE_SYS_SUFFIXES = frozenset({".dds", ".auth_info"})
 PROJECT_SUFFIXES = frozenset({".gp4", ".gp5", ".esbak"})
 EXCLUDED_PATH_PATTERNS = {"*/saved/config/*/*.ini": "runtime artifacts"}
-UNEXPECTED_FILES_SHOWN = 25
 EXCLUDED_ROOT_FILES = {
     "ampr_emu.index": "host emulator index",
     # pfsdump writes these beside the dumped content.
@@ -112,6 +110,7 @@ PLAYGO_LANGUAGES = (
 # Runtime API limit in the supported Prospero SDK (SCE_PLAYGO_MAX_SCENARIO).
 MAX_PLAYGO_SCENARIO_COUNT = 5
 ALL_LANGUAGES_MASK = (1 << 64) - 1
+UNEXPECTED_FILES_SHOWN = 25
 VOLUME_TYPES = {
     "app": "prospero_app",
     "patch": "prospero_patch",
@@ -121,8 +120,8 @@ VOLUME_TYPES = {
 DEFAULT_PUBLISHING_TOOLS = Path(
     r"C:\SCE\Prospero\Tools\Publishing Tools_2.7.9-plaintext-custom-keystone-v3\bin")
 SUPPORTED_PATCH_PROFILES = frozenset({
-    "sdk279-plaintext-direct-v4",
-    "sdk313-plaintext-direct-v4",
+    "sdk279-plaintext-direct-v6",
+    "sdk313-plaintext-direct-v6",
 })
 CONTENT_ID_PATTERN = re.compile(
     r"^[A-Z]{2}[0-9]{4}-[A-Z]{4}[0-9]{5}_[0-9]{2}-[A-Z0-9]{16}$")
@@ -137,6 +136,7 @@ LARGE_PACKAGE_LV1_LIMIT = 195_878_191_104
 LARGE_PACKAGE_LV2_LIMIT = 260_436_918_272
 ADDCONT_MOUNT_LV2_LIMIT = 97_945_387_008
 LARGE_PACKAGE_LV2_FILE_LIMIT = 500_000  # patched Publishing Tools profiles
+
 
 # sce_sys/uds UCP containers: 0x60-byte header, one 0x40-byte entry per member,
 # member data 16-byte aligned. Each NPWR id in npbind.dat maps to uds<NN>.ucp
@@ -241,6 +241,41 @@ def is_complete_sceversion(records: bytes) -> bool:
         offset += record_size
         count += 1
     return count != 0
+
+
+def executable_sdk_version(path: Path) -> int | None:
+    """Read the highest package SDK major/minor from a SELF .sceversion trailer."""
+    size = path.stat().st_size
+    if size < 0x20:
+        return None
+    with path.open("rb") as stream:
+        header = stream.read(0x20)
+        if header[:4] not in {PROSPERO_SELF_MAGIC, LEGACY_SELF_MAGIC}:
+            return None
+        boundary = struct.unpack_from("<Q", header, 0x10)[0]
+        if not 0x20 <= boundary <= size:
+            return None
+        start = max(0, boundary - 0x0f)
+        if not 0 < size - start <= MAX_SELF_METADATA_SIZE:
+            return None
+        stream.seek(start)
+        tail = stream.read()
+    local_boundary = boundary - start
+    for backtrack in range(min(0x0f, local_boundary) + 1):
+        records = tail[local_boundary - backtrack:]
+        if not is_complete_sceversion(records):
+            continue
+        versions = []
+        offset = 0
+        while offset < len(records):
+            payload_size = struct.unpack_from("<H", records, offset + 2)[0]
+            name_size = payload_size - 17
+            version_offset = offset + 5 + name_size
+            versions.append(int.from_bytes(
+                records[version_offset:version_offset + 8], "big"))
+            offset += payload_size + 4
+        return max(versions) & 0xFFFF000000000000
+    return None
 
 
 def self_repair_plan(path: Path) -> tuple[bool, int, int] | None:
@@ -370,7 +405,8 @@ def collect_files(root: Path, output: Path, keep_service_paths: set[str]) -> tup
                 skipped.append(relative + " (generated GP5 scenario sidecar)")
                 continue
             normalized = relative.casefold()
-            pattern = next((p for p in EXCLUDED_PATH_PATTERNS if fnmatch.fnmatchcase(normalized, p)), None)
+            pattern = next((pattern for pattern in EXCLUDED_PATH_PATTERNS
+                            if fnmatch.fnmatchcase(normalized, pattern)), None)
             if pattern is not None:
                 skipped.append(relative + f" ({EXCLUDED_PATH_PATTERNS[pattern]})")
                 continue
@@ -447,9 +483,26 @@ def normalize_entitlement_key(volume: str, value: str | None) -> str | None:
     return value.upper()
 
 
+def parse_sdk_version_override(value: str | None) -> int | None:
+    if value is None:
+        return None
+    if re.fullmatch(r"(?:[1-9][0-9]{0,2})(?:\.00)?", value):
+        major = int(value.split(".", 1)[0])
+        if major > 255:
+            raise ValueError("SDK version major must be 1..255")
+        return major << 56
+    if re.fullmatch(r"0x[0-9a-fA-F]{16}", value):
+        package_version = int(value, 16) & 0xFFFF000000000000
+        if package_version:
+            return package_version
+    raise ValueError("SDK version must be 1..255, MAJOR.00, or 0x plus 16 hex digits")
+
+
 def write_standard_param(
     source: Path, destination: Path, volume: str,
     size_selection: tuple[int, int | None, int, int] | None = None,
+    inferred_sdk_version: int | None = None,
+    sdk_version_override: int | None = None,
 ) -> None:
     try:
         value = json.loads(source.read_text(encoding="utf-8-sig"))
@@ -457,6 +510,23 @@ def write_standard_param(
         raise ValueError(f"cannot parse {source}: {error}") from error
     if not isinstance(value, dict):
         raise ValueError(f"{source} must contain a JSON object")
+    effective_sdk_version = (sdk_version_override if sdk_version_override is not None
+                             else inferred_sdk_version if volume == "app" else None)
+    if effective_sdk_version:
+        def parse_version(name: str) -> int:
+            raw = value.get(name, "0x0000000000000000")
+            if not isinstance(raw, str) or re.fullmatch(r"0x[0-9a-fA-F]{16}", raw) is None:
+                raise ValueError(f"{source}: invalid {name}: {raw!r}")
+            return int(raw, 16)
+
+        current_sdk = (parse_version("sdkVersion") if sdk_version_override is None
+                       else sdk_version_override)
+        if sdk_version_override is not None or current_sdk == 0:
+            current_sdk = effective_sdk_version
+            value["sdkVersion"] = f"0x{current_sdk:016X}"
+        required = parse_version("requiredSystemSoftwareVersion")
+        if required < current_sdk:
+            value["requiredSystemSoftwareVersion"] = f"0x{current_sdk:016X}"
     if volume == "al":
         missing = [key for key in PSAL_PARAM_KEYS if key not in value]
         if missing:
@@ -660,20 +730,25 @@ def unpack_ucp(data: bytes) -> list[tuple[str, bytes]]:
     count, entry_size = struct.unpack_from(">II", data, 0x10)
     if magic != UCP_MAGIC:
         raise ValueError(f"bad magic {magic:#010x}")
-    if version == 0:
-        raise ValueError("version is 0")
+    if version != 1:
+        raise ValueError(f"unsupported version {version}")
     if size != len(data):
         raise ValueError(f"size field {size} != file size {len(data)}")
     if entry_size != UCP_ENTRY:
         raise ValueError(f"entry size {entry_size:#x}, expected {UCP_ENTRY:#x}")
-    if UCP_HEADER + count * UCP_ENTRY > len(data):
+    table_end = UCP_HEADER + count * UCP_ENTRY
+    if table_end > len(data):
         raise ValueError(f"{count} entries do not fit in the file")
     members = []
+    seen: set[str] = set()
     for i in range(count):
         entry = UCP_HEADER + i * UCP_ENTRY
         name = data[entry:entry + 0x20].split(b"\0")[0].decode("latin1")
+        if not name or name in seen or "/" in name or "\\" in name or name in {".", ".."}:
+            raise ValueError(f"member {i} has an empty, duplicate or unsafe name: {name!r}")
+        seen.add(name)
         off, length = struct.unpack_from(">QQ", data, entry + 0x20)
-        if off > len(data) or off + length > len(data):
+        if off < table_end or off > len(data) or length > len(data) - off:
             raise ValueError(f"member {name!r} runs past the end of the file")
         members.append((name, data[off:off + length]))
     return members
@@ -708,25 +783,36 @@ def ucp_problems(data: bytes, npwr: str) -> list[str]:
 def read_npbind_ids(path: Path) -> list[str]:
     """NPWR ids in npbind.dat, in index order."""
     data = path.read_bytes()
-    if len(data) < 0x80 or struct.unpack_from(">I", data, 0)[0] != NPBIND_MAGIC:
+    if len(data) != 0x214 or struct.unpack_from(">I", data, 0)[0] != NPBIND_MAGIC:
         raise ValueError(f"{path}: not an npbind.dat")
+    if (struct.unpack_from(">I", data, 4)[0] != 1 or
+            struct.unpack_from(">I", data, 0x0C)[0] != len(data) or
+            hashlib.sha1(data[:0x200]).digest() != data[0x200:0x214]):
+        raise ValueError(f"{path}: invalid version, size or SHA-1 authentication")
     entry_size, = struct.unpack_from(">I", data, 0x14)
     count, = struct.unpack_from(">I", data, 0x1C)
-    if entry_size == 0 or 0x80 + count * entry_size > len(data):
+    if entry_size < 4 or 0x80 + count * entry_size > 0x200:
         raise ValueError(f"{path}: {count} entries of {entry_size:#x} bytes do not fit")
     ids = []
     for i in range(count):
         base = 0x80 + i * entry_size
         at, end = base, base + entry_size
+        found = False
         while at + 4 <= end:
             tag, length = struct.unpack_from(">HH", data, at)
             if tag == 0:
                 break
+            if at + 4 + length > end:
+                raise ValueError(f"{path}: entry {i} has a truncated TLV record")
             if tag == 0x10:
-                ids.append(data[at + 4:at + 4 + length].split(b"\0")[0].decode("ascii"))
+                npwr = data[at + 4:at + 4 + length].split(b"\0")[0].decode("ascii")
+                if not re.fullmatch(r"NPWR[0-9]{5}_[0-9]{2}", npwr):
+                    raise ValueError(f"{path}: entry {i} has an invalid NPWR id: {npwr!r}")
+                ids.append(npwr)
+                found = True
                 break
             at += 4 + length
-        else:
+        if not found:
             raise ValueError(f"{path}: entry {i} has no NPWR id")
     return ids
 
@@ -734,21 +820,19 @@ def read_npbind_ids(path: Path) -> list[str]:
 def prepare_ucp_stubs(
     root: Path, files: list[Path], generated_system: Path,
 ) -> tuple[dict[Path, Path], list[tuple[str, Path]]]:
-    """Generated stubs for the source's missing or invalid sce_sys/uds UCPs.
+    """Generated repairs or stubs for missing or invalid sce_sys/uds UCPs.
 
-    Returns (replacements, additions): replacements maps an invalid source UCP
-    to the stub written for it; additions holds (dst_path, stub) pairs for
-    UCPs the source lacks entirely. The source tree is never modified.
+    Returns (replacements, additions): replacements maps a source UCP to its
+    repaired file or stub; additions holds (dst_path, stub) pairs for missing
+    UCPs. The source tree is never modified.
     """
     system = root / "sce_sys"
-    npbind = next((candidate for candidate in
-                   (system / "uds" / "npbind.dat", system / "trophy2" / "npbind.dat")
-                   if candidate.is_file()), None)
-    if npbind is None:
+    npbind = system / "uds" / "npbind.dat"
+    if not npbind.is_file():
         return {}, []
     try:
         ids = read_npbind_ids(npbind)
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, UnicodeDecodeError) as error:
         print(f"[Warn] {error}; UCP containers are packaged as they are")
         return {}, []
     sources = {relative_posix(root, file).casefold(): file for file in files}
@@ -760,8 +844,20 @@ def prepare_ucp_stubs(
         if source is None:
             reason = "missing"
         else:
-            problems = ucp_problems(source.read_bytes(), npwr)
+            original = source.read_bytes()
+            problems = ucp_problems(original, npwr)
             if not problems:
+                continue
+            if len(problems) == 1 and problems[0].startswith("digest is "):
+                repaired = bytearray(original)
+                repaired[0x1C:0x30] = ucp_digest(original)
+                destination = generated_system / "uds" / f"uds{index:02d}.ucp"
+                if destination.exists() or destination.is_symlink():
+                    raise FileExistsError(f"generated UCP repair already exists: {destination}")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(repaired)
+                replacements[source] = destination
+                print(f"UCP {relative} has a stale digest; repaired the digest without changing members")
                 continue
             reason = "invalid: " + "; ".join(problems)
         documents = ucp_member_documents(npwr)
@@ -772,7 +868,8 @@ def prepare_ucp_stubs(
             raise FileExistsError(f"generated UCP stub already exists: {destination}")
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(stub)
-        print(f"UCP {relative} is {reason}; wrote a stub for {npwr} ({len(stub)} bytes)")
+        print(f"[Warn] UCP {relative} is {reason}; GP5 uses an empty stub for {npwr} "
+              f"({len(stub)} bytes); source is unchanged")
         if source is not None:
             replacements[source] = destination
         else:
@@ -869,7 +966,6 @@ class SourcePlayGoLayout:
         self.chunks = chunks
         self.file_chunks = file_chunks
         self.seed, self.key = seed, key
-        # Per scenario id: (label, initial chunk count, ordered chunk ids).
         self.scenarios = scenarios
 
     @property
@@ -903,8 +999,7 @@ def read_source_playgo_layout(
     """Read the layout from sce_sys/playgo-{chunk,hash-table,ficm}.dat.
 
     Returns None when any of the three is missing, or when several chunks exist
-    but every file is in chunk 0: the later chunks are then empty and the
-    generated language payloads fill them.
+    but every file is in chunk 0. A single-chunk source still has a real layout.
     The ficm holds one chunk per entry of the sorted hash table.
     """
     system = root / "sce_sys"
@@ -998,7 +1093,6 @@ def read_source_playgo_layout(
             raise ValueError(f"{chunk_path}: chunk {chunk_id} label contains invalid XML characters")
         languages = [language for bit, language in enumerate(PLAYGO_LANGUAGES)
                      if mask >> (63 - bit) & 1]
-        # Retail leaves unused chunks fully blank: no label, no languages.
         known_mask = sum(1 << (63 - bit) for bit in range(len(PLAYGO_LANGUAGES)))
         if mask & ~known_mask and mask != ALL_LANGUAGES_MASK:
             print(f"[Warn] PlayGo chunk {chunk_id} in {chunk_path} sets unrecognized language bits "
@@ -1012,12 +1106,7 @@ def read_source_playgo_layout(
 def read_source_scenarios(
     chunk_path: Path, chunk_count: int,
 ) -> list[tuple[str, int, list[int]]] | None:
-    """Read each scenario's label, initial chunk count and ordered chunk list.
-
-    Sections 4, 5 and 6 of playgo-chunk.dat hold the scenario table (0x20 bytes per
-    scenario), the u16 chunk lists, and the labels. Returns None, after saying why,
-    when they are inconsistent; the caller then falls back to all-chunks scenarios.
-    """
+    """Read source scenario labels, initial counts and ordered chunk lists."""
     data = chunk_path.read_bytes()
     scenario_count = struct.unpack_from("<H", data, 0x0e)[0]
     table_at, table_size = struct.unpack_from("<II", data, 0xe0)
@@ -1025,6 +1114,7 @@ def read_source_scenarios(
     names_at, names_size = struct.unpack_from("<II", data, 0xf0)
     try:
         if (table_size != scenario_count * 0x20 or
+                min(table_at, lists_at, names_at) < 0x100 or
                 max(table_at + table_size, lists_at + lists_size, names_at + names_size) > len(data)):
             raise ValueError("scenario sections do not match the header")
         lists = data[lists_at:lists_at + lists_size]
@@ -1041,6 +1131,10 @@ def read_source_scenarios(
             if any(chunk_id >= chunk_count for chunk_id in ids) or len(set(ids)) != total:
                 raise ValueError(f"scenario {index} has an invalid chunk list")
             label = names[name_at:names.index(b"\0", name_at)].decode("utf-8")
+            if any((ord(char) < 0x20 and char not in "\t\n\r") or
+                   0xd800 <= ord(char) <= 0xdfff or ord(char) in {0xfffe, 0xffff}
+                   for char in label):
+                raise ValueError(f"scenario {index} label contains invalid XML characters")
             scenarios.append((label, initial, ids))
     except (ValueError, struct.error, UnicodeDecodeError) as error:
         print(f"[Warn] PlayGo: ignoring the scenario tables in {chunk_path}: {error}; "
@@ -1050,7 +1144,7 @@ def read_source_scenarios(
 
 
 def chunk_ranges(ids: list[int]) -> str:
-    """Format ids in order, collapsing ascending runs of consecutive ids to 'a-b'."""
+    """Collapse ascending runs of chunk IDs while keeping source order."""
     parts: list[str] = []
     start = previous = None
     for chunk_id in ids:
@@ -1226,9 +1320,12 @@ def build_gp5(
     auto_size_profile: str | None = None,
     chunk_count: int = DEFAULT_PLAYGO_CHUNK_COUNT,
     playgo_languages: str | None = None,
+    sdk_version_override: int | None = None,
 ) -> tuple[int, list[str]]:
     if len(passcode) != 32:
         raise ValueError("passcode must contain exactly 32 characters")
+    if volume != "app" and sdk_version_override is not None:
+        raise ValueError("--sdk-version supports APP volumes only")
     if not root.is_dir():
         raise NotADirectoryError(root)
     if output.exists() or output.is_symlink():
@@ -1336,7 +1433,6 @@ def build_gp5(
         needed_conversions, generated_system, converter_path)
     executable_replacements = ({} if is_psal else
                                prepare_executable_inputs(root, files, generated_root))
-    # Trophy/UDS metadata is application-level; add-on volumes skip it.
     ucp_replacements: dict[Path, Path] = {}
     generated_ucps: list[tuple[str, Path]] = []
     if volume in {"app", "patch"}:
@@ -1377,7 +1473,13 @@ def build_gp5(
               f"conservative estimate: {estimated} bytes; "
               f"addcontMountLevel={selected_mount_level}; "
               f"attributePub={attribute}{detail}")
-    write_standard_param(param, generated_param, volume, size_selection)
+    eboot = next((file for file in files
+                  if relative_posix(root, file).casefold() == "eboot.bin"), None)
+    inferred_sdk = (executable_sdk_version(executable_replacements.get(eboot, eboot))
+                    if eboot else None)
+    write_standard_param(
+        param, generated_param, volume, size_selection, inferred_sdk,
+        sdk_version_override)
 
     project = ET.Element("psproject", {"fmt": "gp5"})
     volume_node = ET.SubElement(project, "volume")
@@ -1405,8 +1507,7 @@ def build_gp5(
                 assigned_languages = [language for index, language in
                                       enumerate(chunk_languages, start=1)
                                       if min(index, chunk_count - 1) == chunk_id]
-            placeholder = layout is not None and not label and not assigned_languages
-            if placeholder:
+            if layout is not None and not label and not assigned_languages:
                 continue
             attributes = {
                 "id": str(chunk_id),
@@ -1638,6 +1739,7 @@ def build_bundle(
     chunk_count: int = DEFAULT_PLAYGO_CHUNK_COUNT,
     entitlement_key: str | None = None,
     playgo_languages: str | None = None,
+    sdk_version_override: int | None = None,
 ) -> tuple[Path, int, list[str]]:
     if volume not in {"app", "ac"}:
         raise ValueError("--build supports debug APP/AC nwonly profiles")
@@ -1665,7 +1767,8 @@ def build_bundle(
         root, project_path, volume, passcode, absolute_paths=False,
         keep_service_paths=keep_service_paths, converter_path=converter_path,
         entitlement_key=entitlement_key, auto_size_profile=auto_size_profile,
-        chunk_count=chunk_count, playgo_languages=playgo_languages)
+        chunk_count=chunk_count, playgo_languages=playgo_languages,
+        sdk_version_override=sdk_version_override)
     chunk_info = ET.parse(project_path).getroot().find("volume/chunk_info")
     chunk_count = int(chunk_info.attrib["chunk_count"]) if chunk_info is not None else 0
 
@@ -1696,12 +1799,14 @@ def build_bundle(
         for path in output_files if path.is_file()
     }
     result = {
-        "profile": toolchain_profile.replace("-v4", "-bundle-v4"),
+        "profile": toolchain_profile.replace("-v6", "-bundle-v6"),
         "toolchain_profile": toolchain_profile,
         "source": str(root),
         "project": "project.gp5",
         "passcode": passcode,
         "volume": volume,
+        "sdk_version_override": (f"0x{sdk_version_override:016X}"
+                                 if sdk_version_override is not None else None),
         "chunk_count": chunk_count,
         "playgo_languages": (chunk_info.find("chunks").attrib["supported_languages"].split()
                              if chunk_info is not None else []),
@@ -1719,8 +1824,9 @@ def build_bundle(
         f"Final package: `{final_name}`\n\n"
         "The bundle contains the version-locked patched SDK runtime, GP5, logs, "
         "hash manifest and `build.ps1`. The source payload is referenced by `project.gp5` and is "
-        "not duplicated. The SDK writes the final plaintext/no-auth representation directly; "
-        "the temporary filename is only atomically renamed. Run "
+        "not duplicated. The patched SDK writes the final plaintext/no-auth representation "
+        "with the GP5 SDK version directly; the temporary filename is only atomically "
+        "renamed. Run "
         "`powershell -ExecutionPolicy Bypass -File .\\build.ps1 -Force` to rebuild.\n"
     )
     (destination / "README.md").write_text(readme, encoding="utf-8")
@@ -1747,6 +1853,9 @@ def main() -> None:
                              "sce_sys/playgo-chunk.dat (default: 100)")
     parser.add_argument("--passcode", default="0" * 32,
                         help="32-character package passcode (default: 32 zeroes)")
+    parser.add_argument("--sdk-version", metavar="MAJOR[.00]|0xHEX16",
+                        help="override sdkVersion in generated param.json; also raises the "
+                             "required system version when needed")
     parser.add_argument("--playgo-languages", metavar="CODE,CODE",
                         help="override APP PlayGo chunk languages, e.g. en-US,ru-RU; "
                              "otherwise retain source languages")
@@ -1767,6 +1876,7 @@ def main() -> None:
     if output == root:
         raise ValueError("output must be distinct from the source directory")
     entitlement_key = normalize_entitlement_key(args.volume, args.entitlement_key)
+    sdk_version_override = parse_sdk_version_override(args.sdk_version)
     keep = {path.replace("\\", "/").lstrip("/").casefold() for path in args.keep_sce_sys}
     # APP bundles preserve the source keystone. AC does not carry the APP helper;
     # GP5-only keystone retention remains opt-in.
@@ -1787,7 +1897,8 @@ def main() -> None:
             root, output, args.volume, args.passcode, keep,
             args.publishing_tools.resolve(),
             args.dds_converter.resolve() if args.dds_converter else None,
-            args.chunk_count, entitlement_key, args.playgo_languages)
+            args.chunk_count, entitlement_key, args.playgo_languages,
+            sdk_version_override)
         print(f"Created build bundle {output} with {count} explicit file mapping(s).")
         print(f"Final LibProsperoPkg-compatible package: {package}")
     else:
@@ -1796,7 +1907,8 @@ def main() -> None:
         count, skipped = build_gp5(
             root, output, args.volume, args.passcode, args.absolute_paths, keep,
             args.dds_converter.resolve() if args.dds_converter else None,
-            entitlement_key, args.auto_size_profile, args.chunk_count, args.playgo_languages)
+            entitlement_key, args.auto_size_profile, args.chunk_count,
+            args.playgo_languages, sdk_version_override)
         print(f"Created {output} with {count} explicit file mapping(s).")
     if skipped:
         print("Excluded " + str(len(skipped)) + " service/project artifact(s):")
