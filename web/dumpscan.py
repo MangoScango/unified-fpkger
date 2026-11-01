@@ -257,27 +257,21 @@ def read_pkg_meta(path):
     with pkg:
         if pkg.platform != "PS5":
             return None
+        if pkg.edition == "Retail" or pkg.kind == "Update":
+            return None
         try:
             size = os.path.getsize(path)
         except OSError:
             return None
         if pkg.is_metadata_fragment(size):
             return None
-        meta = {"path": path, "platform": "ps5", "role": "base",
+        return {"path": path, "platform": "ps5", "role": "base",
                 "rebuild": True, "edition": pkg.edition, "notes": [],
                 "icon": path if pkg.has_icon0() else False,
                 "kind": pkg.kind, "title": pkg.title, "title_id": pkg.title_id,
                 "content_id": pkg.content_id or None, "version": pkg.version,
                 "category": pkg.category, "fw": pkg.min_sdk,
                 "sdk": fw_from_hex(pkg.param.get("sdkVersion"))}
-    if meta["edition"] == "Retail":
-        meta["notes"].append("retail package: rebuilding needs its passcode, "
-                             "the default zeroes only cover fakes")
-    if meta["kind"] == "Update":
-        meta["buildable"] = False
-        meta["notes"].append("a patch image carries only changed data; "
-                             "it cannot be rebuilt on its own")
-    return meta
 
 
 # --- scanning ------------------------------------------------------------------

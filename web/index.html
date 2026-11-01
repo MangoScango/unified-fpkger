@@ -303,9 +303,7 @@
           <option value="skip">Skip</option>
         </select></label>
     </div>
-    <label class="check"><input type="checkbox" name="psn_al"> Grab missing AL content from PSN</label>
-    <p class="hint">Fills in add-on entitlements the console has no record of, from the
-      store. What the console's own license database provides is kept as-is.</p>
+    <label class="check"><input type="checkbox" name="psn_al"> Search PSN for AL content</label>
     <label class="check"><input type="checkbox" name="no_decrypt"> Leave executables encrypted</label>
     <label class="check"><input type="checkbox" name="no_entitlements"> Skip reading add-on entitlement keys</label>
     <label class="check"><input type="checkbox" name="verbose"> Log every file</label>
@@ -380,10 +378,10 @@
       <p class="hint" data-sc-link hidden><span data-sc-lead></span><a target="_blank" rel="noopener"></a></p>
     </div>
     <label class="check"><input type="checkbox" name="force"> Replace existing outputs</label>
-    <label data-single>Add-on entitlement key (32 hex digits)
+    <label data-single data-addon-only>Add-on entitlement key (32 hex digits)
       <input type="text" name="entitlement_key" autocomplete="off" spellcheck="false"
              pattern="[0-9A-Fa-f]{32}" maxlength="32"></label>
-    <p class="hint" data-key-hint>Default: the add-on's <code>entitlement_key.dat</code>, else zeroes.</p>
+    <p class="hint" data-key-hint data-addon-only>Default: the add-on's <code>entitlement_key.dat</code>, else zeroes.</p>
     <details>
       <summary>Advanced</summary>
       <label data-single>Reference package (builds a patch against it)
@@ -682,6 +680,8 @@ keyInput.addEventListener("input", () => { keyPrefilled = ""; });
 function prefillEntitlementKey(chosen) {
   const addon = chosen.length === 1 && chosen[0].platform === "ps5" && chosen[0].kind === "Add-on"
     ? chosen[0].base : null;
+  // The entitlement key applies to add-ons only.
+  for (const node of $$("[data-addon-only]", buildForm)) node.hidden = !addon;
   const key = addon?.entitlement_key || "";
   const untouched = keyInput.value === "" || keyInput.value === keyPrefilled;
   if (untouched) {
@@ -915,11 +915,15 @@ function syncConsolePlatform(form) {
   if (hint) hint.hidden = Boolean(platform) || !buildToggle.checked;
   const patch = form.elements.patch_mode;
   if (patch) patch.disabled = platform === "ps5" || !form.elements.dump_game.checked;
+  // A dump-build builds the dumped add-ons too, unless they are skipped.
+  const buildsAddons = buildToggle.checked && form.elements.addon_mode.value !== "skip";
+  for (const node of $$("[data-addon-only]", form)) node.hidden = !buildsAddons;
   syncScLink(form, select.value);
 }
 for (const form of $$("form[data-kind=dump]")) {
   form.elements.title.addEventListener("change", () => syncConsolePlatform(form));
   form.elements.dump_game.addEventListener("change", () => syncConsolePlatform(form));
+  form.elements.addon_mode.addEventListener("change", () => syncConsolePlatform(form));
   syncConsolePlatform(form);
 }
 
