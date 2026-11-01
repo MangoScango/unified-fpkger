@@ -739,7 +739,11 @@ def psn_al_target(spec):
     for path in candidates:
         if not path:
             continue
-        meta = dumpscan.read_meta(path)
+        # A rebuild anchors on a .pkg file, which read_meta cannot read.
+        if path.lower().endswith(".pkg"):
+            meta = dumpscan.read_pkg_meta(path)
+        else:
+            meta = dumpscan.read_meta(path)
         if not meta:
             continue
         title_id = meta["title_id"] or dumpscan.title_id_from_content_id(

@@ -167,9 +167,7 @@
         <p class="hint" id="scan-status" role="status" aria-live="polite"></p>
         <ul id="dumps" aria-label="Dumps found" hidden></ul>
         <p class="hint" id="scan-selected" aria-live="polite"></p>
-        <label class="check"><input type="checkbox" name="psn_al"> Grab missing AL content from PSN for the selected titles</label>
-        <p class="hint">Unlocker trees are created next to each selected dump and built
-          with it; add-ons already on disk are kept as-is.</p>
+        <label class="check"><input type="checkbox" name="psn_al"> Search PSN for AL content</label>
       </fieldset>
       <div data-use="t-out"></div>
       <div data-use="t-ps4" data-options="ps4"></div>
@@ -178,27 +176,6 @@
       <button class="primary" type="submit" id="build-submit" disabled>Build selected</button>
       <p class="status" role="status"></p>
     </form>
-    <details id="psn-unlockers">
-      <summary>DLC unlockers from the PSN store</summary>
-      <form data-kind="psn-unlockers">
-        <label>Title IDs (space or comma separated)
-          <input type="text" name="titles" required autocomplete="off" spellcheck="false"
-                 placeholder="PPSA01289 CUSA07211"></label>
-        <p class="hint">Both the PS4 and PS5 add-on entitlements on each title's store
-          page are built into <code>&lt;title&gt;-dlc</code> folders. No console needed —
-          but PSN has no entitlement keys or concept IDs, so the packages build with
-          zeroed keys.</p>
-        <label>Write the DLC folders into (default: the scan folder)
-          <span class="row"><input type="text" name="out_dir">
-          <button type="button" data-browse="out_dir">Browse</button></span></label>
-        <div class="grid2">
-          <label>Store region <input type="text" name="region" value="us" maxlength="2"></label>
-          <label>Store language <input type="text" name="language" value="en" maxlength="2"></label>
-        </div>
-        <button class="primary" type="submit">Fetch and build unlockers</button>
-        <p class="status" role="status"></p>
-      </form>
-    </details>
   </div>
 
   <div role="tabpanel" id="panel-backport" aria-labelledby="tab-backport" hidden>
@@ -598,7 +575,7 @@ function dlcSplitPanel(u) {
                                        textContent: " · " + e.mount_point}) : null)),
       ...e.problems.map(p => el("p", {className: "hint warn", textContent: p})),
       e.problems.length ? null : el("div", {className: "grid2"},
-        el("label", {}, al ? "SC package (optional — empty: metadata from PSN)"
+        el("label", {}, al ? "SC package (optional)"
                            : "SC package (URL or local .pkg)",
           el("span", {className: "row"}, sc, browse)),
         el("label", {}, "Entitlement key", key)));
