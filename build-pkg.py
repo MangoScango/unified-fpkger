@@ -66,6 +66,9 @@ PS5: build-pkg.py ps5 --source-folder <dir> --output-package <file.pkg> [opts]
 
   --reference-package <file.pkg>   build a plaintext/no-auth patch against it
   --sc-pkg <file.pkg|url>          restore sce_sys metadata from a retail SC pkg
+                                   (default: auto-matched from the dump's
+                                   version.xml when its version is the latest)
+  --no-sc                          do not restore sce_sys metadata
   --passcode <hex>                 (default: 00000000000000000000000000000000)
   --python <path>                  (default: python3)
   --temp-dir <dir>                 (default: $LIBPROSPERO_TEMP_DIR)
@@ -1760,9 +1763,21 @@ def cmd_ps5(args):
     if not os.path.isfile(os.path.join(source, "sce_sys", "param.json")):
         die(f"Not a PS5 tree, no sce_sys/param.json: {source}")
 
-    if args.sc_pkg:
-        log(f"Restoring sce_sys metadata from SC package: {args.sc_pkg}")
-        rc = subprocess.run([args.python, SC_OVERLAY, args.sc_pkg,
+    if args.no_sc and args.sc_pkg:
+        die("--no-sc conflicts with --sc-pkg")
+    sc_pkg = args.sc_pkg
+    if not sc_pkg and not args.no_sc:
+        probe = subprocess.run([args.python, SC_OVERLAY, "--resolve", source],
+                               capture_output=True, text=True)
+        sc_pkg = probe.stdout.strip()
+        if sc_pkg:
+            log(f"SC package matched via version.xml: {sc_pkg}")
+        elif probe.returncode:
+            log(f"no SC package auto-match ({probe.stderr.strip().removeprefix('error: ')}); "
+                "pass --sc-pkg to restore sce_sys anyway")
+    if sc_pkg:
+        log(f"Restoring sce_sys metadata from SC package: {sc_pkg}")
+        rc = subprocess.run([args.python, SC_OVERLAY, sc_pkg,
                              source], stdout=sys.stderr).returncode
         if rc:
             die(f"sc-overlay.py failed (exit {rc})")
@@ -2132,7 +2147,11 @@ def build_parser():
     ps5.add_argument("--reference-package", "-r", default="", metavar="PKG",
                      help="build a plaintext/no-auth patch against it")
     ps5.add_argument("--sc-pkg", default="", metavar="PKG_OR_URL",
-                     help="restore sce_sys metadata from a retail SC package")
+                     help="restore sce_sys metadata from a retail SC package "
+                          "(default: auto-matched from the dump's version.xml "
+                          "when its version is the latest)")
+    ps5.add_argument("--no-sc", action="store_true",
+                     help="do not restore sce_sys metadata from an SC package")
     ps5.add_argument("--passcode", default=FAKE_PASSCODE, metavar="HEX")
     ps5.add_argument("--python", default="python3", metavar="PATH")
     ps5.add_argument("--temp-dir", default=env("LIBPROSPERO_TEMP_DIR"),

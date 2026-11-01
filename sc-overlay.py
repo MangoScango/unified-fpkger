@@ -3,6 +3,7 @@
 
   sc-overlay.py SC_PKG DUMP_DIR
   sc-overlay.py URL DUMP_DIR
+  sc-overlay.py --resolve DUMP_DIR
 
 An SC package is the small metadata-only container retail content ships
 besides the game image. Its named entries are the sce_sys files (param.json,
@@ -10,6 +11,12 @@ icon0.png, playgo-chunk.dat, ...); restoring them fixes dumps that came
 without them. Only unencrypted entries are extracted, and the NP-bound files
 (npbind.dat, *.ucp, license.dat, license.info) are excluded: they are tied to
 the retail package and cannot be reused.
+
+With --resolve, no package is given: the dump's own sce_sys/param.json points
+the way. Its versionFileUri's version.xml lists the app's packages by
+content_ver; the one matching the dump's contentVersion has a manifest whose
+pieces include the SC package, and its URL is printed. build-pkg.py uses this
+to find the SC package itself instead of asking for one.
 
 Existing dump files are replaced; the SC is the retail source of truth.
 """
@@ -22,6 +29,7 @@ import tempfile
 import urllib.request
 from urllib.parse import urlparse
 import ssl
+import xml.etree.ElementTree
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ps_pkg_info import pkg as pkgmod  # noqa: E402
@@ -34,17 +42,70 @@ def die(message):
     sys.exit(f"error: {message}")
 
 
+def ssl_context(url):
+    """playstation.net's chain does not verify everywhere; it is Sony's CDN."""
+    if urlparse(url).hostname.endswith("playstation.net"):
+        return ssl._create_unverified_context()
+    return ssl.create_default_context()
+
+
+def fetch(url):
+    """One URL's body, or raise."""
+    with urllib.request.urlopen(url, context=ssl_context(url),
+                                timeout=30) as response:
+        return response.read()
+
+
+def resolve_param(param):
+    """(sc_url, reason) for the SC package matching a param.json's version.
+
+    The app_tag packages in the version.xml versionFileUri points to are keyed
+    by content_ver; only the one equal to the dump's contentVersion describes
+    this build, so anything else is no match. reason explains a None return.
+    """
+    uri = (param.get("versionFileUri") or "").strip()
+    if not uri:
+        return None, "param.json has no versionFileUri"
+    version = param.get("contentVersion") or ""
+    try:
+        root = xml.etree.ElementTree.fromstring(fetch(uri))
+    except Exception as err:
+        return None, f"could not fetch version.xml: {err}"
+    manifests = [package.get("manifest_url")
+                 for package in root.findall("app_tag/package")
+                 if package.get("content_ver") == version
+                 and package.get("manifest_url")]
+    if not manifests:
+        return None, f"version.xml has no app package at version {version}"
+    try:
+        manifest = json.loads(fetch(manifests[0]).decode("utf-8"))
+    except Exception as err:
+        return None, f"could not fetch the package manifest: {err}"
+    for piece in manifest.get("pieces") or []:
+        url = piece.get("url") or ""
+        if url.endswith("_sc.pkg"):
+            return url, None
+    return None, "the package manifest has no _sc.pkg piece"
+
+
+def resolve(param_json_path):
+    """resolve_param for a param.json on disk."""
+    try:
+        with open(param_json_path, encoding="utf-8-sig") as fh:
+            param = json.load(fh)
+    except (OSError, ValueError):
+        return None, "no readable param.json"
+    return resolve_param(param)
+
+
 def materialize(source):
     """(local path, is_temp) for a path or http(s) URL."""
     if source.startswith(("http://", "https://")):
         tmp = tempfile.NamedTemporaryFile(prefix="sc-overlay-", suffix=".pkg",
                                           delete=False)
-        if urlparse(source).hostname.endswith('playstation.net'):
-            ctx = ssl._create_unverified_context()
-        else:
-            ctx = ssl.create_default_context()
         try:
-            with urllib.request.urlopen(source, context=ctx) as response:
+            with urllib.request.urlopen(source,
+                                        context=ssl_context(source)) as response:
                 shutil.copyfileobj(response, tmp)
         except Exception:
             os.unlink(tmp.name)
@@ -111,8 +172,16 @@ def overlay(pkg, sce_sys):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--resolve":
+        param_path = os.path.join(sys.argv[2], "sce_sys", "param.json")
+        url, reason = resolve(param_path)
+        if url is None:
+            die(f"no SC package match for {sys.argv[2]}: {reason}")
+        print(url)
+        return
     if len(sys.argv) != 3:
-        die(f"usage: {os.path.basename(sys.argv[0])} SC_PKG_OR_URL DUMP_DIR")
+        die(f"usage: {os.path.basename(sys.argv[0])} SC_PKG_OR_URL DUMP_DIR\n"
+            f"       {os.path.basename(sys.argv[0])} --resolve DUMP_DIR")
     source, dump_dir = sys.argv[1], sys.argv[2]
     sce_sys = os.path.join(dump_dir, "sce_sys")
     if not os.path.isdir(sce_sys):

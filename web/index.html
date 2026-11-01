@@ -370,14 +370,15 @@
     <label>PlayGo languages, apps only (default: the dump's)
       <input type="text" name="playgo_languages" autocomplete="off" spellcheck="false"
              placeholder="en-US,ja-JP"></label>
-    <label data-single>Retail SC package (URL or local .pkg)
-      <span class="row"><input type="text" name="sc_pkg" autocomplete="off" spellcheck="false"
-             placeholder="EP0082-PPSA08668_00-..._sc.pkg">
-      <button type="button" data-browse="sc_pkg" data-files="pkg">Browse</button></span></label>
-    <p class="hint">Restores sce_sys metadata (param.json, icons, playgo files) from the retail
-      metadata package before building, replacing what the dump has. Encrypted files are excluded.</p>
-    <p class="hint" data-sc-link hidden>Retail metadata packages for this title:
-      <a target="_blank" rel="noopener"></a></p>
+    <label class="check" data-single><input type="checkbox" name="sc_restore"> Restore metadata from retail SC pkg</label>
+    <p class="hint" data-sc-status hidden></p>
+    <div data-single data-sc-manual hidden>
+      <label>Retail SC package (URL or local .pkg)
+        <span class="row"><input type="text" name="sc_pkg" autocomplete="off" spellcheck="false"
+               placeholder="EP0082-PPSA08668_00-..._sc.pkg">
+        <button type="button" data-browse="sc_pkg" data-files="pkg">Browse</button></span></label>
+      <p class="hint" data-sc-link hidden><span data-sc-lead></span><a target="_blank" rel="noopener"></a></p>
+    </div>
     <label class="check"><input type="checkbox" name="force"> Replace existing outputs</label>
     <label data-single>Add-on entitlement key (32 hex digits)
       <input type="text" name="entitlement_key" autocomplete="off" spellcheck="false"
@@ -703,6 +704,46 @@ function syncScLink(form, titleId) {
   }
 }
 
+// The SC restore checkbox checks the selected dump's version.xml right away:
+// a match means the build pulls the SC package itself, otherwise the manual
+// box and the prosperopatches link appear so the user can fetch it by hand.
+const scRestore = buildForm.elements.sc_restore;
+let scResolveToken = 0;
+async function checkScResolve() {
+  const status = $("[data-sc-status]", buildForm);
+  const manual = $("[data-sc-manual]", buildForm);
+  const chosen = chosenUnits();
+  const single = chosen.length === 1 && chosen[0].platform === "ps5" ? chosen[0] : null;
+  if (!scRestore.checked || !single) {
+    status.hidden = true;
+    manual.hidden = true;
+    return;
+  }
+  const token = ++scResolveToken;
+  status.hidden = false;
+  status.className = "hint";
+  status.textContent = "Checking version.xml for the SC package...";
+  manual.hidden = true;
+  const finish = (text, showManual) => {
+    if (token !== scResolveToken) return;
+    status.textContent = text;
+    manual.hidden = !showManual;
+  };
+  try {
+    const r = await api("/api/sc-resolve?path=" + encodeURIComponent(single.base.path));
+    if (r.ok) {
+      finish(`version ${r.version} metadata will be pulled from CDN.`, false);
+    } else {
+      $("[data-sc-lead]", buildForm).textContent = `Grab version ${r.version} from `;
+      finish(`No automatic match (${r.reason}).`, true);
+    }
+  } catch (err) {
+    $("[data-sc-lead]", buildForm).textContent = "Retail metadata packages for this title: ";
+    finish(err.message, true);
+  }
+}
+scRestore.addEventListener("change", checkScResolve);
+
 function syncSelection() {
   const chosen = chosenUnits();
   const platforms = new Set(chosen.map(u => u.platform));
@@ -721,6 +762,7 @@ function syncSelection() {
   prefillEntitlementKey(chosen);
   const single = chosen.length === 1 ? chosen[0] : null;
   syncScLink(buildForm, single?.platform === "ps5" ? single.title_id : null);
+  checkScResolve();
   const submit = $("#build-submit");
   submit.disabled = !chosen.length;
   submit.textContent = chosen.length > 1 ? `Build ${chosen.length} titles` : "Build selected";

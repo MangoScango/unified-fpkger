@@ -23,6 +23,7 @@ import codecs
 import collections
 import fcntl
 import hmac
+import importlib.util
 import itertools
 import json
 import os
@@ -62,6 +63,10 @@ BACKPORT_PS5 = (os.environ.get("BACKPORT_PS5")
 MAKE_FSELF = os.path.join(TOOLS, "make_fself.py")
 PSN_ENTITLEMENTS = os.path.join(TOOLS, "psn_entitlements.py")
 SC_OVERLAY = os.environ.get("SC_OVERLAY") or os.path.join(TOOLS, "sc-overlay.py")
+# sc-overlay.py's name is not importable; load it by path for resolve_param.
+_spec = importlib.util.spec_from_file_location("sc_overlay", SC_OVERLAY)
+sc_overlay = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(sc_overlay)
 PROSPERO_PUB_CMD = os.path.join(TOOLS, "drakmor", "toolchain", "prospero-pub-cmd.exe")
 # another-backporter's SOURCE_FW: the firmware whose modules the fakelibs are
 # built from, so the libraries folder must hold its dump.
@@ -639,8 +644,11 @@ def build_ps5(job, spec, src, out_dir):
             "--volume", "ac" if addon else "app",
             "--passcode", opts["passcode"],
             "--compression-level", str(opts["compression_level"])]
-    # An SC package restores sce_sys for apps and add-ons alike.
-    if opts.get("sc_pkg"):
+    # An SC package restores sce_sys for apps and add-ons alike; an empty
+    # --sc-pkg leaves build-pkg to match one from the dump's version.xml.
+    if not opts.get("sc_restore"):
+        argv.append("--no-sc")
+    elif opts.get("sc_pkg"):
         argv += ["--sc-pkg", opts["sc_pkg"]]
     if not addon:
         if opts["chunk_count"] is not None:
@@ -751,6 +759,37 @@ def psn_al_target(spec):
         if title_id:
             return title_id, parent
     return None, parent
+
+
+def sc_resolve(path):
+    """Whether a dump or package's SC package can be fetched automatically.
+
+    {"ok", "url", "version"} when the version.xml lookup succeeds, else
+    {"ok": False, "reason", "version"}; the UI needs the version either way
+    (it names which SC package to fetch by hand).
+    """
+    if path.lower().endswith(".pkg"):
+        real = resolve_path(path, "package", "file")
+        try:
+            pkg = pkgmod.Pkg.open(real)
+        except (pkgmod.PkgError, OSError) as err:
+            raise BadRequest(f"could not parse {real}: {err}") from None
+        with pkg:
+            if pkg.platform != "PS5":
+                raise BadRequest(f"not a PS5 package: {real}")
+            param = pkg.param
+    else:
+        real = resolve_path(path, "dump or package")
+        param = dumpscan.read_param_json(os.path.join(real, "sce_sys",
+                                                      "param.json"))
+    version = param.get("contentVersion") or param.get("masterVersion") or ""
+    if not param:
+        return {"ok": False, "reason": "no readable param.json",
+                "version": version}
+    url, reason = sc_overlay.resolve_param(param)
+    if url is None:
+        return {"ok": False, "reason": reason, "version": version}
+    return {"ok": True, "url": url, "version": version}
 
 
 def psn_unlockers_step(job, spec):
@@ -990,6 +1029,9 @@ def ps5_spec(params):
     return {
         "name": name, "passcode": passcode, "reference_pkg": reference,
         "sc_pkg": sc_pkg,
+        # A typed-in SC package implies the restore; the checkbox alone means
+        # "fetch it automatically at build time".
+        "sc_restore": bool(params.get("sc_restore")) or bool(sc_pkg),
         "compression_level": int_in(params, "compression_level", -4, 9, 7,
                                     "compression level"),
         "chunk_count": int_in(params, "chunk_count", 1, 800, None, "chunk count"),
@@ -1503,6 +1545,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(HTTPStatus.OK, {"path": root, "depth": depth, "units": units,
                                            "found": found, "truncated": truncated,
                                            "limit": SCAN_LIMIT})
+            elif url.path == "/api/sc-resolve":
+                self._send(HTTPStatus.OK, sc_resolve(arg("path")))
             elif url.path == "/api/icon":
                 if arg("path").lower().endswith(".pkg"):
                     src = resolve_path(arg("path"), "package", "file")
