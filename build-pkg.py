@@ -1864,7 +1864,7 @@ def cmd_ps5(args):
     stem = os.path.basename(final)[:-len(".pkg")]
     gp5 = os.path.join(output_directory, stem + ".gp5")
     scenario = os.path.join(output_directory, stem + ".playgo-scenario.json")
-    assets = os.path.join(output_directory, "gp5-assets", stem)
+    assets = os.path.join(output_directory, ".gp5-assets", stem)
     partial = os.path.join(output_directory, stem + ".partial.pkg")
     partial_remastered = partial + ".remastered.pkg"
     final_remastered = final + ".remastered.pkg"
@@ -2034,11 +2034,11 @@ def cmd_ps5(args):
 
         if os.path.isdir(assets):
             generated_assets_root = os.path.realpath(
-                os.path.join(output_directory, "gp5-assets"))
+                os.path.join(output_directory, ".gp5-assets"))
             resolved_assets = os.path.realpath(assets)
             if not (resolved_assets + os.sep).startswith(
                     generated_assets_root + os.sep):
-                die("Refusing to clean generated assets outside gp5-assets.")
+                die("Refusing to clean generated assets outside .gp5-assets.")
             shutil.rmtree(resolved_assets)
             if os.path.isdir(generated_assets_root) \
                     and not os.listdir(generated_assets_root):
