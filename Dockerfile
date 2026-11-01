@@ -49,11 +49,32 @@ RUN dpkg --add-architecture i386 \
         bash coreutils sed grep findutils \
         xvfb gosu \
         curl sqlite3 lftp binutils \
-        clang lld \
     && rm -rf "/opt/wine-${WINE_BRANCH}/lib/wine/i386-unix" \
+    # WineHQ's PE builtins carry full DWARF debug info. Strip them in this
+    # layer, otherwise the ~1.1 GB stays in the image even if a later layer
+    # removes it.
+    && find "/opt/wine-${WINE_BRANCH}" -type f \( \
+            -name '*.dll' -o -name '*.exe' -o -name '*.so' -o -name '*.so.*' \
+            -o -name '*.drv' -o -name '*.sys' -o -name '*.ocx' \
+            -o -name '*.cpl' -o -name '*.acm' -o -name '*.ax' \) -print0 \
+       | xargs -0 -r -P"$(nproc)" strip --strip-unneeded \
+    # Import libraries are only used by winegcc/winebuild; this image just
+    # runs PE binaries.
+    && find "/opt/wine-${WINE_BRANCH}" -type f -name '*.a' -delete \
+    # New WoW64 runs the 32-bit PEs inside the 64-bit loader, so the i386
+    # Unix libraries pulled in by multiarch are dead weight.
+    && rm -rf /usr/lib/i386-linux-gnu /lib/i386-linux-gnu \
+    # Xvfb pulls Mesa/LLVM in through libgl1, but the tools only need a plain
+    # X server. Drop the DRI/LLVM stack (~190 MB) and keep libgl1/libglx.
+    && rm -rf /usr/lib/x86_64-linux-gnu/libLLVM.so.19.1 \
+              /usr/lib/x86_64-linux-gnu/libgallium-*.so \
+              /usr/lib/x86_64-linux-gnu/libz3.so.4* \
+              /usr/lib/x86_64-linux-gnu/dri \
+    && apt-get purge -y --auto-remove wget gnupg \
     && rm -rf /var/lib/apt/lists/*
-# clang + lld are only for another-backporter's --unpeg-shim, which assembles
-# ps5backport/vrr_shim.s at build time.
+# binutils provides as/ld for another-backporter's --unpeg-shim, which
+# assembles ps5backport/vrr_shim.s at runtime; patch.py uses clang/lld when
+# they exist and falls back to as/ld otherwise.
 
 # Consumed by build-pkg.py's tool-path env hooks.
 ENV SDK_DIR=/opt/fpkger/PS4_Fake_PKG_Tools_3 \

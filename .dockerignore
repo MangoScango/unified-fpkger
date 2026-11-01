@@ -6,7 +6,10 @@ wrk_temp/
 *.pkg
 *.gp4
 *.log
+**/*.log
+**/__pycache__/
 .git/
+**/.git
 .gitignore
 .gitattributes
 docker-compose.yml
