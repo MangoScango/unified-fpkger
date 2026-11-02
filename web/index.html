@@ -363,10 +363,10 @@
     <div class="grid2">
       <label>Compression level (-4 to 9)
         <input type="number" name="compression_level" min="-4" max="9"></label>
-      <label>PlayGo chunks, when the dump has no playgo-chunk.dat (1 to 800)
+      <label>PlayGo chunks override (1 to 800)
         <input type="number" name="chunk_count" min="1" max="800" placeholder="100"></label>
     </div>
-    <label>PlayGo languages, apps only (default: the dump's)
+    <label>PlayGo languages override
       <input type="text" name="playgo_languages" autocomplete="off" spellcheck="false"
              placeholder="en-US,ja-JP"></label>
     <label class="check" data-single><input type="checkbox" name="sc_restore"> Restore metadata from retail SC pkg</label>
@@ -378,6 +378,7 @@
         <button type="button" data-browse="sc_pkg" data-files="pkg">Browse</button></span></label>
       <p class="hint" data-sc-link hidden><span data-sc-lead></span><a target="_blank" rel="noopener"></a></p>
     </div>
+    <label class="check"><input type="checkbox" name="exclude_non_retail"> Exclude files not present in retail pkg</label>
     <label class="check"><input type="checkbox" name="force"> Replace existing outputs</label>
     <label data-single data-addon-only>Add-on entitlement key (32 hex digits)
       <input type="text" name="entitlement_key" autocomplete="off" spellcheck="false"
@@ -388,7 +389,7 @@
       <label data-single>Reference package (builds a patch against it)
         <span class="row"><input type="text" name="reference_pkg">
         <button type="button" data-browse="reference_pkg" data-files="pkg">Browse</button></span></label>
-      <label>Scratch folder for img_create (default: wine's %TEMP%)
+      <label>Scratch folder for img_create (default: %TEMP%)
         <span class="row"><input type="text" name="ps5_temp_dir">
         <button type="button" data-browse="ps5_temp_dir">Browse</button></span></label>
       <label>Extract rebuilt pkgs into (default: next to each pkg)

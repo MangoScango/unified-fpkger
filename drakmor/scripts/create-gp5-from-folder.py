@@ -1321,6 +1321,7 @@ def build_gp5(
     chunk_count: int = DEFAULT_PLAYGO_CHUNK_COUNT,
     playgo_languages: str | None = None,
     sdk_version_override: int | None = None,
+    exclude_non_retail: bool = False,
 ) -> tuple[int, list[str]]:
     if len(passcode) != 32:
         raise ValueError("passcode must contain exactly 32 characters")
@@ -1424,6 +1425,16 @@ def build_gp5(
          chunk_default_language, chunk_languages) = write_scenario(
             scenario_input, root / "sce_sys" / "playgo-scenario.json",
             default_language(param), selected_languages)
+    if exclude_non_retail and layout is not None:
+        kept = []
+        for file in files:
+            relative = relative_posix(root, file)
+            if (not relative.casefold().startswith("sce_sys/")
+                    and layout.chunk_of(relative) is None):
+                skipped.append(relative + " (not in the retail file map)")
+            else:
+                kept.append(file)
+        files = kept
     generated_root = output.parent / GENERATED_ASSET_DIRECTORY / output.stem
     generated_system = generated_root / "sce_sys"
     generated_param = generated_system / "param.json"
@@ -1740,6 +1751,7 @@ def build_bundle(
     entitlement_key: str | None = None,
     playgo_languages: str | None = None,
     sdk_version_override: int | None = None,
+    exclude_non_retail: bool = False,
 ) -> tuple[Path, int, list[str]]:
     if volume not in {"app", "ac"}:
         raise ValueError("--build supports debug APP/AC nwonly profiles")
@@ -1768,7 +1780,8 @@ def build_bundle(
         keep_service_paths=keep_service_paths, converter_path=converter_path,
         entitlement_key=entitlement_key, auto_size_profile=auto_size_profile,
         chunk_count=chunk_count, playgo_languages=playgo_languages,
-        sdk_version_override=sdk_version_override)
+        sdk_version_override=sdk_version_override,
+        exclude_non_retail=exclude_non_retail)
     chunk_info = ET.parse(project_path).getroot().find("volume/chunk_info")
     chunk_count = int(chunk_info.attrib["chunk_count"]) if chunk_info is not None else 0
 
@@ -1864,6 +1877,9 @@ def main() -> None:
         help="16-byte hex entitlement key (required for ac and al)")
     parser.add_argument("--absolute-paths", action="store_true",
                         help="write absolute src_path values instead of paths relative to the GP5")
+    parser.add_argument("--exclude-non-retail", action="store_true",
+                        help="drop files missing from the source PlayGo map "
+                             "instead of placing them in chunk 0 (sce_sys is kept)")
     parser.add_argument("--keep-sce-sys", action="append", default=[], metavar="PATH",
                         help="retain a normally regenerated sce_sys path; may be repeated")
     parser.add_argument("--keep-keystone", action="store_true",
@@ -1898,7 +1914,7 @@ def main() -> None:
             args.publishing_tools.resolve(),
             args.dds_converter.resolve() if args.dds_converter else None,
             args.chunk_count, entitlement_key, args.playgo_languages,
-            sdk_version_override)
+            sdk_version_override, args.exclude_non_retail)
         print(f"Created build bundle {output} with {count} explicit file mapping(s).")
         print(f"Final LibProsperoPkg-compatible package: {package}")
     else:
@@ -1908,7 +1924,7 @@ def main() -> None:
             root, output, args.volume, args.passcode, args.absolute_paths, keep,
             args.dds_converter.resolve() if args.dds_converter else None,
             entitlement_key, args.auto_size_profile, args.chunk_count,
-            args.playgo_languages, sdk_version_override)
+            args.playgo_languages, sdk_version_override, args.exclude_non_retail)
         print(f"Created {output} with {count} explicit file mapping(s).")
     if skipped:
         print("Excluded " + str(len(skipped)) + " service/project artifact(s):")

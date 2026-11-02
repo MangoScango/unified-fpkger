@@ -69,6 +69,8 @@ PS5: build-pkg.py ps5 --source-folder <dir> --output-package <file.pkg> [opts]
                                    (default: auto-matched from the dump's
                                    version.xml when its version is the latest)
   --no-sc                          do not restore sce_sys metadata
+  --exclude-non-retail             drop payload files missing from the retail
+                                   PlayGo map instead of packing them
   --passcode <hex>                 (default: 00000000000000000000000000000000)
   --python <path>                  (default: python3)
   --temp-dir <dir>                 (default: $LIBPROSPERO_TEMP_DIR)
@@ -1923,6 +1925,8 @@ def cmd_ps5(args):
     ]
 
     # Keystone, chunk layout and size profile are application-only.
+    if args.exclude_non_retail:
+        gp5_args += ["--exclude-non-retail"]
     if volume == "ac":
         gp5_args += ["--entitlement-key", entitlement_key]
     else:
@@ -2152,6 +2156,9 @@ def build_parser():
                           "when its version is the latest)")
     ps5.add_argument("--no-sc", action="store_true",
                      help="do not restore sce_sys metadata from an SC package")
+    ps5.add_argument("--exclude-non-retail", action="store_true",
+                     help="drop payload files missing from the retail PlayGo "
+                          "map instead of packing them")
     ps5.add_argument("--passcode", default=FAKE_PASSCODE, metavar="HEX")
     ps5.add_argument("--python", default="python3", metavar="PATH")
     ps5.add_argument("--temp-dir", default=env("LIBPROSPERO_TEMP_DIR"),
