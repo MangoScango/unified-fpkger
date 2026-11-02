@@ -72,10 +72,10 @@
   .scan-tools input[type=search] { flex: 1; min-width: 160px; padding: 6px 8px; font: inherit; color: var(--text);
     background: var(--bg); border: 1px solid var(--line); border-radius: 4px; }
   .scan-tools select { width: auto; }
-  #dumps { list-style: none; margin: 6px 0 0; padding: 0; max-height: 55vh; overflow: auto;
+  #dumps, #backport-dumps { list-style: none; margin: 6px 0 0; padding: 0; max-height: 55vh; overflow: auto;
     border: 1px solid var(--line); border-radius: 6px; }
-  #dumps li { border-bottom: 1px solid var(--line); }
-  #dumps li:last-child { border-bottom: 0; }
+  #dumps li, #backport-dumps li { border-bottom: 1px solid var(--line); }
+  #dumps li:last-child, #backport-dumps li:last-child { border-bottom: 0; }
   label.dump { display: grid; grid-template-columns: auto 56px 1fr; gap: 10px; align-items: start;
     margin: 0; padding: 8px 10px; color: var(--text); font-size: 14px; cursor: pointer; }
   label.dump:hover { background: #252933; }
@@ -208,9 +208,6 @@
           <button type="button" id="backport-scan-run">Scan</button></span></label>
         <div class="scan-tools" id="backport-scan-tools" hidden>
           <input type="search" id="backport-scan-filter" placeholder="Filter by title, ID or folder" aria-label="Filter backport sources">
-          <select id="backport-scan-platform" aria-label="Show platform for backport sources">
-            <option value="">All</option><option value="ps4">PS4</option><option value="ps5">PS5</option>
-          </select>
           <button type="button" id="backport-scan-all">Select shown</button>
           <button type="button" id="backport-scan-none">Clear</button>
         </div>
@@ -709,14 +706,12 @@ function unitRow(u, mode = "build") {
       ? tag(u.base?.entitlement_key ? "entitlement key" : "no entitlement key") : null,
     u.base?.dlc_emu?.length ? tag("dlc_emu", "rebuild") : null);
   const ids = [u.title_id, u.content_id].filter(Boolean).join(" · ");
-  const notes = [...u.notes];
-  if (forBackport && !usable) notes.push("Backporting requires a PS5 app dump or app package.");
   const body = el("span", {className: "dump-body"},
     el("span", {className: "dump-title", textContent: u.title || u.title_id || u.id.split("/").pop()}),
     tags,
     ids ? el("span", {className: "dump-id", textContent: ids}) : null,
     el("span", {className: "dump-path", textContent: u.base ? u.base.path : "No base dump found"}),
-    ...notes.map(n => el("span", {className: "hint warn", textContent: n})));
+    ...u.notes.map(n => el("span", {className: "hint warn", textContent: n})));
   const li = el("li", {}, el("label", {className: "dump"}, box, icon, body),
     forBackport ? null : layerControls(u, c), forBackport ? null : dlcSplitPanel(u));
   li.dataset.id = u.id;
@@ -933,10 +928,8 @@ function backportPick(u, on) {
 
 function applyBackportFilter() {
   const words = $("#backport-scan-filter").value.toLowerCase().split(/\s+/).filter(Boolean);
-  const platform = $("#backport-scan-platform").value;
   for (const li of $$("#backport-dumps li[data-id]"))
-    li.hidden = (platform && li.dataset.platform !== platform) ||
-      !words.every(w => li.dataset.search.includes(w));
+    li.hidden = !words.every(w => li.dataset.search.includes(w));
 }
 
 function syncBackportSelection() {
@@ -968,8 +961,8 @@ async function runBackportScan() {
   try {
     const data = await api("/api/scan?path=" + encodeURIComponent(path));
     if (token !== backportScanToken) return;
-    backportUnits = data.units;
-    const ids = new Set(backportUnits.filter(backportableUnit).map(u => u.id));
+    backportUnits = data.units.filter(backportableUnit);
+    const ids = new Set(backportUnits.map(u => u.id));
     for (const id of [...backportSelected]) if (!ids.has(id)) backportSelected.delete(id);
     const list = $("#backport-dumps");
     list.replaceChildren(...backportUnits.map(u => unitRow(u, "backport")));
@@ -982,7 +975,9 @@ async function runBackportScan() {
     status.textContent = backportUnits.length
       ? `${plural(backportUnits.length, "title")} (${split}) from ${plural(data.found, "dump/package")} in ${data.path}.` +
         (data.truncated ? ` Stopped at ${data.limit}; scan a narrower folder to see the rest.` : "")
-      : `No param.sfo, param.json or PS5 .pkg within ${plural(data.depth, "folder")} of ${data.path}.`;
+      : data.units.length
+        ? `No PS5 app dumps or app packages within ${plural(data.depth, "folder")} of ${data.path}.`
+        : `No param.sfo, param.json or PS5 .pkg within ${plural(data.depth, "folder")} of ${data.path}.`;
   } catch (err) {
     if (token !== backportScanToken) return;
     status.className = "hint error";
@@ -1004,10 +999,6 @@ backportScanInput.addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); runBackportScan(); }
 });
 $("#backport-scan-filter").addEventListener("input", () => {
-  applyBackportFilter();
-  syncBackportSelection();
-});
-$("#backport-scan-platform").addEventListener("change", () => {
   applyBackportFilter();
   syncBackportSelection();
 });
