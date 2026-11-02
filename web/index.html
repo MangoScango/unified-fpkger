@@ -138,6 +138,14 @@
         <p class="hint" data-detect-hint>Detect the console to show its platform's build options.</p>
         <div data-use="t-ps4" data-options="ps4"></div>
         <div data-use="t-ps5" data-options="ps5"></div>
+        <div data-options="ps5" data-backport-ui hidden>
+          <label class="check"><input type="checkbox" name="backport_after"> Create a PS5 backport after building</label>
+          <fieldset data-backport-options hidden>
+            <legend>PS5 backport (another-backporter)</legend>
+            <p class="hint">Uses the original app dump after every package build succeeds.</p>
+            <div data-use="t-backport"></div>
+          </fieldset>
+        </div>
         <fieldset>
           <legend>After the build</legend>
           <label class="check"><input type="checkbox" name="delete_dumps"> Delete the dump once the build succeeds</label>
@@ -173,6 +181,14 @@
       <div data-use="t-out"></div>
       <div data-use="t-ps4" data-options="ps4"></div>
       <div data-use="t-ps5" data-options="ps5"></div>
+      <div data-options="ps5" data-backport-ui hidden>
+        <label class="check"><input type="checkbox" name="backport_after"> Create a PS5 backport after building</label>
+        <fieldset data-backport-options hidden>
+          <legend>PS5 backport (another-backporter)</legend>
+          <p class="hint">Uses each selected PS5 app dump after its build succeeds. PS4 titles, add-ons and package rebuilds are not backported.</p>
+          <div data-use="t-backport"></div>
+        </fieldset>
+      </div>
       <p class="hint" id="single-hint" hidden>Options marked "one dump only" are off while several dumps are selected.</p>
       <button class="primary" type="submit" id="build-submit" disabled>Build selected</button>
       <p class="status" role="status"></p>
@@ -186,28 +202,7 @@
         <label>Dump folder or .pkg
           <span class="row"><input type="text" name="source" required>
           <button type="button" data-browse="source" data-files="pkg" data-dirs>Browse</button></span></label>
-        <label>Firmware libraries (a 13.60 dump)
-          <span class="row"><input type="text" name="libs_dir" required>
-          <button type="button" data-browse="libs_dir">Browse</button></span></label>
-        <p class="hint">The folder holding <code>13.60/system/common/lib</code>, from a clean PS5
-          firmware dump. Fakelibs are built from these modules.</p>
-        <label>Write the backport folder into
-          <span class="row"><input type="text" name="out_dir" required>
-          <button type="button" data-browse="out_dir">Browse</button></span></label>
-        <p class="hint">Creates <code>&lt;title&gt;-backport</code> inside it: loose files only
-          (fakelibs and patched executables), no package. Merge them into a dump and use the
-          Build tab to pack.</p>
-        <div class="grid2">
-          <label>Title ID (default: from the source name)
-            <input type="text" name="title" autocomplete="off" placeholder="PPSA01234"></label>
-          <label>Target tier
-            <select name="tier">
-              <option value="7xx">7.xx</option>
-              <option value="4xx">4.xx (experimental)</option>
-            </select></label>
-        </div>
-        <label class="check"><input type="checkbox" name="allow_unreviewed"> Allow stubs the registry has not reviewed</label>
-        <label class="check"><input type="checkbox" name="unpeg_shim"> Experimental: VideoOut fakelib unpegs VRR for VRR-aware apps</label>
+        <div data-use="t-backport"></div>
       </fieldset>
       <button class="primary" type="submit">Start backport</button>
       <p class="status" role="status"></p>
@@ -318,6 +313,31 @@
       <span class="row"><input type="text" name="out_dir" required>
       <button type="button" data-browse="out_dir">Browse</button></span></label>
   </fieldset>
+</template>
+
+<template id="t-backport">
+  <label>Firmware libraries (a 13.60 dump)
+    <span class="row"><input type="text" name="backport_libs_dir" required>
+    <button type="button" data-browse="backport_libs_dir">Browse</button></span></label>
+  <p class="hint">The folder holding <code>13.60/system/common/lib</code>, from a clean PS5
+    firmware dump. Fakelibs are built from these modules.</p>
+  <label>Write the backport folder into
+    <span class="row"><input type="text" name="backport_out_dir" required>
+    <button type="button" data-browse="backport_out_dir">Browse</button></span></label>
+  <p class="hint">Creates <code>&lt;title&gt;-backport</code> inside it: loose files only
+    (fakelibs and patched executables), no package. Merge them into a dump and use the
+    Build tab to pack.</p>
+  <div class="grid2">
+    <label data-single>Title ID (default: from the source)
+      <input type="text" name="backport_title" autocomplete="off" placeholder="PPSA01234"></label>
+    <label>Target tier
+      <select name="backport_tier">
+        <option value="7xx">7.xx</option>
+        <option value="4xx">4.xx (experimental)</option>
+      </select></label>
+  </div>
+  <label class="check"><input type="checkbox" name="backport_allow_unreviewed"> Allow stubs the registry has not reviewed</label>
+  <label class="check"><input type="checkbox" name="backport_unpeg_shim"> Experimental: VideoOut fakelib unpegs VRR for VRR-aware apps</label>
 </template>
 
 <template id="t-ps4">
@@ -431,6 +451,29 @@ const dumpForm = $("form[data-kind=dump]");
 // that option is forced off while the toggle is on.
 const buildToggle = dumpForm.elements.build_fpkgs;
 const buildOptions = $("[data-build-options]", dumpForm);
+function syncBackportToggle(form) {
+  const toggle = form.elements.backport_after;
+  if (!toggle) return;
+  const options = $("[data-backport-options]", form);
+  const on = toggle.checked && !toggle.disabled;
+  options.hidden = !on;
+  for (const field of $$("input, select, button", options)) {
+    const singleOff = form.classList.contains("multi") && field.closest("[data-single]");
+    field.disabled = !on || Boolean(singleOff);
+  }
+}
+function setBackportAvailable(form, available) {
+  const toggle = form.elements.backport_after;
+  if (!toggle) return;
+  const ui = $("[data-backport-ui]", form);
+  const parentBuildOptions = toggle.closest("[data-build-options]");
+  ui.hidden = !available;
+  toggle.disabled = !available || Boolean(parentBuildOptions?.hidden);
+  syncBackportToggle(form);
+}
+for (const form of $$("form")) {
+  form.elements.backport_after?.addEventListener("change", () => syncBackportToggle(form));
+}
 function syncBuildToggle() {
   const on = buildToggle.checked;
   buildOptions.hidden = !on;
@@ -673,6 +716,10 @@ function chosenUnits() {
   return units.filter(u => selected.has(u.id));
 }
 
+function backportableUnit(u) {
+  return u.platform === "ps5" && !u.rebuild && u.kind !== "Add-on";
+}
+
 // One selected PS5 add-on with a recorded key fills the field, unless the
 // user has typed their own.
 const keyInput = buildForm.elements.entitlement_key;
@@ -757,6 +804,7 @@ function syncSelection() {
   buildForm.classList.toggle("multi", multi);
   $("#single-hint").hidden = !multi;
   for (const input of $$("[data-single] input, [data-single] button", buildForm)) input.disabled = multi;
+  setBackportAvailable(buildForm, chosen.some(backportableUnit));
   const hiddenCount = chosen.filter(u => $(`#dumps li[data-id="${CSS.escape(u.id)}"]`)?.hidden).length;
   $("#scan-selected").textContent = chosen.length
     ? `${chosen.length} selected` + (hiddenCount ? `, ${hiddenCount} hidden by the filter` : "") + "."
@@ -920,6 +968,7 @@ function syncConsolePlatform(form) {
   // A dump-build builds the dumped add-ons too, unless they are skipped.
   const buildsAddons = buildToggle.checked && form.elements.addon_mode.value !== "skip";
   for (const node of $$("[data-addon-only]", form)) node.hidden = !buildsAddons;
+  setBackportAvailable(form, buildToggle.checked && form.elements.dump_game.checked && platform === "ps5");
   syncScLink(form, select.value);
 }
 for (const form of $$("form[data-kind=dump]")) {

@@ -2,9 +2,10 @@
 """Web front end for dumping titles off a console and building fake packages.
 
 Serves one page with Dump, Build and Backport tabs; the Dump tab can
-optionally build straight from its dump. Each submission becomes a job that
-drives the same tools the terminal workflow uses: pfsdump.py, then
-build-pkg.py (ps4 or ps5 subcommand). Jobs run one at a time, since
+optionally build straight from its dump, and PS5 app builds can backport the
+original dump afterward. Each submission becomes a job that drives the same
+tools the terminal workflow uses: pfsdump.py, then build-pkg.py (ps4 or ps5
+subcommand), then another-backporter when requested. Jobs run one at a time, since
 they compete for the console's FTP server and for the disk.
 
 Configuration comes from the environment, or a .env beside the tools:
@@ -848,14 +849,32 @@ def backport_step(job, spec):
         job.outputs.append(report)
 
 
+def chained_backport_step(job, spec, src):
+    """Backport the original app dump after its package build succeeds."""
+    options = spec.get("backport_after")
+    if not options:
+        return
+    if not os.path.isdir(src):
+        raise JobError(f"backport source dump is missing: {src}")
+    meta = dumpscan.read_meta(src)
+    title = meta["title_id"] if meta else ""
+    bound = backport_for_source(options, src, title)
+    spec["backport_after"] = bound
+    backport_step(job, bound)
+
+
 def delete_dumps(job, dump_dir, title, out_dir):
     """Removes this title's dump directories after a successful build."""
+    protected = [out_dir]
+    backport = job.plan.get("backport_after") or {}
+    if backport.get("out"):
+        protected.append(backport["out"])
     for suffix in ("app", "patch", "dlc", "keystone"):
         path = os.path.join(dump_dir, f"{title}-{suffix}")
         if not os.path.isdir(path):
             continue
-        if out_dir == path or out_dir.startswith(path + os.sep):
-            raise JobError(f"refusing to delete {path}: the output directory is inside it")
+        if any(out == path or out.startswith(path + os.sep) for out in protected):
+            raise JobError(f"refusing to delete {path}: an output directory is inside it")
         job.say(f"deleting dump: {path}")
         shutil.rmtree(path)
         job.outputs = [o for o in job.outputs if o != path]
@@ -885,6 +904,7 @@ def execute(job):
             sub = dict(spec, ps5={**spec["ps5"], "entitlement_key": ""})
             for tree in created:
                 build_ps5(job, sub, tree, spec["out_dir"])
+        chained_backport_step(job, spec, spec["source_dir"])
     elif job.kind == "dlc-split":
         dlc_split_step(job, spec)
     elif job.kind == "psn-unlockers":
@@ -921,6 +941,8 @@ def execute(job):
             elif (platform == "ps4" and not dump_game
                   and not spec["ps4"]["no_dlc"] and os.path.isdir(dlc_dir)):
                 build_step(job, spec, dlc_dir, platform)
+        if dump_game:
+            chained_backport_step(job, spec, app_dir)
         if spec["delete_dumps"]:
             delete_dumps(job, spec["dump_dir"], title, spec["out_dir"])
 
@@ -1099,6 +1121,46 @@ def dlc_split_spec(params):
     return {"source": src, "title_id": meta["title_id"], "entries": selected}
 
 
+def backport_param(params, key):
+    """An embedded backport option, falling back to the original API name."""
+    return params.get("backport_" + key, params.get(key))
+
+
+def backport_options(params):
+    """Validate the options shared by standalone and post-build backports."""
+    tier = backport_param(params, "tier") or "7xx"
+    if tier not in BACKPORT_TIERS:
+        raise BadRequest(f"unknown tier: {tier}")
+    libs = resolve_path(backport_param(params, "libs_dir"), "firmware libraries")
+    if not os.path.isdir(os.path.join(libs, BACKPORT_SOURCE_FW)):
+        raise BadRequest(f"firmware libraries: no {BACKPORT_SOURCE_FW} dump in {libs}")
+    title = (backport_param(params, "title") or "").strip()
+    if title and not TITLE_RE.match(title):
+        raise BadRequest(f"title ID is not valid: {title}")
+    out_dir = resolve_path(backport_param(params, "out_dir"), "backport output directory",
+                           create=True)
+    return {"title": title, "tier": tier, "libs_dir": libs, "out_dir": out_dir,
+            "allow_unreviewed": bool(backport_param(params, "allow_unreviewed")),
+            "unpeg_shim": bool(backport_param(params, "unpeg_shim"))}
+
+
+def backport_for_source(options, src, title=""):
+    """Bind shared options to a source, deriving its output folder and title."""
+    spec = dict(options)
+    title = spec["title"] or title
+    if title and not TITLE_RE.fullmatch(title):
+        raise BadRequest(f"title ID is not valid: {title}")
+    # build_title() deletes the output folder outright before writing, so the
+    # server names it and refuses to reuse one that already exists.
+    m = re.search(r"[A-Z]{4}[0-9]{5}", os.path.basename(src.rstrip(os.sep)))
+    name = title or (m.group(0) if m else "backport")
+    out = os.path.join(spec["out_dir"], f"{name}-backport")
+    if os.path.exists(out):
+        raise BadRequest(f"output folder already exists: {out}")
+    spec.update(source=src, title=title, out=out)
+    return spec
+
+
 def backport_spec(params):
     """Options for another-backporter's `run`: a dump or pkg, a target tier."""
     value = (params.get("source") or "").strip()
@@ -1115,25 +1177,16 @@ def backport_spec(params):
         if not (os.environ.get("PS5BACKPORT_PUB_CMD")
                 or os.path.exists(PROSPERO_PUB_CMD)):
             raise BadRequest("pkg input needs prospero-pub-cmd.exe, which is missing")
-    tier = params.get("tier") or "7xx"
-    if tier not in BACKPORT_TIERS:
-        raise BadRequest(f"unknown tier: {tier}")
-    libs = resolve_path(params.get("libs_dir"), "firmware libraries")
-    if not os.path.isdir(os.path.join(libs, BACKPORT_SOURCE_FW)):
-        raise BadRequest(f"firmware libraries: no {BACKPORT_SOURCE_FW} dump in {libs}")
-    title = checked(params, "title", TITLE_RE, "title ID")
-    out_dir = resolve_path(params.get("out_dir"), "output directory", create=True)
-    # build_title() deletes the output folder outright before writing, so the
-    # server names it and refuses to reuse one that already exists.
-    m = re.search(r"[A-Z]{4}[0-9]{5}", os.path.basename(src.rstrip(os.sep)))
-    name = title or (m.group(0) if m else "backport")
-    out = os.path.join(out_dir, f"{name}-backport")
-    if os.path.exists(out):
-        raise BadRequest(f"output folder already exists: {out}")
-    return {"source": src, "title": title, "tier": tier, "libs_dir": libs,
-            "out_dir": out_dir, "out": out,
-            "allow_unreviewed": bool(params.get("allow_unreviewed")),
-            "unpeg_shim": bool(params.get("unpeg_shim"))}
+    return backport_for_source(backport_options(params), src)
+
+
+def chained_backport_options(params):
+    """Options for a post-build backport, or None when it was not requested."""
+    if not params.get("backport_after"):
+        return None
+    if not os.path.isfile(BACKPORT_PS5):
+        raise BadRequest(f"another-backporter is not installed: {BACKPORT_PS5}")
+    return backport_options(params)
 
 
 def build_job(kind, params):
@@ -1165,9 +1218,17 @@ def build_job(kind, params):
                              "'Do not build DLC packages'")
         summary = (f"Build {os.path.basename(spec['source_dir'])} "
                    f"({spec['platform'].upper()})")
+        if params.get("backport_after"):
+            if spec["platform"] != "ps5" or is_ps5_addon(spec["source_dir"]):
+                raise BadRequest("post-build backporting requires a PS5 app dump")
+            spec["backport_after"] = chained_backport_options(params)
+            summary += " + Backport"
     elif kind == "dump-build":
         console_spec(params, spec)
         dump_spec(params, spec)
+        spec["backport_after"] = chained_backport_options(params)
+        if spec["backport_after"] and not spec["dump_game"]:
+            raise BadRequest("post-build backporting requires dumping the game")
         spec["no_decrypt"] = False
         spec["out_dir"] = resolve_path(params.get("out_dir"), "output directory", create=True)
         spec["delete_dumps"] = bool(params.get("delete_dumps"))
@@ -1183,10 +1244,14 @@ def build_job(kind, params):
         if (spec["psn_al"] and "ps4" not in problems and spec["ps4"]["no_dlc"]):
             problems["ps4"] = ("grabbing AL content from PSN conflicts with "
                                "'Do not build DLC packages'")
+        if spec["backport_after"]:
+            problems["ps4"] = "post-build backporting requires a PS5 app dump"
         if len(problems) == 2:
             raise BadRequest("; ".join(f"{p.upper()}: {e}" for p, e in problems.items()))
         spec["option_problems"] = problems
         summary = f"Dump+Build {spec['title'] or 'running game'} from {spec['host']}"
+        if spec["backport_after"]:
+            summary = summary.replace("Dump+Build", "Dump+Build+Backport", 1)
     elif kind == "backport":
         if not os.path.isfile(BACKPORT_PS5):
             raise BadRequest(f"another-backporter is not installed: {BACKPORT_PS5}")
@@ -1231,7 +1296,7 @@ PER_TITLE_OPTIONS = {
     "content_id": "content ID override", "ps2_tid": "PS2 serial override",
     "base_pkg": "existing base package", "ps5_name": "package name",
     "reference_pkg": "reference package", "entitlement_key": "entitlement key",
-    "sc_pkg": "SC package",
+    "sc_pkg": "SC package", "backport_title": "backport title ID override",
 }
 MAX_BATCH = 200
 SCAN_DEPTH = int(setting("SCAN_DEPTH", "4"))
@@ -1321,6 +1386,12 @@ def unit_layers(source, params):
                    "addons": [a["path"] for a in addon_metas]}, title
 
 
+def backportable_layers(platform, layers):
+    """Whether a scanned build unit has an original PS5 app dump to backport."""
+    return (platform == "ps5" and not layers.get("rebuild")
+            and not is_ps5_addon(layers["base"]))
+
+
 def build_jobs(params, sources):
     """One build Job per selected scan unit, all sharing params.
 
@@ -1349,6 +1420,12 @@ def build_jobs(params, sources):
     out_dir = resolve_path(params.get("out_dir"), "output directory", create=True)
     options = {p: (ps4_spec(params, with_sources=False) if p == "ps4" else ps5_spec(params))
                for p in {pl for pl, _l, _t in units}}
+    backport = None
+    if params.get("backport_after"):
+        if not any(backportable_layers(p, layers) for p, layers, _t in units):
+            raise BadRequest("post-build backporting requires a selected PS5 app dump; "
+                             "add-ons and package rebuilds are not eligible")
+        backport = chained_backport_options(params)
     jobs = []
     for platform, layers, title in units:
         spec = {"source_dir": layers["base"] or layers["addons"][0],
@@ -1356,7 +1433,11 @@ def build_jobs(params, sources):
                 "psn_al": bool(params.get("psn_al")),
                 platform: options[platform]}
         verb = "Rebuild" if layers.get("rebuild") else "Build"
-        jobs.append(Job("build", spec, f"{verb} {title} ({platform.upper()})"))
+        summary = f"{verb} {title} ({platform.upper()})"
+        if backport and backportable_layers(platform, layers):
+            spec["backport_after"] = dict(backport)
+            summary += " + Backport"
+        jobs.append(Job("build", spec, summary))
     return jobs
 
 
@@ -1467,8 +1548,10 @@ def config():
         "ps5_temp_dir": usable_path(setting("LIBPROSPERO_TEMP_DIR")),
         "compression_level": "7",
         "chunk_count": "",
-        "libs_dir": usable_path(setting("PS5BACKPORT_LIBS")),
-        "tier": "7xx",
+        "backport_libs_dir": usable_path(setting("PS5BACKPORT_LIBS")),
+        "backport_out_dir": usable_path(setting("PKG_DIR") or setting("OUT_DIR"),
+                                        os.path.join(ROOTS[0], "out")),
+        "backport_tier": "7xx",
     }
     tools = {name: os.path.exists(path) for name, path in
              (("pfsdump", PFSDUMP), ("build-pkg", BUILD_PKG),
