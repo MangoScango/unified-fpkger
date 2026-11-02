@@ -185,7 +185,7 @@
         <label class="check"><input type="checkbox" name="backport_after"> Create a PS5 backport after building</label>
         <fieldset data-backport-options hidden>
           <legend>PS5 backport (another-backporter)</legend>
-          <p class="hint">Uses each selected PS5 app dump after its build succeeds. PS4 titles, add-ons and package rebuilds are not backported.</p>
+          <p class="hint">Uses each selected PS5 app dump after its build succeeds, including the dump extracted for a package rebuild. PS4 titles and add-ons are not backported.</p>
           <div data-use="t-backport"></div>
         </fieldset>
       </div>
@@ -717,7 +717,7 @@ function chosenUnits() {
 }
 
 function backportableUnit(u) {
-  return u.platform === "ps5" && !u.rebuild && u.kind !== "Add-on";
+  return u.platform === "ps5" && u.kind !== "Add-on";
 }
 
 // One selected PS5 add-on with a recorded key fills the field, unless the

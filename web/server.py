@@ -584,6 +584,7 @@ def extract_step(job, spec, pkg_path):
 
 
 def build_step(job, spec, src, platform):
+    """Build from src and return the loose tree used (a rebuild's extraction)."""
     out_dir = spec["out_dir"]
     os.makedirs(out_dir, exist_ok=True)
     if platform != "ps4" and spec.get("layers") and spec["layers"].get("rebuild"):
@@ -617,7 +618,7 @@ def build_step(job, spec, src, platform):
                 argv.append("--no-dlc")
             argv += ["--out", out_dir, src]
         run_build(job, argv, out_dir, before, platform)
-        return
+        return src
     # A folder of add-ons, as pfsdump writes into <title>-dlc, builds each one.
     if os.path.isfile(os.path.join(src, "sce_sys", "param.json")):
         targets = [src]
@@ -631,6 +632,7 @@ def build_step(job, spec, src, platform):
                        "so each uses its own entitlement_key.dat")
     for target in targets:
         build_ps5(job, spec, target, out_dir)
+    return src
 
 
 def build_ps5(job, spec, src, out_dir):
@@ -898,13 +900,13 @@ def execute(job):
                         "skipping the PSN entitlement lookup")
             if created and spec["platform"] == "ps4" and spec.get("layers"):
                 spec["layers"]["addons"] += created
-        build_step(job, spec, spec["source_dir"], spec["platform"])
+        build_source = build_step(job, spec, spec["source_dir"], spec["platform"])
         if created and spec["platform"] == "ps5":
             # A typed-in key belongs to the selected dump, not the new trees.
             sub = dict(spec, ps5={**spec["ps5"], "entitlement_key": ""})
             for tree in created:
                 build_ps5(job, sub, tree, spec["out_dir"])
-        chained_backport_step(job, spec, spec["source_dir"])
+        chained_backport_step(job, spec, build_source)
     elif job.kind == "dlc-split":
         dlc_split_step(job, spec)
     elif job.kind == "psn-unlockers":
@@ -1335,7 +1337,8 @@ def scanned_pkg(path):
         if pkg.kind == "Update":
             raise BadRequest(f"{real} is a patch image; it cannot be rebuilt on its own")
         title = pkg.title or pkg.title_id
-    return real, title or os.path.splitext(os.path.basename(real))[0]
+        kind = pkg.kind
+    return real, title or os.path.splitext(os.path.basename(real))[0], kind
 
 
 def unit_layers(source, params):
@@ -1351,9 +1354,9 @@ def unit_layers(source, params):
     if source.get("pkg"):
         if source.get("base") or source.get("update") or source.get("addons"):
             raise BadRequest("a package rebuild takes no dump folders")
-        real, title = scanned_pkg(source["pkg"])
+        real, title, kind = scanned_pkg(source["pkg"])
         return "ps5", {"base": real, "update": None, "addons": [],
-                       "rebuild": True}, title
+                       "rebuild": True, "kind": kind}, title
     base, update = source.get("base") or None, source.get("update") or None
     addons = source.get("addons") or []
     if not isinstance(addons, list) or not all(isinstance(a, str) for a in addons):
@@ -1387,9 +1390,12 @@ def unit_layers(source, params):
 
 
 def backportable_layers(platform, layers):
-    """Whether a scanned build unit has an original PS5 app dump to backport."""
-    return (platform == "ps5" and not layers.get("rebuild")
-            and not is_ps5_addon(layers["base"]))
+    """Whether a build has a PS5 app dump (or package extraction) to backport."""
+    if platform != "ps5":
+        return False
+    if layers.get("rebuild"):
+        return layers.get("kind") != "Add-on"
+    return not is_ps5_addon(layers["base"])
 
 
 def build_jobs(params, sources):
@@ -1423,8 +1429,8 @@ def build_jobs(params, sources):
     backport = None
     if params.get("backport_after"):
         if not any(backportable_layers(p, layers) for p, layers, _t in units):
-            raise BadRequest("post-build backporting requires a selected PS5 app dump; "
-                             "add-ons and package rebuilds are not eligible")
+            raise BadRequest("post-build backporting requires a selected PS5 app dump "
+                             "or app package rebuild; add-ons are not eligible")
         backport = chained_backport_options(params)
     jobs = []
     for platform, layers, title in units:
