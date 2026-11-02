@@ -1163,9 +1163,9 @@ def backport_for_source(options, src, title=""):
     return spec
 
 
-def backport_spec(params):
-    """Options for another-backporter's `run`: a dump or pkg, a target tier."""
-    value = (params.get("source") or "").strip()
+def backport_source(value):
+    """Resolve a standalone backport's dump folder or package input."""
+    value = (value or "").strip()
     if not value:
         raise BadRequest("source is required")
     if not os.path.isabs(value):
@@ -1179,6 +1179,12 @@ def backport_spec(params):
         if not (os.environ.get("PS5BACKPORT_PUB_CMD")
                 or os.path.exists(PROSPERO_PUB_CMD)):
             raise BadRequest("pkg input needs prospero-pub-cmd.exe, which is missing")
+    return src
+
+
+def backport_spec(params):
+    """Options for another-backporter's `run`: a dump or pkg, a target tier."""
+    src = backport_source(params.get("source"))
     return backport_for_source(backport_options(params), src)
 
 
@@ -1445,6 +1451,41 @@ def build_jobs(params, sources):
             summary += " + Backport"
         jobs.append(Job("build", spec, summary))
     return jobs
+
+
+def backport_jobs(params, sources):
+    """One standalone backport Job per scanned PS5 app dump or package."""
+    if not isinstance(params, dict):
+        raise BadRequest("params must be an object")
+    if not isinstance(sources, list) or not sources:
+        raise BadRequest("choose at least one dump or package to backport")
+    if len(sources) > MAX_BATCH:
+        raise BadRequest(f"at most {MAX_BATCH} sources per submission")
+    if len(sources) > 1 and str(backport_param(params, "title") or "").strip():
+        raise BadRequest("the backport title ID override is for a single source; "
+                         "clear it or select one source")
+    if not os.path.isfile(BACKPORT_PS5):
+        raise BadRequest(f"another-backporter is not installed: {BACKPORT_PS5}")
+    options = backport_options(params)
+    plans = []
+    used, outputs = set(), set()
+    for value in sources:
+        if not isinstance(value, str):
+            raise BadRequest("each backport source must be a path")
+        src = backport_source(value)
+        meta = dumpscan.read_meta(src) if os.path.isdir(src) else dumpscan.read_pkg_meta(src)
+        if not meta or meta["platform"] != "ps5" or meta["kind"] == "Add-on":
+            raise BadRequest(f"not a PS5 app dump or app package: {src}")
+        if src in used:
+            raise BadRequest(f"the same backport source is selected twice: {src}")
+        used.add(src)
+        spec = backport_for_source(options, src, meta["title_id"] or "")
+        if spec["out"] in outputs:
+            raise BadRequest(f"multiple sources would write the same output: {spec['out']}")
+        outputs.add(spec["out"])
+        title = meta["title"] or os.path.basename(src.rstrip(os.sep))
+        plans.append((spec, f"Backport {title} ({spec['tier']})"))
+    return [Job("backport", spec, summary) for spec, summary in plans]
 
 
 # --- queue -----------------------------------------------------------------------
@@ -1717,7 +1758,13 @@ class Handler(BaseHTTPRequestHandler):
                 submit(job)
                 self._send(HTTPStatus.CREATED, job.summary_dict())
             elif url.path == "/api/jobs/batch":
-                jobs = build_jobs(body.get("params"), body.get("sources"))
+                kind = body.get("kind") or "build"
+                if kind == "build":
+                    jobs = build_jobs(body.get("params"), body.get("sources"))
+                elif kind == "backport":
+                    jobs = backport_jobs(body.get("params"), body.get("sources"))
+                else:
+                    raise BadRequest(f"unknown batch job kind: {kind}")
                 for job in jobs:
                     submit(job)
                 self._send(HTTPStatus.CREATED, {"jobs": [j.summary_dict() for j in jobs]})

@@ -110,6 +110,9 @@
   form[data-kind=build].multi [data-single] { opacity: .6; }
   form[data-kind=build].multi [data-single]::after { content: "One dump only"; display: block;
     font-size: 11.5px; color: var(--warn); }
+  form[data-kind=backport].multi [data-single] { opacity: .6; }
+  form[data-kind=backport].multi [data-single]::after { content: "One source only"; display: block;
+    font-size: 11.5px; color: var(--warn); }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 </style>
 </head>
@@ -198,13 +201,29 @@
   <div role="tabpanel" id="panel-backport" aria-labelledby="tab-backport" hidden>
     <form data-kind="backport">
       <fieldset>
+        <legend>Dumps and packages</legend>
+        <label>Scan folder
+          <span class="row"><input type="text" name="scan_dir" required>
+          <button type="button" data-browse="scan_dir">Browse</button>
+          <button type="button" id="backport-scan-run">Scan</button></span></label>
+        <div class="scan-tools" id="backport-scan-tools" hidden>
+          <input type="search" id="backport-scan-filter" placeholder="Filter by title, ID or folder" aria-label="Filter backport sources">
+          <select id="backport-scan-platform" aria-label="Show platform for backport sources">
+            <option value="">All</option><option value="ps4">PS4</option><option value="ps5">PS5</option>
+          </select>
+          <button type="button" id="backport-scan-all">Select shown</button>
+          <button type="button" id="backport-scan-none">Clear</button>
+        </div>
+        <p class="hint" id="backport-scan-status" role="status" aria-live="polite"></p>
+        <ul id="backport-dumps" aria-label="Dumps and packages found" hidden></ul>
+        <p class="hint" id="backport-scan-selected" aria-live="polite"></p>
+        <p class="hint">Only PS5 app dumps and app packages can be selected.</p>
+      </fieldset>
+      <fieldset>
         <legend>PS5 backport (another-backporter)</legend>
-        <label>Dump folder or .pkg
-          <span class="row"><input type="text" name="source" required>
-          <button type="button" data-browse="source" data-files="pkg" data-dirs>Browse</button></span></label>
         <div data-use="t-backport"></div>
       </fieldset>
-      <button class="primary" type="submit">Start backport</button>
+      <button class="primary" type="submit" id="backport-submit" disabled>Backport selected</button>
       <p class="status" role="status"></p>
     </form>
   </div>
@@ -662,11 +681,13 @@ function dlcSplitPanel(u) {
   return panel;
 }
 
-function unitRow(u) {
-  const c = choiceFor(u);
-  const box = el("input", {type: "checkbox", className: "pick", checked: selected.has(u.id),
-                           disabled: !u.buildable});
-  box.addEventListener("change", () => pick(u, box.checked));
+function unitRow(u, mode = "build") {
+  const forBackport = mode === "backport";
+  const c = forBackport ? null : choiceFor(u);
+  const usable = forBackport ? backportableUnit(u) : u.buildable;
+  const checked = forBackport ? backportSelected.has(u.id) : selected.has(u.id);
+  const box = el("input", {type: "checkbox", className: "pick", checked, disabled: !usable});
+  box.addEventListener("change", () => forBackport ? backportPick(u, box.checked) : pick(u, box.checked));
   const placeholder = () =>
     el("span", {className: "dump-icon", textContent: u.platform.toUpperCase(), ariaHidden: "true"});
   let icon = placeholder();
@@ -688,14 +709,16 @@ function unitRow(u) {
       ? tag(u.base?.entitlement_key ? "entitlement key" : "no entitlement key") : null,
     u.base?.dlc_emu?.length ? tag("dlc_emu", "rebuild") : null);
   const ids = [u.title_id, u.content_id].filter(Boolean).join(" · ");
+  const notes = [...u.notes];
+  if (forBackport && !usable) notes.push("Backporting requires a PS5 app dump or app package.");
   const body = el("span", {className: "dump-body"},
     el("span", {className: "dump-title", textContent: u.title || u.title_id || u.id.split("/").pop()}),
     tags,
     ids ? el("span", {className: "dump-id", textContent: ids}) : null,
     el("span", {className: "dump-path", textContent: u.base ? u.base.path : "No base dump found"}),
-    ...u.notes.map(n => el("span", {className: "hint warn", textContent: n})));
+    ...notes.map(n => el("span", {className: "hint warn", textContent: n})));
   const li = el("li", {}, el("label", {className: "dump"}, box, icon, body),
-    layerControls(u, c), dlcSplitPanel(u));
+    forBackport ? null : layerControls(u, c), forBackport ? null : dlcSplitPanel(u));
   li.dataset.id = u.id;
   li.dataset.platform = u.platform;
   li.dataset.search = [u.title, u.title_id, u.content_id,
@@ -844,7 +867,7 @@ async function runScan() {
     const ids = new Set(units.filter(u => u.buildable).map(u => u.id));
     for (const id of [...selected]) if (!ids.has(id)) selected.delete(id);
     const list = $("#dumps");
-    list.replaceChildren(...units.map(unitRow));
+    list.replaceChildren(...units.map(u => unitRow(u)));
     list.hidden = !units.length;
     $("#scan-tools").hidden = !units.length;
     applyFilter();
@@ -890,6 +913,117 @@ $("#scan-none").addEventListener("click", () => {
   syncSelection();
 });
 
+// Backport scans the same source trees, but selects PS5 apps without build layers.
+const backportForm = $("form[data-kind=backport]");
+const backportScanInput = backportForm.elements.scan_dir;
+let backportUnits = [];
+const backportSelected = new Set();
+let backportScanToken = 0, backportScanned = false;
+
+function backportChosenUnits() {
+  return backportUnits.filter(u => backportSelected.has(u.id));
+}
+
+function backportPick(u, on) {
+  on ? backportSelected.add(u.id) : backportSelected.delete(u.id);
+  const box = $(`#backport-dumps li[data-id="${CSS.escape(u.id)}"] input.pick`);
+  if (box) box.checked = on;
+  syncBackportSelection();
+}
+
+function applyBackportFilter() {
+  const words = $("#backport-scan-filter").value.toLowerCase().split(/\s+/).filter(Boolean);
+  const platform = $("#backport-scan-platform").value;
+  for (const li of $$("#backport-dumps li[data-id]"))
+    li.hidden = (platform && li.dataset.platform !== platform) ||
+      !words.every(w => li.dataset.search.includes(w));
+}
+
+function syncBackportSelection() {
+  const chosen = backportChosenUnits();
+  const multi = chosen.length > 1;
+  backportForm.classList.toggle("multi", multi);
+  for (const input of $$("[data-single] input, [data-single] button", backportForm))
+    input.disabled = multi;
+  const hiddenCount = chosen.filter(u =>
+    $(`#backport-dumps li[data-id="${CSS.escape(u.id)}"]`)?.hidden).length;
+  $("#backport-scan-selected").textContent = chosen.length
+    ? `${chosen.length} selected` + (hiddenCount ? `, ${hiddenCount} hidden by the filter` : "") + "."
+    : "";
+  const submit = $("#backport-submit");
+  submit.disabled = !chosen.length;
+  submit.textContent = chosen.length > 1 ? `Backport ${chosen.length} titles` : "Backport selected";
+}
+
+async function runBackportScan() {
+  const path = backportScanInput.value.trim();
+  const status = $("#backport-scan-status");
+  if (!path) { status.textContent = "Choose a folder to scan."; return; }
+  const token = ++backportScanToken;
+  backportScanned = true;
+  localStorage.setItem(SCAN_KEY, path);
+  status.className = "hint";
+  status.textContent = "Scanning...";
+  $("#backport-scan-run").disabled = true;
+  try {
+    const data = await api("/api/scan?path=" + encodeURIComponent(path));
+    if (token !== backportScanToken) return;
+    backportUnits = data.units;
+    const ids = new Set(backportUnits.filter(backportableUnit).map(u => u.id));
+    for (const id of [...backportSelected]) if (!ids.has(id)) backportSelected.delete(id);
+    const list = $("#backport-dumps");
+    list.replaceChildren(...backportUnits.map(u => unitRow(u, "backport")));
+    list.hidden = !backportUnits.length;
+    $("#backport-scan-tools").hidden = !backportUnits.length;
+    applyBackportFilter();
+    const count = new Map();
+    for (const u of backportUnits) count.set(u.platform, (count.get(u.platform) || 0) + 1);
+    const split = [...count].map(([p, n]) => `${n} ${p.toUpperCase()}`).join(", ");
+    status.textContent = backportUnits.length
+      ? `${plural(backportUnits.length, "title")} (${split}) from ${plural(data.found, "dump/package")} in ${data.path}.` +
+        (data.truncated ? ` Stopped at ${data.limit}; scan a narrower folder to see the rest.` : "")
+      : `No param.sfo, param.json or PS5 .pkg within ${plural(data.depth, "folder")} of ${data.path}.`;
+  } catch (err) {
+    if (token !== backportScanToken) return;
+    status.className = "hint error";
+    status.textContent = err.message;
+  } finally {
+    if (token === backportScanToken) $("#backport-scan-run").disabled = false;
+    syncBackportSelection();
+  }
+}
+
+function ensureBackportScanned() {
+  if (!backportScanned && backportScanInput.value.trim()) runBackportScan();
+}
+
+$("#tab-backport").addEventListener("tabselect", ensureBackportScanned);
+$("#backport-scan-run").addEventListener("click", runBackportScan);
+backportScanInput.addEventListener("change", runBackportScan);
+backportScanInput.addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); runBackportScan(); }
+});
+$("#backport-scan-filter").addEventListener("input", () => {
+  applyBackportFilter();
+  syncBackportSelection();
+});
+$("#backport-scan-platform").addEventListener("change", () => {
+  applyBackportFilter();
+  syncBackportSelection();
+});
+$("#backport-scan-all").addEventListener("click", () => {
+  for (const li of $$("#backport-dumps li[data-id]:not([hidden])")) {
+    const box = $("input.pick", li);
+    if (!box.disabled) { box.checked = true; backportSelected.add(li.dataset.id); }
+  }
+  syncBackportSelection();
+});
+$("#backport-scan-none").addEventListener("click", () => {
+  backportSelected.clear();
+  for (const box of $$("#backport-dumps input.pick")) box.checked = false;
+  syncBackportSelection();
+});
+
 function fill(defaults) {
   for (const form of $$("form")) {
     for (const [name, value] of Object.entries(defaults)) {
@@ -900,10 +1034,14 @@ function fill(defaults) {
     }
   }
   const lastScan = localStorage.getItem(SCAN_KEY);
-  if (lastScan) scanInput.value = lastScan;
+  if (lastScan) {
+    scanInput.value = lastScan;
+    backportScanInput.value = lastScan;
+  }
   for (const form of $$("form[data-kind=dump]"))
     syncConsolePlatform(form);
   syncSelection();
+  syncBackportSelection();
 }
 
 function params(form) {
@@ -935,6 +1073,14 @@ for (const form of $$("form")) {
           ? `Queued ${jobs.length} jobs, ${ids[0]} to ${ids[ids.length - 1]}.`
           : `Queued job ${ids[0]}.`;
         showJob(jobs[0].id);
+      } else if (form === backportForm) {
+        const sources = backportChosenUnits().map(u => u.base.path);
+        const {jobs} = await api("/api/jobs/batch", {kind: "backport", params: p, sources});
+        const ids = jobs.map(j => "#" + j.id);
+        status.textContent = jobs.length > 1
+          ? `Queued ${jobs.length} jobs, ${ids[0]} to ${ids[ids.length - 1]}.`
+          : `Queued job ${ids[0]}.`;
+        showJob(jobs[0].id);
       } else {
         const kind = form === dumpForm && buildToggle.checked ? "dump-build" : form.dataset.kind;
         const job = await api("/api/jobs", {kind, params: p});
@@ -948,6 +1094,7 @@ for (const form of $$("form")) {
     } finally {
       button.disabled = false;
       if (form === buildForm) syncSelection();
+      if (form === backportForm) syncBackportSelection();
     }
   });
 }
@@ -1249,6 +1396,7 @@ $("#job-cancel").addEventListener("click", async () => {
     $("#roots").textContent = err.message;
   }
   if (!$("#panel-build").hidden) ensureScanned();
+  if (!$("#panel-backport").hidden) ensureBackportScanned();
   refreshJobs();
   setInterval(refreshJobs, 5000);
 })();
