@@ -67,6 +67,8 @@ def resolve_param(param):
     if not uri:
         return None, "param.json has no versionFileUri"
     version = param.get("contentVersion") or ""
+    if not version:
+        return None, "param.json has no contentVersion"
     try:
         root = xml.etree.ElementTree.fromstring(fetch(uri))
     except Exception as err:

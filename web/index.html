@@ -25,6 +25,7 @@
   [role=tabpanel] { background: var(--panel); border: 1px solid var(--line); border-top: none; padding: 16px; border-radius: 0 0 6px 6px; }
   fieldset { border: 1px solid var(--line); border-radius: 6px; margin: 0 0 14px; padding: 10px 12px 12px; }
   legend { color: var(--muted); font-size: 13px; padding: 0 6px; }
+  [hidden] { display: none !important; }
   label { display: block; margin: 8px 0 2px; font-size: 13px; color: var(--muted); }
   label.check { display: flex; gap: 8px; align-items: center; color: var(--text); font-size: 14px; margin: 6px 0; }
   input[type=text], input[type=number], select { width: 100%; padding: 6px 8px; font: inherit; color: var(--text);
@@ -548,8 +549,8 @@ function layerControls(u, c) {
 
 // A dlc_emu dump ships its DLC inside the app folder; this panel splits each
 // dlc_emu.ini entry into a real add-on tree, one row per DLC with its own SC
-// package box. PSAL rows are license-only: no files to move, and their
-// metadata comes from PSN when no SC package is given.
+// package box. PSAL rows are license-only: no files to move, no SC package
+// exists, and their metadata comes from PSN at split time.
 function dlcSplitPanel(u) {
   const entries = u.base?.dlc_emu || [];
   if (!entries.length) return null;
@@ -574,8 +575,8 @@ function dlcSplitPanel(u) {
                                        textContent: " · " + e.mount_point}) : null)),
       ...e.problems.map(p => el("p", {className: "hint warn", textContent: p})),
       e.problems.length ? null : el("div", {className: "grid2"},
-        el("label", {}, al ? "SC package (optional)"
-                           : "SC package (URL or local .pkg)",
+        // AL is license-only; no SC package exists for it, so no box.
+        al ? null : el("label", {}, "SC package (URL or local .pkg)",
           el("span", {className: "row"}, sc, browse)),
         el("label", {}, "Entitlement key", key)));
     return {e, box, sc, key, node};
