@@ -229,9 +229,9 @@ def build_unlockers(titles, out_dir, region="us", language="en",
     if tool is None and any(not title_id.startswith("PPSA")
                             for _c, _t, _i, title_id in licenses):
         raise RuntimeError(
-            "PS4 DLC entitlement unlockers require program \"sfo\" "
-            "(https://github.com/hippie68/sfo) to build param.sfo files. "
-            "Place it next to pfsdump.py or set SFO_PATH.")
+            "PS4 DLC entitlement unlockers require the bundled sfo.py "
+            "to build param.sfo files. Restore it next to pfsdump.py or "
+            "set SFO_PATH.")
 
     created = []
     skipped = 0
@@ -253,7 +253,7 @@ def build_unlockers(titles, out_dir, region="us", language="en",
                     f"could not create unlocker directory for {content_id}: {err}"
                 ) from err
             command = [
-                tool, os.path.join(sce_sys, "param.sfo"),
+                *tool, os.path.join(sce_sys, "param.sfo"),
                 "--new-file", "--force",
                 "--set", "int", "ATTRIBUTE", "0",
                 "--set", "str", "CATEGORY", "ac",

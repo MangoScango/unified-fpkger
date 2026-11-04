@@ -2,8 +2,8 @@
 """build-pkg.py — repackage a raw PS4 or PS5 dump into a fake PKG on Linux.
 
 One module replacing build-fpkg.sh (PS4) and build-ps5.sh (PS5); the pipelines
-are verbatim ports, with the external tools (wine exes, sfo, the python
-helpers) still subprocesses on the same argv shapes.
+are verbatim ports, with the external Wine executables and Python helpers still
+run as subprocesses on the same argv shapes.
 
 ----------------------------------------------------------------------------
 PS4: build-pkg.py ps4 [options] <dir> [dir ...]
@@ -150,8 +150,7 @@ MAKE_FSELF = env("MAKE_FSELF", os.path.join(SELF_DIR, "make_fself.py"))
 BACKPORT_SDK = env("BACKPORT_SDK", os.path.join(SELF_DIR, "backport-sdk.py"))
 PKG_SET_APPVER = env("PKG_SET_APPVER", os.path.join(SELF_DIR, "pkg-set-appver.py"))
 SHRINK_PNG = env("SHRINK_PNG", os.path.join(SELF_DIR, "shrink-png.py"))
-SFO_TOOL = env("SFO_TOOL", os.path.join(
-    SELF_DIR, "sfo.exe" if os.name == "nt" else "sfo"))
+SFO_TOOL = (sys.executable, env("SFO_TOOL", os.path.join(SELF_DIR, "sfo.py")))
 SC_OVERLAY = env("SC_OVERLAY", os.path.join(SELF_DIR, "sc-overlay.py"))
 FAKE_PASSCODE = "00000000000000000000000000000000"
 DLC_ENT_KEY = "00000000000000000000000000000000"   # zero entitlement key (kstuff fakes the check)
@@ -267,20 +266,20 @@ def winpath(path):
 
 
 def sfo_get(path, key):
-    out = subprocess.run([SFO_TOOL, path, "-q", key], stdout=subprocess.PIPE,
+    out = subprocess.run([*SFO_TOOL, path, "-q", key], stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL)
     return out.stdout.decode(errors="replace").replace("\r", "").replace("\n", "")
 
 
 def sfo_pkg(pkg, key):
     # the sfo tool also takes the key first, which is how it reads inside a pkg
-    out = subprocess.run([SFO_TOOL, "-q", key, pkg], stdout=subprocess.PIPE,
+    out = subprocess.run([*SFO_TOOL, "-q", key, pkg], stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL)
     return out.stdout.decode(errors="replace").replace("\r", "").replace("\n", "")
 
 
 def sfo_edit(*args):
-    subprocess.run([SFO_TOOL, *args], stdout=subprocess.DEVNULL,
+    subprocess.run([*SFO_TOOL, *args], stdout=subprocess.DEVNULL,
                    stderr=subprocess.DEVNULL)
 
 
@@ -1097,7 +1096,7 @@ def build_one_dlc(ac):
     #    CATEGORY alone is not enough; it also needs the app keys an ac sfo lacks.
     real_sfo = os.path.join(stage, "sce_sys", "param.sfo")
     shutil.copy2(real_sfo, real_sfo + ".real")
-    rc = subprocess.run([SFO_TOOL, "-s", "str", "CATEGORY", "gd",
+    rc = subprocess.run([*SFO_TOOL, "-s", "str", "CATEGORY", "gd",
                          "-s", "int", "APP_TYPE", "1",
                          "-s", "str", "APP_VER", "01.00",
                          "-s", "int", "SYSTEM_VER", "0x03110000", real_sfo],

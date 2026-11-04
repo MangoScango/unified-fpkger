@@ -3,7 +3,6 @@
 /PPSA*/
 *.pkg
 *.gp4
-sfo
 /wrk_*/
 /tools
 *.log

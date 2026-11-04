@@ -9,13 +9,8 @@
 FROM debian:trixie-slim AS deps
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        gcc libc6-dev git ca-certificates \
+        git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
-ARG SFO_REPO=https://github.com/hippie68/sfo
-ARG SFO_REF=main
-RUN git clone --depth 1 --branch "$SFO_REF" "$SFO_REPO" /src/sfo \
-    && gcc /src/sfo/sfo.c -O3 -s -o /out-sfo
 
 ARG PKGTOOLS_REPO=https://github.com/CyB1K/PS4-Fake-PKG-Tools-3.87
 ARG PKGTOOLS_REF=main
@@ -78,7 +73,7 @@ RUN dpkg --add-architecture i386 \
 
 # Consumed by build-pkg.py's tool-path env hooks.
 ENV SDK_DIR=/opt/fpkger/PS4_Fake_PKG_Tools_3 \
-    SFO_TOOL=/opt/fpkger/sfo \
+    SFO_TOOL=/opt/fpkger/sfo.py \
     MAKE_FSELF=/opt/fpkger/make_fself.py \
     GENGP4_APP=/opt/fpkger/PS4_Fake_PKG_Tools_3/gengp4_app.exe \
     ORBIS_PUB_CMD=/opt/fpkger/PS4_Fake_PKG_Tools_3/orbis-pub-cmd.exe \
@@ -91,7 +86,6 @@ ENV SDK_DIR=/opt/fpkger/PS4_Fake_PKG_Tools_3 \
     WINEDEBUG=-all \
     WINEDLLOVERRIDES="wineps.drv,localspl.dll,spoolss.dll=d"
 
-COPY --from=deps /out-sfo        /opt/fpkger/sfo
 COPY --from=deps /out-pkgtools   /opt/fpkger/PS4_Fake_PKG_Tools_3
 COPY --from=deps /src/ps-pkg-info/ps_pkg_info /opt/fpkger/ps_pkg_info
 # another-backporter is a git submodule: backport-ps5.py drives the web UI's
@@ -121,10 +115,9 @@ RUN off=$((0x3681B)) \
 
 RUN chmod +x /opt/fpkger/build-pkg.py \
         /opt/fpkger/pkg-set-appver.py \
-        /opt/fpkger/pfsdump.py /opt/fpkger/sfo \
+        /opt/fpkger/pfsdump.py /opt/fpkger/sfo.py \
         /usr/local/bin/entrypoint.sh \
     && ln -s /opt/fpkger/build-pkg.py /usr/local/bin/build-pkg.py \
-    && ln -s /opt/fpkger/sfo /usr/local/bin/sfo \
     && ln -s /opt/fpkger/pkg-set-appver.py /usr/local/bin/pkg-set-appver.py \
     && ln -s /opt/fpkger/pfsdump.py /usr/local/bin/pfsdump.py
 

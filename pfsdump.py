@@ -1357,19 +1357,10 @@ def keystone_is_generated(path):
 
 
 def sfo_tool():
-    """Locates hippie68's sfo tool"""
-    def usable(path):
-        return path and os.path.isfile(path) \
-            and (os.name == "nt" or os.access(path, os.X_OK))
-
-    override = os.environ.get("SFO_PATH")
-    if usable(override):
-        return override
-    beside = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "sfo.exe" if os.name == "nt" else "sfo")
-    if usable(beside):
-        return beside
-    return shutil.which("sfo")
+    """Command prefix for the bundled Python SFO tool, or None if missing."""
+    path = os.environ.get("SFO_PATH") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "sfo.py")
+    return [sys.executable, path] if os.path.isfile(path) else None
 
 
 def fix_merged_sfo(path, category):
@@ -1381,14 +1372,14 @@ def fix_merged_sfo(path, category):
     """
     tool = sfo_tool()
     if tool is None:
-        return "sfo not found; set SFO_PATH"
+        return "sfo.py not found; set SFO_PATH"
     backup = path + ".orig"
     shutil.copyfile(path, backup)
     # Deleting exits non-zero when the key is absent, which is not an error.
-    subprocess.run([tool, path, "-d", "TARGET_APP_VER"],
+    subprocess.run([*tool, path, "-d", "TARGET_APP_VER"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                    check=False)
-    done = subprocess.run([tool, path, "-e", "category", category],
+    done = subprocess.run([*tool, path, "-e", "category", category],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                           check=False)
     if done.returncode != 0:
@@ -1403,7 +1394,7 @@ def sfo_query(path, key):
     tool = sfo_tool()
     if tool is None:
         return None
-    done = subprocess.run([tool, path, "-q", key], capture_output=True,
+    done = subprocess.run([*tool, path, "-q", key], capture_output=True,
                           text=True, check=False)
     return done.stdout.strip() if done.returncode == 0 else None
 
@@ -1411,7 +1402,7 @@ def sfo_delete(path, key):
     tool = sfo_tool()
     if tool is None:
         return None
-    done = subprocess.run([tool, path, "-d", key], capture_output=True,
+    done = subprocess.run([*tool, path, "-d", key], capture_output=True,
                           text=True, check=False)
     return done.stdout.strip() if done.returncode == 0 else None
 
@@ -1776,9 +1767,9 @@ def dump_dlc_entitlements(host, port, out_dir, filter_title=None,
             not title_id.startswith("PPSA")
             for _content_id, _title, _icon_url, title_id, _concept in licenses):
         return missing_prereq(
-            "PS4 DLC entitlement unlockers require program \"sfo\" "
-            "(https://github.com/hippie68/sfo) to build param.sfo files. "
-            "Place it next to this script or set SFO_PATH.")
+            "PS4 DLC entitlement unlockers require the bundled sfo.py "
+            "to build param.sfo files. Restore it next to this script or "
+            "set SFO_PATH.")
 
     for content_id, title, icon_url, title_id, concept_id in licenses:
         dlc_dir = os.path.join(
@@ -1809,7 +1800,7 @@ def dump_dlc_entitlements(host, port, out_dir, filter_title=None,
                 ) from err
         else:
             command = [
-                tool, os.path.join(sce_sys, "param.sfo"),
+                *tool, os.path.join(sce_sys, "param.sfo"),
                 "--new-file", "--force",
                 "--set", "int", "ATTRIBUTE", "0",
                 "--set", "str", "CATEGORY", "ac",
