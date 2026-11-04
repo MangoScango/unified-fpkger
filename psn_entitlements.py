@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 import xml.etree.ElementTree
 
 import pfsdump
-from sfo import SFOError
+from tools.sfo import SFOError
 
 CHIHIRO_CONTAINER = ("https://store.playstation.com/store/api/chihiro/"
                      "00_09_000/container/{region}/{language}/67/{title}")

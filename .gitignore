@@ -4,7 +4,6 @@
 *.pkg
 *.gp4
 /wrk_*/
-/tools
 *.log
 /fpkgwork*/
 *.har

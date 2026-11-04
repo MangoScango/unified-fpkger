@@ -17,7 +17,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ps_pkg_info import pkg as pkgmod  # noqa: E402
-from sfo import SFOError, load_sfo  # noqa: E402
+from tools.sfo import SFOError, load_sfo  # noqa: E402
 import dlc_emu  # noqa: E402
 
 MAX_META_BYTES = 1 << 20

@@ -106,9 +106,9 @@ import threading
 import time
 import uuid
 
-import shrink_png
-from pkg_set_appver import PkgUpdateError, set_appver
-from sfo import Command, SFOError, load_sfo
+from tools import shrink_png
+from tools.pkg_set_appver import PkgUpdateError, set_appver
+from tools.sfo import Command, SFOError, load_sfo
 
 SELF_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -150,8 +150,8 @@ GENGP4_APP = env("GENGP4_APP", os.path.join(SDK_DIR, "gengp4_app.exe"))
 GENGP4_PATCH = env("GENGP4_PATCH", os.path.join(SDK_DIR, "gengp4_patch.exe"))
 # Patched to accept APP_VER != 01.00 on an app volume.
 ORBIS_PUB_CMD = env("ORBIS_PUB_CMD", os.path.join(SDK_DIR, "orbis-pub-cmd.exe"))
-MAKE_FSELF = env("MAKE_FSELF", os.path.join(SELF_DIR, "make_fself.py"))
-BACKPORT_SDK = env("BACKPORT_SDK", os.path.join(SELF_DIR, "backport-sdk.py"))
+MAKE_FSELF = env("MAKE_FSELF", os.path.join(SELF_DIR, "tools", "make_fself.py"))
+BACKPORT_SDK = env("BACKPORT_SDK", os.path.join(SELF_DIR, "tools", "backport-sdk.py"))
 FAKE_PASSCODE = "00000000000000000000000000000000"
 DLC_ENT_KEY = "00000000000000000000000000000000"   # zero entitlement key (kstuff fakes the check)
 WINE_OVERRIDES = "wineps.drv,localspl.dll,spoolss.dll=d"
@@ -1757,7 +1757,7 @@ def free_space_line(directory):
 
 def cmd_ps5(args):
     # SC support needs ps_pkg_info, which PS4-only installations need not load.
-    import sc_overlay
+    from tools import sc_overlay
 
     if not re.fullmatch(r"[0-9A-Fa-f]{32}", args.passcode):
         die("The passcode must be 32 hex digits")

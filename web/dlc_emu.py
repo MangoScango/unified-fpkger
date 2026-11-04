@@ -27,7 +27,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import psn_entitlements  # noqa: E402
-import sc_overlay  # noqa: E402
+from tools import sc_overlay  # noqa: E402
 
 INI_NAME = "dlc_emu.ini"
 INI_MAX_BYTES = 64 << 10  # the modules read at most 32 KiB; allow for edits

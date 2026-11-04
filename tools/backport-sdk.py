@@ -106,9 +106,10 @@ PARAM_NAMES = {PT_SCE_PROCPARAM: 'PT_SCE_PROCPARAM', PT_SCE_MODULE_PARAM: 'PT_SC
 SDK_OFFSET = 0x10
 DEFAULT_SDK = 0x10790001
 EXEC_SUFFIXES = ('.elf', '.self', '.prx', '.sprx')
-DB_DIR = os.environ.get('FW_EXPORT_DB',
-                        os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                     'another-backporter', 'fwdb'))
+DB_DIR = os.environ.get(
+    'FW_EXPORT_DB',
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                 'another-backporter', 'fwdb'))
 
 
 # libkernel's table of modules a game supplies from /app0/sce_module rather

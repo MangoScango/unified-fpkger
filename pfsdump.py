@@ -36,8 +36,8 @@ import tempfile
 import time
 import urllib.request
 
-import playgo_state
-from sfo import SFO, SFOError, load_sfo
+from tools import playgo_state
+from tools.sfo import SFO, SFOError, load_sfo
 
 BLOCK_SIG_SIZE = 40
 DINODE_D32_SIZE = 0xA8

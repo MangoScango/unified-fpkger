@@ -31,7 +31,7 @@ from urllib.parse import urlparse
 import ssl
 import xml.etree.ElementTree
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ps_pkg_info import pkg as pkgmod  # noqa: E402
 
 EXCLUDED_BASENAMES = {"npbind.dat", "license.dat", "license.info"}

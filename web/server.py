@@ -50,9 +50,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.environ.get("FPKGER_DIR") or os.path.dirname(HERE)
 sys.path.insert(0, TOOLS)
 import pfsdump  # noqa: E402
-import playgo_state  # noqa: E402
 import psn_entitlements  # noqa: E402
-import sc_overlay  # noqa: E402
+from tools import playgo_state, sc_overlay  # noqa: E402
 from ps_pkg_info import pkg as pkgmod  # noqa: E402
 
 sys.path.insert(0, HERE)
@@ -63,9 +62,9 @@ PFSDUMP = os.path.join(TOOLS, "pfsdump.py")
 BUILD_PKG = os.environ.get("BUILD_PKG") or os.path.join(TOOLS, "build-pkg.py")
 BACKPORT_PS5 = (os.environ.get("BACKPORT_PS5")
                 or os.path.join(TOOLS, "another-backporter", "backport-ps5.py"))
-MAKE_FSELF = os.path.join(TOOLS, "make_fself.py")
+MAKE_FSELF = os.path.join(TOOLS, "tools", "make_fself.py")
 PSN_ENTITLEMENTS = os.path.join(TOOLS, "psn_entitlements.py")
-SC_OVERLAY = os.path.join(TOOLS, "sc_overlay.py")
+SC_OVERLAY = os.path.join(TOOLS, "tools", "sc_overlay.py")
 PROSPERO_PUB_CMD = os.path.join(TOOLS, "drakmor", "toolchain", "prospero-pub-cmd.exe")
 # another-backporter's SOURCE_FW: the firmware whose modules the fakelibs are
 # built from, so the libraries folder must hold its dump.
