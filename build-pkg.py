@@ -106,6 +106,8 @@ import threading
 import time
 import uuid
 
+from sfo import Command, SFOError, load_sfo
+
 SELF_DIR = os.path.dirname(os.path.realpath(__file__))
 
 
@@ -150,7 +152,6 @@ MAKE_FSELF = env("MAKE_FSELF", os.path.join(SELF_DIR, "make_fself.py"))
 BACKPORT_SDK = env("BACKPORT_SDK", os.path.join(SELF_DIR, "backport-sdk.py"))
 PKG_SET_APPVER = env("PKG_SET_APPVER", os.path.join(SELF_DIR, "pkg-set-appver.py"))
 SHRINK_PNG = env("SHRINK_PNG", os.path.join(SELF_DIR, "shrink-png.py"))
-SFO_TOOL = (sys.executable, env("SFO_TOOL", os.path.join(SELF_DIR, "sfo.py")))
 SC_OVERLAY = env("SC_OVERLAY", os.path.join(SELF_DIR, "sc-overlay.py"))
 FAKE_PASSCODE = "00000000000000000000000000000000"
 DLC_ENT_KEY = "00000000000000000000000000000000"   # zero entitlement key (kstuff fakes the check)
@@ -266,21 +267,22 @@ def winpath(path):
 
 
 def sfo_get(path, key):
-    out = subprocess.run([*SFO_TOOL, path, "-q", key], stdout=subprocess.PIPE,
-                         stderr=subprocess.DEVNULL)
-    return out.stdout.decode(errors="replace").replace("\r", "").replace("\n", "")
+    try:
+        data, _magic = load_sfo(path)
+        return data.query(key.upper()) or ""
+    except (OSError, SFOError, ValueError):
+        return ""
 
 
-def sfo_pkg(pkg, key):
-    # the sfo tool also takes the key first, which is how it reads inside a pkg
-    out = subprocess.run([*SFO_TOOL, "-q", key, pkg], stdout=subprocess.PIPE,
-                         stderr=subprocess.DEVNULL)
-    return out.stdout.decode(errors="replace").replace("\r", "").replace("\n", "")
-
-
-def sfo_edit(*args):
-    subprocess.run([*SFO_TOOL, *args], stdout=subprocess.DEVNULL,
-                   stderr=subprocess.DEVNULL)
+def sfo_edit(path, *commands, force=False):
+    """Apply an ordered command batch, writing only after every command succeeds."""
+    try:
+        data, _magic = load_sfo(path)
+        for command in commands:
+            data.apply(command, force)
+        data.write(path)
+    except (OSError, SFOError, ValueError) as error:
+        die(f"could not modify {path}: {error}")
 
 
 # Publishing Tools rejects icon0*.png over 1 MiB; some dumps pad them with metadata.
@@ -1009,8 +1011,12 @@ def build_variant_patch(bp, app_pkg, app_ver, src_tree=None):
 
     sfo = os.path.join(stage_sys, "param.sfo")
     log(f"SFO: CATEGORY=gp, TARGET_APP_VER={app_ver}, APP_VER={built_ver}")
-    sfo_edit("-s", "str", "CATEGORY", "gp", "-s", "str", "TARGET_APP_VER",
-             app_ver, "-s", "str", "APP_VER", built_ver, sfo)
+    sfo_edit(
+        sfo,
+        Command("set", "CATEGORY", "gp", "str"),
+        Command("set", "TARGET_APP_VER", app_ver, "str"),
+        Command("set", "APP_VER", built_ver, "str"),
+    )
 
     log("building backport patch (img_create --skip_digest)")
     img_create(out, ["--oformat", "pkg", "--skip_digest", "--no_progress_bar",
@@ -1096,14 +1102,13 @@ def build_one_dlc(ac):
     #    CATEGORY alone is not enough; it also needs the app keys an ac sfo lacks.
     real_sfo = os.path.join(stage, "sce_sys", "param.sfo")
     shutil.copy2(real_sfo, real_sfo + ".real")
-    rc = subprocess.run([*SFO_TOOL, "-s", "str", "CATEGORY", "gd",
-                         "-s", "int", "APP_TYPE", "1",
-                         "-s", "str", "APP_VER", "01.00",
-                         "-s", "int", "SYSTEM_VER", "0x03110000", real_sfo],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL).returncode
-    if rc:
-        die(f"dlc: could not build scan decoy sfo for {cid}")
+    sfo_edit(
+        real_sfo,
+        Command("set", "CATEGORY", "gd", "str"),
+        Command("set", "APP_TYPE", "1", "int"),
+        Command("set", "APP_VER", "01.00", "str"),
+        Command("set", "SYSTEM_VER", "0x03110000", "int"),
+    )
 
     # 3. scan -> file list (gengp4_app writes <stage>.gp4 and edits the decoy)
     scan = stage + ".gp4"
@@ -1419,8 +1424,8 @@ def cmd_ps4(args):
         if not os.path.isfile(BASE_PKG_IN):
             die(f"--base-pkg: no such file: {BASE_PKG_IN}")
         BASE_PKG_IN = os.path.realpath(BASE_PKG_IN)
-        pkg_cid = sfo_pkg(BASE_PKG_IN, "CONTENT_ID")
-        pkg_appver = sfo_pkg(BASE_PKG_IN, "APP_VER")
+        pkg_cid = sfo_get(BASE_PKG_IN, "CONTENT_ID")
+        pkg_appver = sfo_get(BASE_PKG_IN, "APP_VER")
         if not pkg_cid:
             die("--base-pkg: could not read CONTENT_ID from "
                 + os.path.basename(BASE_PKG_IN))
@@ -1476,8 +1481,11 @@ def cmd_ps4(args):
         if BASE_APPVER and BASE_APPVER != "01.00":
             log(f"SFO: dump already merged, restoring APP_VER={BASE_APPVER}, "
                 "VERSION=01.00")
-            sfo_edit("-e", "APP_VER", BASE_APPVER, sfo)
-            sfo_edit("-e", "VERSION", "01.00", sfo)
+            sfo_edit(
+                sfo,
+                Command("edit", "APP_VER", BASE_APPVER),
+                Command("edit", "VERSION", "01.00"),
+            )
         log("building pkg (orbis-pub-cmd img_create)")
         app_out = os.path.join(WORK_DIR, "apppkg_" + tag)
         shutil.rmtree(app_out, ignore_errors=True)
@@ -1632,11 +1640,15 @@ def cmd_ps4(args):
         sfo = os.path.join(stage, "sce_sys", "param.sfo")
         log(f"SFO: CATEGORY={base_cat}, REMASTER_TYPE=1, "
             f"APP_VER={update_appver}, VERSION=01.00")
-        sfo_edit("-e", "CATEGORY", base_cat, sfo)
-        sfo_edit("-d", "TARGET_APP_VER", sfo)   # patch-only key
-        sfo_edit("-a", "int", "REMASTER_TYPE", "0x00000001", sfo)
-        sfo_edit("-e", "APP_VER", update_appver, sfo)
-        sfo_edit("-e", "VERSION", "01.00", sfo)
+        sfo_edit(
+            sfo,
+            Command("edit", "CATEGORY", base_cat),
+            Command("delete", "TARGET_APP_VER"),
+            Command("add", "REMASTER_TYPE", "0x00000001", "int"),
+            Command("edit", "APP_VER", update_appver),
+            Command("edit", "VERSION", "01.00"),
+            force=True,
+        )
 
         log("building remaster pkg (orbis-pub-cmd img_create --skip_digest)")
         img_create(OUT_DIR, ["--oformat", "pkg", "--skip_digest",
@@ -1676,10 +1688,14 @@ def cmd_ps4(args):
 
     sfo = os.path.join(stage, "sce_sys", "param.sfo")
     log(f"SFO: CATEGORY={base_cat}, APP_VER={update_appver}, VERSION=01.00")
-    sfo_edit("-e", "CATEGORY", base_cat, sfo)
-    sfo_edit("-d", "TARGET_APP_VER", sfo)       # patch-only key
-    sfo_edit("-e", "APP_VER", update_appver, sfo)
-    sfo_edit("-e", "VERSION", "01.00", sfo)
+    sfo_edit(
+        sfo,
+        Command("edit", "CATEGORY", base_cat),
+        Command("delete", "TARGET_APP_VER"),
+        Command("edit", "APP_VER", update_appver),
+        Command("edit", "VERSION", "01.00"),
+        force=True,
+    )
 
     log("building merged app pkg (img_create --skip_digest)")
     # Its own empty directory, so the result is unambiguous when OUT_DIR

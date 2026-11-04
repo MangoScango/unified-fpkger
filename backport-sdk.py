@@ -95,6 +95,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ps4elf
+from sfo import SFOError, load_sfo
 
 PT_LOAD = 1
 PT_SCE_PROCPARAM = 0x61000001
@@ -105,7 +106,6 @@ PARAM_NAMES = {PT_SCE_PROCPARAM: 'PT_SCE_PROCPARAM', PT_SCE_MODULE_PARAM: 'PT_SC
 SDK_OFFSET = 0x10
 DEFAULT_SDK = 0x10790001
 EXEC_SUFFIXES = ('.elf', '.self', '.prx', '.sprx')
-SFO_MAGIC = b'\x00PSF'
 DB_DIR = os.environ.get('FW_EXPORT_DB',
                         os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                      'another-backporter', 'fwdb'))
@@ -143,21 +143,12 @@ def die(msg):
 
 
 def read_sfo(path):
-    """param.sfo -> {key: value}. Ints come back as ints, strings as str."""
-    d = open(path, 'rb').read()
-    if d[:4] != SFO_MAGIC:
+    """param.sfo -> {key: value}, or {} when the metadata is unreadable."""
+    try:
+        data, _magic = load_sfo(path)
+        return data.as_dict()
+    except (OSError, SFOError, ValueError, struct.error):
         return {}
-    key_off, data_off, count = struct.unpack_from('<III', d, 8)
-    out = {}
-    for i in range(count):
-        ko, fmt, length, _, do = struct.unpack_from('<HHIII', d, 0x14 + i * 0x10)
-        key = d[key_off + ko:d.index(b'\0', key_off + ko)].decode()
-        raw = d[data_off + do:data_off + do + length]
-        if fmt == 0x0404:
-            out[key] = struct.unpack_from('<I', raw)[0]
-        else:
-            out[key] = raw.rstrip(b'\0').decode('utf8', 'replace')
-    return out
 
 
 def segments(data):

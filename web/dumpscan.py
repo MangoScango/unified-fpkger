@@ -17,40 +17,13 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ps_pkg_info import pkg as pkgmod  # noqa: E402
+from sfo import SFOError, load_sfo  # noqa: E402
 import dlc_emu  # noqa: E402
 
-SCEC_MAGIC = 0x53434543
-SFO_MAGIC = 0x00505346
-SFO_UTF8_SPECIAL, SFO_UTF8, SFO_INTEGER = 0x0004, 0x0204, 0x0404
 MAX_META_BYTES = 1 << 20
 
 
 # --- metadata ------------------------------------------------------------------
-
-def parse_sfo(data):
-    """A param.sfo blob as {key: value}; ints stay ints. {} when it is not one."""
-    start = 0x800 if len(data) >= 4 and struct.unpack_from(">I", data)[0] == SCEC_MAGIC else 0
-    if len(data) < start + 0x14 or struct.unpack_from(">I", data, start)[0] != SFO_MAGIC:
-        return {}
-    key_table, data_table, count = struct.unpack_from("<IIi", data, start + 0x08)
-    out = {}
-    try:
-        for i in range(max(count, 0)):
-            key_off, fmt, length, _max, data_off = struct.unpack_from(
-                "<HHiII", data, start + 0x14 + i * 0x10)
-            kpos = start + key_table + key_off
-            end = data.find(b"\0", kpos, kpos + 256)
-            name = data[kpos:end if end >= 0 else kpos + 256].decode("utf-8", "replace")
-            vpos = start + data_table + data_off
-            if fmt == SFO_INTEGER:
-                out[name] = struct.unpack_from("<I", data, vpos)[0]
-            elif fmt in (SFO_UTF8, SFO_UTF8_SPECIAL):
-                raw = data[vpos:vpos + max(length, 0)]
-                out[name] = raw.split(b"\0", 1)[0].decode("utf-8", "replace")
-    except struct.error:
-        pass  # a truncated table: keep what was read
-    return out
-
 
 def read_small(path):
     with open(path, "rb") as handle:
@@ -59,8 +32,9 @@ def read_small(path):
 
 def read_sfo(path):
     try:
-        return parse_sfo(read_small(path))
-    except OSError:
+        data, _magic = load_sfo(path)
+        return data.as_dict()
+    except (OSError, SFOError, ValueError, struct.error):
         return {}
 
 

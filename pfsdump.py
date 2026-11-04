@@ -31,13 +31,13 @@ import shutil
 import socket
 import sqlite3
 import struct
-import subprocess
 import sys
 import tempfile
 import time
 import urllib.request
 
 import playgo_state
+from sfo import SFO, SFOError, load_sfo
 
 BLOCK_SIG_SIZE = 40
 DINODE_D32_SIZE = 0xA8
@@ -1356,13 +1356,6 @@ def keystone_is_generated(path):
         return False
 
 
-def sfo_tool():
-    """Command prefix for the bundled Python SFO tool, or None if missing."""
-    path = os.environ.get("SFO_PATH") or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "sfo.py")
-    return [sys.executable, path] if os.path.isfile(path) else None
-
-
 def fix_merged_sfo(path, category):
     """Turns a patch's param.sfo into one an app package will accept.
 
@@ -1370,41 +1363,37 @@ def fix_merged_sfo(path, category):
     TARGET_APP_VER has to go, and its category has to revert to the base
     game's. Returns None on success or a reason why not.
     """
-    tool = sfo_tool()
-    if tool is None:
-        return "sfo.py not found; set SFO_PATH"
     backup = path + ".orig"
     shutil.copyfile(path, backup)
-    # Deleting exits non-zero when the key is absent, which is not an error.
-    subprocess.run([*tool, path, "-d", "TARGET_APP_VER"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                   check=False)
-    done = subprocess.run([*tool, path, "-e", "category", category],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                          check=False)
-    if done.returncode != 0:
+    try:
+        data, _magic = load_sfo(path)
+        data.delete("TARGET_APP_VER", ignore_missing=True)
+        data.edit("CATEGORY", category)
+        data.write(path)
+    except (OSError, SFOError, ValueError, struct.error):
         shutil.copyfile(backup, path)
-        os.unlink(backup)
         return f"sfo could not set category to {category}"
-    os.unlink(backup)
+    finally:
+        os.unlink(backup)
     return None
 
 
 def sfo_query(path, key):
-    tool = sfo_tool()
-    if tool is None:
+    try:
+        data, _magic = load_sfo(path)
+        return data.query(key.upper())
+    except (OSError, SFOError, ValueError, struct.error):
         return None
-    done = subprocess.run([*tool, path, "-q", key], capture_output=True,
-                          text=True, check=False)
-    return done.stdout.strip() if done.returncode == 0 else None
+
 
 def sfo_delete(path, key):
-    tool = sfo_tool()
-    if tool is None:
+    try:
+        data, _magic = load_sfo(path)
+        data.delete(key.upper())
+        data.write(path)
+        return ""
+    except (OSError, SFOError, ValueError, struct.error):
         return None
-    done = subprocess.run([*tool, path, "-d", key], capture_output=True,
-                          text=True, check=False)
-    return done.stdout.strip() if done.returncode == 0 else None
 
 def dump_np_files(mount, title, dest_root):
     """Takes npbind.dat and nptitle.dat from the console's appmeta.
@@ -1631,6 +1620,21 @@ ENTITLEMENT_DBS = (
 )
 
 
+def write_ps4_al_param(path, content_id, title_id, title):
+    """Write the minimal SFO shared by console- and PSN-derived unlockers."""
+    param = SFO()
+    for param_type, key, value in (
+            ("int", "ATTRIBUTE", "0"),
+            ("str", "CATEGORY", "ac"),
+            ("str", "CONTENT_ID", content_id),
+            ("str", "FORMAT", "obs"),
+            ("str", "TITLE", title),
+            ("str", "TITLE_ID", title_id),
+            ("str", "VERSION", "01.00")):
+        param.set(param_type, key, value)
+    param.write(path)
+
+
 def write_ps5_al_param(path, content_id, title_id, title, concept_id):
     param = {
         "conceptId": concept_id,
@@ -1680,7 +1684,6 @@ def dump_dlc_entitlements(host, port, out_dir, filter_title=None,
               file=sys.stderr)
         return 0
 
-    tool = sfo_tool()
     try:
         os.makedirs(out_dir, exist_ok=True)
     except OSError as err:
@@ -1763,14 +1766,6 @@ def dump_dlc_entitlements(host, port, out_dir, filter_title=None,
         finally:
             db.close()
 
-    if tool is None and any(
-            not title_id.startswith("PPSA")
-            for _content_id, _title, _icon_url, title_id, _concept in licenses):
-        return missing_prereq(
-            "PS4 DLC entitlement unlockers require the bundled sfo.py "
-            "to build param.sfo files. Restore it next to this script or "
-            "set SFO_PATH.")
-
     for content_id, title, icon_url, title_id, concept_id in licenses:
         dlc_dir = os.path.join(
             out_dir, f"{title_id}-dlc", f"{content_id}-al")
@@ -1799,24 +1794,13 @@ def dump_dlc_entitlements(host, port, out_dir, filter_title=None,
                     f"could not remove stale param.sfo for {content_id}: {err}"
                 ) from err
         else:
-            command = [
-                *tool, os.path.join(sce_sys, "param.sfo"),
-                "--new-file", "--force",
-                "--set", "int", "ATTRIBUTE", "0",
-                "--set", "str", "CATEGORY", "ac",
-                "--set", "str", "CONTENT_ID", content_id,
-                "--set", "str", "FORMAT", "obs",
-                "--set", "str", "TITLE", title,
-                "--set", "str", "TITLE_ID", title_id,
-                "--set", "str", "VERSION", "01.00",
-            ]
             try:
-                done = subprocess.run(command, check=False)
-            except OSError as err:
+                write_ps4_al_param(
+                    os.path.join(sce_sys, "param.sfo"),
+                    content_id, title_id, title)
+            except (OSError, SFOError, ValueError) as err:
                 raise RuntimeError(
-                    f"could not run sfo for {content_id}: {err}") from err
-            if done.returncode != 0:
-                raise RuntimeError(f"could not build param.sfo for {content_id}")
+                    f"could not build param.sfo for {content_id}: {err}") from err
 
         if icon_url:
             icon_path = os.path.join(sce_sys, "icon0.png")

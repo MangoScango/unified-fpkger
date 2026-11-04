@@ -17,7 +17,6 @@ import json
 import os
 import re
 import ssl
-import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -25,6 +24,7 @@ from urllib.parse import urlparse
 import xml.etree.ElementTree
 
 import pfsdump
+from sfo import SFOError
 
 CHIHIRO_CONTAINER = ("https://store.playstation.com/store/api/chihiro/"
                      "00_09_000/container/{region}/{language}/67/{title}")
@@ -225,14 +225,6 @@ def build_unlockers(titles, out_dir, region="us", language="en",
         log(f"  {len(found)} entitlement(s)")
         licenses += found
 
-    tool = pfsdump.sfo_tool()
-    if tool is None and any(not title_id.startswith("PPSA")
-                            for _c, _t, _i, title_id in licenses):
-        raise RuntimeError(
-            "PS4 DLC entitlement unlockers require the bundled sfo.py "
-            "to build param.sfo files. Restore it next to pfsdump.py or "
-            "set SFO_PATH.")
-
     created = []
     skipped = 0
     for content_id, title, icon_url, title_id in licenses:
@@ -252,24 +244,13 @@ def build_unlockers(titles, out_dir, region="us", language="en",
                 raise RuntimeError(
                     f"could not create unlocker directory for {content_id}: {err}"
                 ) from err
-            command = [
-                *tool, os.path.join(sce_sys, "param.sfo"),
-                "--new-file", "--force",
-                "--set", "int", "ATTRIBUTE", "0",
-                "--set", "str", "CATEGORY", "ac",
-                "--set", "str", "CONTENT_ID", content_id,
-                "--set", "str", "FORMAT", "obs",
-                "--set", "str", "TITLE", title,
-                "--set", "str", "TITLE_ID", title_id,
-                "--set", "str", "VERSION", "01.00",
-            ]
             try:
-                done = subprocess.run(command, check=False)
-            except OSError as err:
+                pfsdump.write_ps4_al_param(
+                    os.path.join(sce_sys, "param.sfo"),
+                    content_id, title_id, title)
+            except (OSError, SFOError, ValueError) as err:
                 raise RuntimeError(
-                    f"could not run sfo for {content_id}: {err}") from err
-            if done.returncode != 0:
-                raise RuntimeError(f"could not build param.sfo for {content_id}")
+                    f"could not build param.sfo for {content_id}: {err}") from err
             if icon_url:
                 icon_path = os.path.join(sce_sys, "icon0.png")
                 try:

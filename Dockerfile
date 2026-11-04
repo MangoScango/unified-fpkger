@@ -73,7 +73,6 @@ RUN dpkg --add-architecture i386 \
 
 # Consumed by build-pkg.py's tool-path env hooks.
 ENV SDK_DIR=/opt/fpkger/PS4_Fake_PKG_Tools_3 \
-    SFO_TOOL=/opt/fpkger/sfo.py \
     MAKE_FSELF=/opt/fpkger/make_fself.py \
     GENGP4_APP=/opt/fpkger/PS4_Fake_PKG_Tools_3/gengp4_app.exe \
     ORBIS_PUB_CMD=/opt/fpkger/PS4_Fake_PKG_Tools_3/orbis-pub-cmd.exe \

@@ -12,7 +12,7 @@ import struct
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import BinaryIO, Iterator, List, Optional
+from typing import BinaryIO, Dict, Iterator, List, Optional, Union
 
 
 PROGRAM_VERSION = "1.02 (January 4, 2022)"
@@ -215,8 +215,8 @@ class SFO:
             bytes(self.data_table),
         ])
 
-    def write(self, path: Path) -> None:
-        path.write_bytes(bytes(self))
+    def write(self, path: Union[str, Path]) -> None:
+        Path(path).write_bytes(bytes(self))
 
     def key(self, entry: Entry) -> str:
         return c_string(self.key_table, entry.key_offset).decode("utf-8")
@@ -234,6 +234,19 @@ class SFO:
             value = self.integer_value(entry)
             return str(value) if decimal else f"0x{value:08x}"
         raise SFOError(f"unsupported parameter format {entry.param_fmt}")
+
+    def as_dict(self) -> Dict[str, object]:
+        """Return parameter values with unsigned integers kept as integers."""
+        values: Dict[str, object] = {}
+        for entry in self.entries:
+            if entry.param_fmt in UTF8_FORMATS:
+                value = self.string_value(entry)
+            elif entry.param_fmt == UNSIGNED_INTEGER:
+                value = self.integer_value(entry)
+            else:
+                raise SFOError(f"unsupported parameter format {entry.param_fmt}")
+            values[self.key(entry)] = value
+        return values
 
     def query(self, key: str, decimal: bool = False) -> Optional[str]:
         index = self._find(key)
@@ -465,7 +478,8 @@ def pkg_sfo_offset(file: BinaryIO) -> int:
     raise SFOError("could not find a param.sfo file inside the PS4 PKG")
 
 
-def load_sfo(path: Path) -> tuple:
+def load_sfo(path: Union[str, Path]) -> tuple:
+    path = Path(path)
     with path.open("rb") as file:
         magic = UINT32.unpack(read_exact(file, 4, "file header"))[0]
         if magic == PKG_MAGIC:
