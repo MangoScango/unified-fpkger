@@ -76,7 +76,6 @@ ENV SDK_DIR=/opt/fpkger/PS4_Fake_PKG_Tools_3 \
     MAKE_FSELF=/opt/fpkger/make_fself.py \
     GENGP4_APP=/opt/fpkger/PS4_Fake_PKG_Tools_3/gengp4_app.exe \
     ORBIS_PUB_CMD=/opt/fpkger/PS4_Fake_PKG_Tools_3/orbis-pub-cmd.exe \
-    PKG_SET_APPVER=/opt/fpkger/pkg-set-appver.py \
     BACKPORT_SDK=/opt/fpkger/backport-sdk.py \
     FW_EXPORT_DB=/opt/fpkger/another-backporter/fwdb \
     BACKPORT_PS5=/opt/fpkger/another-backporter/backport-ps5.py \
@@ -113,11 +112,10 @@ RUN off=$((0x3681B)) \
        | dd of="$ORBIS_PUB_CMD" bs=1 seek=$off conv=notrunc status=none
 
 RUN chmod +x /opt/fpkger/build-pkg.py \
-        /opt/fpkger/pkg-set-appver.py \
+        /opt/fpkger/pkg_set_appver.py \
         /opt/fpkger/pfsdump.py /opt/fpkger/sfo.py \
         /usr/local/bin/entrypoint.sh \
     && ln -s /opt/fpkger/build-pkg.py /usr/local/bin/build-pkg.py \
-    && ln -s /opt/fpkger/pkg-set-appver.py /usr/local/bin/pkg-set-appver.py \
     && ln -s /opt/fpkger/pfsdump.py /usr/local/bin/pfsdump.py
 
 # No PUID/PGID default: unset means "run in place" (see entrypoint), which is

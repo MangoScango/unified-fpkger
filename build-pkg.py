@@ -107,6 +107,7 @@ import time
 import uuid
 
 import shrink_png
+from pkg_set_appver import PkgUpdateError, set_appver
 from sfo import Command, SFOError, load_sfo
 
 SELF_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -151,7 +152,6 @@ GENGP4_PATCH = env("GENGP4_PATCH", os.path.join(SDK_DIR, "gengp4_patch.exe"))
 ORBIS_PUB_CMD = env("ORBIS_PUB_CMD", os.path.join(SDK_DIR, "orbis-pub-cmd.exe"))
 MAKE_FSELF = env("MAKE_FSELF", os.path.join(SELF_DIR, "make_fself.py"))
 BACKPORT_SDK = env("BACKPORT_SDK", os.path.join(SELF_DIR, "backport-sdk.py"))
-PKG_SET_APPVER = env("PKG_SET_APPVER", os.path.join(SELF_DIR, "pkg-set-appver.py"))
 FAKE_PASSCODE = "00000000000000000000000000000000"
 DLC_ENT_KEY = "00000000000000000000000000000000"   # zero entitlement key (kstuff fakes the check)
 WINE_OVERRIDES = "wineps.drv,localspl.dll,spoolss.dll=d"
@@ -1026,21 +1026,16 @@ def build_variant_patch(bp, app_pkg, app_ver, src_tree=None):
     if not built:
         die("backport patch build failed")
 
-    if not os.path.isfile(PKG_SET_APPVER):
-        die(f"pkg-set-appver.py not found at {PKG_SET_APPVER}")
     # A patch inherits SYSTEM_VER from the package --app_path names, so unlike
     # an app volume it does not pick up the lowered stamps from its own
     # executables.
-    sysver = ""
-    if RESOLVED_SDK:
-        sysver = "0x%08x" % (int(RESOLVED_SDK, 0) & 0xFFFFF000)
+    system_ver = (int(RESOLVED_SDK, 0) & 0xFFFFF000) if RESOLVED_SDK else None
     log(f"restamping the patch to APP_VER {app_ver}"
-        + (f", SYSTEM_VER {sysver}" if sysver else ""))
-    argv = [sys.executable, PKG_SET_APPVER, built, app_ver]
-    if sysver:
-        argv.append(sysver)
-    if subprocess.run(argv, stdout=sys.stderr).returncode:
-        die(f"could not restamp the backport patch to {app_ver}")
+        + (f", SYSTEM_VER 0x{system_ver:08x}" if system_ver is not None else ""))
+    try:
+        set_appver(built, app_ver, system_ver, log=log)
+    except (OSError, PkgUpdateError, ValueError) as error:
+        die(f"could not restamp the backport patch to {app_ver}: {error}")
 
     stem = os.path.basename(built)[:-len(".pkg")]
     final = os.path.join(
