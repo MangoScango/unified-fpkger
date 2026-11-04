@@ -1358,14 +1358,18 @@ def keystone_is_generated(path):
 
 def sfo_tool():
     """Locates hippie68's sfo tool"""
+    def usable(path):
+        return path and os.path.isfile(path) \
+            and (os.name == "nt" or os.access(path, os.X_OK))
+
     override = os.environ.get("SFO_PATH")
-    if override and os.access(override, os.X_OK):
+    if usable(override):
         return override
-    beside = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sfo")
-    if os.access(beside, os.X_OK):
+    beside = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "sfo.exe" if os.name == "nt" else "sfo")
+    if usable(beside):
         return beside
-    found = shutil.which("sfo")
-    return found
+    return shutil.which("sfo")
 
 
 def fix_merged_sfo(path, category):

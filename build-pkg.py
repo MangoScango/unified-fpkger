@@ -72,7 +72,7 @@ PS5: build-pkg.py ps5 --source-folder <dir> --output-package <file.pkg> [opts]
   --exclude-non-retail             drop payload files missing from the retail
                                    PlayGo map instead of packing them
   --passcode <hex>                 (default: 00000000000000000000000000000000)
-  --python <path>                  (default: python3)
+  --python <path>                  (default: the current Python interpreter)
   --temp-dir <dir>                 (default: $LIBPROSPERO_TEMP_DIR)
   --compression-level <-4..9>      (default: 7)
   --chunk-count <1..800>           apps only; used when the source has no
@@ -150,7 +150,8 @@ MAKE_FSELF = env("MAKE_FSELF", os.path.join(SELF_DIR, "make_fself.py"))
 BACKPORT_SDK = env("BACKPORT_SDK", os.path.join(SELF_DIR, "backport-sdk.py"))
 PKG_SET_APPVER = env("PKG_SET_APPVER", os.path.join(SELF_DIR, "pkg-set-appver.py"))
 SHRINK_PNG = env("SHRINK_PNG", os.path.join(SELF_DIR, "shrink-png.py"))
-SFO_TOOL = env("SFO_TOOL", os.path.join(SELF_DIR, "sfo"))
+SFO_TOOL = env("SFO_TOOL", os.path.join(
+    SELF_DIR, "sfo.exe" if os.name == "nt" else "sfo"))
 SC_OVERLAY = env("SC_OVERLAY", os.path.join(SELF_DIR, "sc-overlay.py"))
 FAKE_PASSCODE = "00000000000000000000000000000000"
 DLC_ENT_KEY = "00000000000000000000000000000000"   # zero entitlement key (kstuff fakes the check)
@@ -2160,7 +2161,8 @@ def build_parser():
                      help="drop payload files missing from the retail PlayGo "
                           "map instead of packing them")
     ps5.add_argument("--passcode", default=FAKE_PASSCODE, metavar="HEX")
-    ps5.add_argument("--python", default="python3", metavar="PATH")
+    ps5.add_argument("--python", default=sys.executable, metavar="PATH",
+                     help="Python for helper scripts (default: the current interpreter)")
     ps5.add_argument("--temp-dir", default=env("LIBPROSPERO_TEMP_DIR"),
                      metavar="DIR")
     ps5.add_argument("--compression-level", type=int, default=7, metavar="N",

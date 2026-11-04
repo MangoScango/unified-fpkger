@@ -22,13 +22,11 @@ Configuration comes from the environment, or a .env beside the tools:
 import base64
 import codecs
 import collections
-import fcntl
 import hmac
 import importlib.util
 import itertools
 import json
 import os
-import pty
 import queue
 import re
 import select
@@ -38,12 +36,16 @@ import signal
 import struct
 import subprocess
 import sys
-import termios
 import threading
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+if os.name != "nt":
+    import fcntl
+    import pty
+    import termios
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.environ.get("FPKGER_DIR") or os.path.dirname(HERE)
@@ -148,7 +150,8 @@ def pick_log_dir():
             if path == candidates[0]:
                 return path, None
             first = explicit or BASE_DIR
-            return path, f"{first} is not writable as uid {os.getuid()}; logging to {path}"
+            user = f"uid {os.getuid()}" if hasattr(os, "getuid") else "the current user"
+            return path, f"{first} is not writable as {user}; logging to {path}"
     raise SystemExit(f"no writable place for job logs; tried {', '.join(candidates)}")
 
 
@@ -169,20 +172,27 @@ class Cancelled(Exception):
     pass
 
 
-def dialog_command(argv):
+def dialog_command(argv, env=None, label="native picker", require_path=False,
+                   cancel_exit=None):
     """Run a native dialog; an empty result means the user cancelled it."""
     try:
         result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
-                                encoding="utf-8", errors="replace", check=False)
+                                encoding="utf-8", errors="replace", check=False, env=env)
     except OSError as err:
-        raise BadRequest(f"could not start the native picker: {err}") from None
+        raise BadRequest(f"could not start {label}: {err}") from None
     if result.returncode == 0:
-        return result.stdout.rstrip("\r\n")
+        path = result.stdout.rstrip("\r\n")
+        if require_path and not path:
+            raise BadRequest(f"{label} exited successfully without returning a path")
+        return path
+    if cancel_exit is not None:
+        if result.returncode == cancel_exit:
+            return ""
     # zenity and kdialog use 1 for cancel, but also for some startup failures.
-    if result.returncode == 1 and not result.stderr.strip():
+    elif result.returncode == 1 and not result.stderr.strip():
         return ""
-    detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
-    raise BadRequest(f"native picker failed: {detail}")
+    detail = result.stderr.strip() or result.stdout.strip() or "no error output"
+    raise BadRequest(f"{label} failed (exit {result.returncode}): {detail}")
 
 
 def tkinter_pick(initial, title, files):
@@ -226,31 +236,184 @@ end run"""
 
 
 def windows_pick(initial, title, files):
-    script = r"""Add-Type -AssemblyName System.Windows.Forms
+    # EncodedCommand avoids PowerShell's ambiguous -Command argument parsing.
+    # Values arrive separately through the environment, never as source text.
+    script = r"""$ErrorActionPreference = 'Stop'
+Add-Type -Namespace Fpkger -Name DpiAwareness -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+private static extern bool SetProcessDpiAwarenessContext(System.IntPtr context);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+private static extern bool SetProcessDPIAware();
+public static void Enable() {
+    try {
+        if (SetProcessDpiAwarenessContext(new System.IntPtr(-4))) return;
+    } catch (System.EntryPointNotFoundException) {}
+    SetProcessDPIAware();
+}
+'@
+[Fpkger.DpiAwareness]::Enable()
+Add-Type -AssemblyName System.Windows.Forms
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-if ($args[2]) {
-    $dialog = New-Object System.Windows.Forms.OpenFileDialog
-    $dialog.InitialDirectory = $args[0]
-    $dialog.Filter = 'PS5 packages (*.pkg)|*.pkg|All files (*.*)|*.*'
-} else {
-    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dialog.SelectedPath = $args[0]
-    $dialog.Description = $args[1]
+[System.Windows.Forms.Application]::EnableVisualStyles()
+if (-not $env:FPKGER_PICKER_FILES) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+
+namespace Fpkger
+{
+    [ComImport]
+    [Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IShellItem
+    {
+        [PreserveSig] int BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+        [PreserveSig] int GetParent(out IShellItem item);
+        [PreserveSig] int GetDisplayName(uint name, out IntPtr value);
+        [PreserveSig] int GetAttributes(uint mask, out uint attributes);
+        [PreserveSig] int Compare(IShellItem item, uint hint, out int order);
+    }
+
+    [ComImport]
+    [Guid("D57C7288-D4AD-4768-BE02-9D969532D960")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IFileOpenDialog
+    {
+        // IModalWindow
+        [PreserveSig] int Show(IntPtr owner);
+        // IFileDialog
+        [PreserveSig] int SetFileTypes(uint count, IntPtr filters);
+        [PreserveSig] int SetFileTypeIndex(uint index);
+        [PreserveSig] int GetFileTypeIndex(out uint index);
+        [PreserveSig] int Advise(IntPtr events, out uint cookie);
+        [PreserveSig] int Unadvise(uint cookie);
+        [PreserveSig] int SetOptions(uint options);
+        [PreserveSig] int GetOptions(out uint options);
+        [PreserveSig] int SetDefaultFolder(IShellItem item);
+        [PreserveSig] int SetFolder(IShellItem item);
+        [PreserveSig] int GetFolder(out IShellItem item);
+        [PreserveSig] int GetCurrentSelection(out IShellItem item);
+        [PreserveSig] int SetFileName([MarshalAs(UnmanagedType.LPWStr)] string name);
+        [PreserveSig] int GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string name);
+        [PreserveSig] int SetTitle([MarshalAs(UnmanagedType.LPWStr)] string title);
+        [PreserveSig] int SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string text);
+        [PreserveSig] int SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string label);
+        [PreserveSig] int GetResult(out IShellItem item);
+        [PreserveSig] int AddPlace(IShellItem item, int placement);
+        [PreserveSig] int SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string extension);
+        [PreserveSig] int Close(int hr);
+        [PreserveSig] int SetClientGuid(ref Guid guid);
+        [PreserveSig] int ClearClientData();
+        [PreserveSig] int SetFilter(IntPtr filter);
+        // IFileOpenDialog
+        [PreserveSig] int GetResults(out IntPtr items);
+        [PreserveSig] int GetSelectedItems(out IntPtr items);
+    }
+
+    [ComImport]
+    [Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
+    [ClassInterface(ClassInterfaceType.None)]
+    internal class FileOpenDialog { }
+
+    public static class NativeFolderPicker
+    {
+        private const uint PickFolders = 0x20;
+        private const uint ForceFileSystem = 0x40;
+        private const uint NoChangeDir = 0x08;
+        private const uint DesktopAbsoluteParsing = 0x80028000;
+        private const int Cancelled = unchecked((int)0x800704C7);
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+        private static extern int SHCreateItemFromParsingName(
+            string path, IntPtr bindingContext, ref Guid interfaceId, out IShellItem item);
+
+        private static void Check(int hr)
+        {
+            if (hr < 0) Marshal.ThrowExceptionForHR(hr);
+        }
+
+        public static string Show(IntPtr owner, string initialDirectory, string title)
+        {
+            IFileOpenDialog dialog = null;
+            IShellItem initialItem = null;
+            IShellItem resultItem = null;
+            IntPtr resultName = IntPtr.Zero;
+            try
+            {
+                dialog = (IFileOpenDialog)new FileOpenDialog();
+                uint options;
+                Check(dialog.GetOptions(out options));
+                Check(dialog.SetOptions(options | PickFolders | ForceFileSystem | NoChangeDir));
+                Check(dialog.SetTitle(title));
+                if (Directory.Exists(initialDirectory))
+                {
+                    Guid shellItemGuid = typeof(IShellItem).GUID;
+                    Check(SHCreateItemFromParsingName(initialDirectory, IntPtr.Zero,
+                                                      ref shellItemGuid, out initialItem));
+                    Check(dialog.SetFolder(initialItem));
+                }
+                int hr = dialog.Show(owner);
+                if (hr == Cancelled) return null;
+                Check(hr);
+                Check(dialog.GetResult(out resultItem));
+                Check(resultItem.GetDisplayName(DesktopAbsoluteParsing, out resultName));
+                return Marshal.PtrToStringUni(resultName);
+            }
+            finally
+            {
+                if (resultName != IntPtr.Zero) Marshal.FreeCoTaskMem(resultName);
+                if (resultItem != null) Marshal.FinalReleaseComObject(resultItem);
+                if (initialItem != null) Marshal.FinalReleaseComObject(initialItem);
+                if (dialog != null) Marshal.FinalReleaseComObject(dialog);
+            }
+        }
+    }
 }
-if ($args[2]) { $dialog.Title = $args[1] }
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-    if ($args[2]) { [Console]::Write($dialog.FileName) }
-    else { [Console]::Write($dialog.SelectedPath) }
+'@
 }
-$dialog.Dispose()"""
+$dialog = $null
+$owner = $null
+try {
+    $owner = New-Object System.Windows.Forms.Form
+    $owner.TopMost = $true
+    $owner.ShowInTaskbar = $false
+    $owner.WindowState = [System.Windows.Forms.FormWindowState]::Minimized
+    if ($env:FPKGER_PICKER_FILES) {
+        $dialog = New-Object System.Windows.Forms.OpenFileDialog
+        $dialog.InitialDirectory = $env:FPKGER_PICKER_INITIAL
+        $dialog.Title = $env:FPKGER_PICKER_TITLE
+        $dialog.Filter = 'PS5 packages (*.pkg)|*.pkg|All files (*.*)|*.*'
+        $result = $dialog.ShowDialog($owner)
+        if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+            [Console]::Write($dialog.FileName)
+            exit 0
+        }
+        exit 2
+    }
+    $path = [Fpkger.NativeFolderPicker]::Show(
+        $owner.Handle, $env:FPKGER_PICKER_INITIAL, $env:FPKGER_PICKER_TITLE)
+    if ($null -ne $path) {
+        [Console]::Write($path)
+        exit 0
+    }
+    exit 2
+} finally {
+    if ($null -ne $dialog) { $dialog.Dispose() }
+    if ($null -ne $owner) { $owner.Dispose() }
+}"""
     executable = shutil.which("powershell.exe") or shutil.which("powershell")
     if not executable:
         try:
             return tkinter_pick(initial, title, files)
         except ImportError:
-            raise BadRequest("native picker needs Windows PowerShell or Python tkinter") from None
-    return dialog_command([executable, "-NoProfile", "-STA", "-Command", script,
-                           initial, title, files])
+            raise BadRequest("native picker needs Windows PowerShell or Python Tk") from None
+    env = dict(os.environ, FPKGER_PICKER_INITIAL=initial, FPKGER_PICKER_TITLE=title,
+               FPKGER_PICKER_FILES=files)
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    return dialog_command([executable, "-NoProfile", "-STA", "-EncodedCommand", encoded],
+                          env=env, label="PowerShell picker", require_path=True,
+                          cancel_exit=2)
 
 
 def native_pick(start="", files=""):
@@ -468,21 +631,53 @@ class Job:
         return info
 
 
-def run(job, argv, cwd, env_extra=None):
-    """Runs argv on a pty, streaming its output into the job. Returns the rc.
+def run_piped(job, argv, cwd, env):
+    """Windows process runner: pipes work directly and need no local terminal."""
+    try:
+        # bufsize=0 gives raw reads, so read() returns available output rather
+        # than waiting to fill a buffer while a long-running job is quiet.
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                bufsize=0)
+    except OSError as err:
+        raise JobError(f"could not start {argv[0]}: {err}") from None
+    job.proc = proc
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    try:
+        while True:
+            data = proc.stdout.read(65536)
+            if not data:
+                break
+            job.feed(decoder.decode(data))
+    finally:
+        proc.stdout.close()
+    rc = proc.wait()
+    job.proc = None
+    job.feed(decoder.decode(b"", final=True))
+    job.flush()
+    if job.cancelled:
+        raise Cancelled()
+    return rc
 
-    A pty keeps the tools' progress displays on, since they only draw them for
-    a terminal.
+
+def run(job, argv, cwd, env_extra=None):
+    """Runs argv, streaming its combined output into the job. Returns the rc.
+
+    Unix uses a pty to keep Wine tools' terminal-only progress displays on.
+    Windows captures their output through pipes instead.
     """
     if job.cancelled:
         raise Cancelled()
     job.say("$ " + shlex.join(argv))
-    master, slave = pty.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ,
-                struct.pack("HHHH", PTY_ROWS, PTY_COLUMNS, 0, 0))
     env = dict(os.environ, COLUMNS=str(PTY_COLUMNS), PYTHONUNBUFFERED="1")
     if env_extra:
         env.update(env_extra)
+    if os.name == "nt":
+        return run_piped(job, argv, cwd, env)
+
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ,
+                struct.pack("HHHH", PTY_ROWS, PTY_COLUMNS, 0, 0))
     try:
         proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                 stdout=slave, stderr=slave, start_new_session=True)
@@ -529,6 +724,17 @@ def cancel(job):
         return
 
     def terminate():
+        if os.name == "nt":
+            # Terminate the tool tree too; killing only a Python wrapper could
+            # leave the packaging executable running after its job is cancelled.
+            try:
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, check=False)
+            except OSError:
+                proc.terminate()
+            proc.wait()
+            return
         for sig, wait in ((signal.SIGTERM, 10), (signal.SIGKILL, 0)):
             try:
                 os.killpg(proc.pid, sig)
