@@ -1233,6 +1233,7 @@ document.addEventListener("click", async e => {
 // adding data-dirs keeps "Use this folder" available alongside them.
 const picker = $("#picker");
 let pickTarget = null, pickFiles = "", pickPath = "", pickDirsToo = false;
+let nativePicker = false, nativePickBusy = false;
 async function pickerLoad(path) {
   $("#picker-error").textContent = "";
   try {
@@ -1264,26 +1265,42 @@ async function pickerLoad(path) {
     $("#picker-error").textContent = err.message;
   }
 }
-document.addEventListener("click", e => {
+document.addEventListener("click", async e => {
   const btn = e.target.closest("[data-browse]");
-  if (!btn) return;
+  if (!btn || nativePickBusy) return;
   pickTarget = btn.form?.elements[btn.dataset.browse]
     || document.getElementById(btn.dataset.browse);
   if (!pickTarget) return;
   pickFiles = btn.dataset.files || "";
   pickDirsToo = btn.hasAttribute("data-dirs");
+  const start = pickTarget.value || "";
+  const initialPath = pickFiles && start.toLowerCase().endsWith(".pkg")
+    ? start.replace(/[\\/][^\\/]*$/, "") : start;
+  if (nativePicker) {
+    nativePickBusy = true;
+    btn.setAttribute("aria-busy", "true");
+    try {
+      const {path} = await api("/api/native-picker", {path: initialPath, files: pickFiles});
+      if (path) pickDone(path);
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      nativePickBusy = false;
+      btn.removeAttribute("aria-busy");
+    }
+    return;
+  }
   $("#picker-title").textContent = !pickFiles ? "Choose a folder"
     : pickDirsToo ? "Choose a folder or package" : "Choose a package";
   $("#picker-select").hidden = Boolean(pickFiles) && !pickDirsToo;
-  const start = pickTarget.value || (pickFiles ? "" : "");
   picker.showModal();
-  pickerLoad(pickFiles && start.endsWith(".pkg") ? start.replace(/\/[^/]*$/, "") : start);
+  pickerLoad(initialPath);
 });
 $("#picker-cancel").addEventListener("click", () => picker.close());
 function pickDone(value) {
   pickTarget.value = value;
   pickTarget.dispatchEvent(new Event("change", {bubbles: true}));
-  picker.close();
+  if (picker.open) picker.close();
 }
 $("#picker-select").addEventListener("click", () => pickDone(pickPath));
 
@@ -1380,6 +1397,7 @@ $("#job-cancel").addEventListener("click", async () => {
 (async () => {
   try {
     const cfg = await api("/api/config");
+    nativePicker = cfg.native_picker;
     fill(cfg.defaults);
     const missing = Object.entries(cfg.tools).filter(([, ok]) => !ok).map(([n]) => n);
     if (missing.length) $("#roots").textContent = `missing tools: ${missing.join(", ")}`;

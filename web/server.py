@@ -11,10 +11,10 @@ they compete for the console's FTP server and for the disk.
 Configuration comes from the environment, or a .env beside the tools:
   WEB_BIND      address to listen on (default 0.0.0.0)
   WEB_PORT      port (default 8080)
-  WEB_ROOTS     colon-separated directories the UI may read and write
-                (default: the working directory)
+  WEB_ROOTS     optional path allowlist (colon-separated on Unix, semicolons on Windows)
+                (default: unrestricted local paths via the native OS picker)
   WEB_PASSWORD  when set, every request needs HTTP basic auth with it
-  WEB_LOG_DIR   where job logs go (default <first root>/fpkger-logs)
+  WEB_LOG_DIR   where job logs go (default <first root or cwd>/fpkger-logs)
   SCAN_DIR      folder the Build tab scans for dumps (default: DUMP_DIR)
   SCAN_DEPTH    how many folders down that scan looks (default 3)
 """
@@ -122,20 +122,22 @@ def setting(key, default=""):
 
 def default_roots():
     return [os.path.realpath(p)
-            for p in setting("WEB_ROOTS", os.getcwd()).split(":") if p]
+            for p in setting("WEB_ROOTS").split(os.pathsep) if p]
 
 
 ROOTS = default_roots()
+BASE_DIR = ROOTS[0] if ROOTS else os.path.realpath(os.getcwd())
 
 
 def pick_log_dir():
-    """WEB_LOG_DIR, else fpkger-logs in the first root this user can write.
+    """WEB_LOG_DIR, else fpkger-logs in the first root or working directory.
 
     Returns (directory, warning or None).
     """
     explicit = setting("WEB_LOG_DIR")
     candidates = [explicit] if explicit else []
-    candidates += [os.path.join(root, "fpkger-logs") for root in ROOTS]
+    candidates += [os.path.join(root, "fpkger-logs")
+                   for root in (ROOTS or [BASE_DIR])]
     candidates.append(os.path.join(os.path.expanduser("~"), "fpkger-logs"))
     for path in candidates:
         try:
@@ -145,13 +147,14 @@ def pick_log_dir():
         if os.access(path, os.W_OK):
             if path == candidates[0]:
                 return path, None
-            first = explicit or ROOTS[0]
+            first = explicit or BASE_DIR
             return path, f"{first} is not writable as uid {os.getuid()}; logging to {path}"
     raise SystemExit(f"no writable place for job logs; tried {', '.join(candidates)}")
 
 
 LOG_DIR, LOG_DIR_WARNING = pick_log_dir()
 PASSWORD = setting("WEB_PASSWORD")
+NATIVE_PICK_LOCK = threading.Lock()
 
 
 class BadRequest(Exception):
@@ -166,21 +169,158 @@ class Cancelled(Exception):
     pass
 
 
+def dialog_command(argv):
+    """Run a native dialog; an empty result means the user cancelled it."""
+    try:
+        result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
+                                encoding="utf-8", errors="replace", check=False)
+    except OSError as err:
+        raise BadRequest(f"could not start the native picker: {err}") from None
+    if result.returncode == 0:
+        return result.stdout.rstrip("\r\n")
+    # zenity and kdialog use 1 for cancel, but also for some startup failures.
+    if result.returncode == 1 and not result.stderr.strip():
+        return ""
+    detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+    raise BadRequest(f"native picker failed: {detail}")
+
+
+def tkinter_pick(initial, title, files):
+    """Portable fallback, imported lazily because Python may omit Tk."""
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        if files:
+            return filedialog.askopenfilename(
+                parent=root, initialdir=initial, title=title,
+                filetypes=[("PS5 packages", "*.pkg"), ("All files", "*.*")])
+        return filedialog.askdirectory(parent=root, initialdir=initial, title=title)
+    except tk.TclError as err:
+        raise BadRequest(f"could not open the native picker: {err}") from None
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except tk.TclError:
+                pass
+
+
+def mac_pick(initial, title, files):
+    # Passing values through argv avoids interpolating paths into AppleScript.
+    choose = "choose file" if files else "choose folder"
+    script = f"""on run argv
+ set startFolder to POSIX file (item 1 of argv)
+ try
+  set chosen to {choose} with prompt (item 2 of argv) default location startFolder
+  return POSIX path of chosen
+ on error number -128
+  return ""
+ end try
+end run"""
+    return dialog_command(["osascript", "-e", script, initial, title])
+
+
+def windows_pick(initial, title, files):
+    script = r"""Add-Type -AssemblyName System.Windows.Forms
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+if ($args[2]) {
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.InitialDirectory = $args[0]
+    $dialog.Filter = 'PS5 packages (*.pkg)|*.pkg|All files (*.*)|*.*'
+} else {
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.SelectedPath = $args[0]
+    $dialog.Description = $args[1]
+}
+if ($args[2]) { $dialog.Title = $args[1] }
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    if ($args[2]) { [Console]::Write($dialog.FileName) }
+    else { [Console]::Write($dialog.SelectedPath) }
+}
+$dialog.Dispose()"""
+    executable = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not executable:
+        try:
+            return tkinter_pick(initial, title, files)
+        except ImportError:
+            raise BadRequest("native picker needs Windows PowerShell or Python tkinter") from None
+    return dialog_command([executable, "-NoProfile", "-STA", "-Command", script,
+                           initial, title, files])
+
+
+def native_pick(start="", files=""):
+    """Choose a local folder or package with the server's native OS UI."""
+    if ROOTS:
+        raise BadRequest("the native picker is only available when WEB_ROOTS is unset")
+    if not isinstance(start, str) or files not in ("", "pkg"):
+        raise BadRequest("invalid native picker options")
+    title = "Choose a package" if files else "Choose a folder"
+    start = start.strip()
+    if start:
+        start = os.path.realpath(start if os.path.isabs(start)
+                                 else os.path.join(BASE_DIR, start))
+        initial = start if os.path.isdir(start) else os.path.dirname(start)
+    else:
+        initial = BASE_DIR
+    if not os.path.isdir(initial):
+        initial = BASE_DIR
+
+    # A second request must not queue a surprise dialog after the first closes.
+    if not NATIVE_PICK_LOCK.acquire(blocking=False):
+        raise BadRequest("a native picker is already open")
+    try:
+        if os.name == "nt":
+            selected = windows_pick(initial, title, files)
+        elif sys.platform == "darwin" and shutil.which("osascript"):
+            selected = mac_pick(initial, title, files)
+        elif shutil.which("zenity"):
+            argv = ["zenity", "--file-selection", f"--title={title}",
+                    f"--filename={os.path.join(initial, '')}"]
+            if files:
+                argv.append("--file-filter=PS5 packages (*.pkg) | *.pkg *.PKG")
+            else:
+                argv.append("--directory")
+            selected = dialog_command(argv)
+        elif shutil.which("kdialog"):
+            argv = (["kdialog", "--getopenfilename", initial, "*.pkg|PS5 packages"]
+                    if files else ["kdialog", "--getexistingdirectory", initial])
+            selected = dialog_command(argv)
+        else:
+            try:
+                selected = tkinter_pick(initial, title, files)
+            except ImportError:
+                raise BadRequest("native picker needs zenity, kdialog, or Python tkinter") from None
+        if not selected:
+            return ""
+        selected = os.path.realpath(selected)
+        if files and not selected.lower().endswith(".pkg"):
+            raise BadRequest("choose a .pkg package")
+        return selected
+    finally:
+        NATIVE_PICK_LOCK.release()
+
+
 def inside_roots(real):
-    return any(real == root or real.startswith(root.rstrip(os.sep) + os.sep)
-               for root in ROOTS)
+    return not ROOTS or any(real == root or real.startswith(root.rstrip(os.sep) + os.sep)
+                            for root in ROOTS)
 
 
 def resolve_path(value, label, kind="dir", must_exist=True, create=False):
-    """An absolute, symlink-free path under one of ROOTS, or BadRequest.
+    """An absolute, symlink-free path, constrained when ROOTS is configured.
 
-    Relative paths are taken from the first root.
+    Relative paths are taken from the first root, or the working directory
+    when native picking leaves the local filesystem unrestricted.
     """
     value = (value or "").strip()
     if not value:
         raise BadRequest(f"{label} is required")
     if not os.path.isabs(value):
-        value = os.path.join(ROOTS[0], value)
+        value = os.path.join(BASE_DIR, value)
     real = os.path.realpath(value)
     if not inside_roots(real):
         raise BadRequest(f"{label} must be under {', '.join(ROOTS)}")
@@ -829,7 +969,7 @@ def backport_step(job, spec):
         if spec[key]:
             argv.append(flag)
     # The acquired and unwrapped binaries are worth keeping between runs.
-    data = setting("BACKPORT_DATA_DIR") or os.path.join(ROOTS[0], "ps5backport-data")
+    data = setting("BACKPORT_DATA_DIR") or os.path.join(BASE_DIR, "ps5backport-data")
     env = {"PS5BACKPORT_LIBS": spec["libs_dir"],
            "PS5BACKPORT_CACHE": os.path.join(data, "binaries"),
            "PS5BACKPORT_ELF_CACHE": os.path.join(data, "binaries-elf")}
@@ -1169,7 +1309,7 @@ def backport_source(value):
     if not value:
         raise BadRequest("source is required")
     if not os.path.isabs(value):
-        value = os.path.join(ROOTS[0], value)
+        value = os.path.join(BASE_DIR, value)
     src = os.path.realpath(value)
     if not inside_roots(src):
         raise BadRequest(f"source must be under {', '.join(ROOTS)}")
@@ -1538,10 +1678,10 @@ def worker():
 
 def list_dir(path, want_files):
     # "@roots" is the level above every allowed folder, where they are listed.
-    if path == "@roots":
+    if path == "@roots" and ROOTS:
         return {"path": "", "parent": None, "dirs": ROOTS, "files": [],
                 "roots": ROOTS, "absolute": True}
-    real = resolve_path(path or ROOTS[0], "folder")
+    real = resolve_path(BASE_DIR if path == "@roots" else path or BASE_DIR, "folder")
     dirs, files = [], []
     try:
         names = sorted(os.listdir(real), key=str.lower)
@@ -1556,7 +1696,9 @@ def list_dir(path, want_files):
         elif want_files and name.lower().endswith(want_files):
             files.append(name)
     parent = os.path.dirname(real)
-    if not inside_roots(parent) or parent == real:
+    if parent == real:
+        parent = "@roots" if ROOTS else None
+    elif not inside_roots(parent):
         parent = "@roots"
     return {"path": real, "parent": parent, "dirs": dirs, "files": files,
             "roots": ROOTS, "absolute": False}
@@ -1576,13 +1718,13 @@ def usable_path(value, fallback=""):
 def config():
     defaults = {
         "host": setting("HOST"),
-        "dump_dir": usable_path(setting("DUMP_DIR"), ROOTS[0]),
+        "dump_dir": usable_path(setting("DUMP_DIR"), BASE_DIR),
         "dump_game": True,
         "patch_mode": "combined",
         "addon_mode": "all",
-        "scan_dir": usable_path(setting("SCAN_DIR") or setting("DUMP_DIR"), ROOTS[0]),
+        "scan_dir": usable_path(setting("SCAN_DIR") or setting("DUMP_DIR"), BASE_DIR),
         "out_dir": usable_path(setting("PKG_DIR") or setting("OUT_DIR"),
-                               os.path.join(ROOTS[0], "out")),
+                               os.path.join(BASE_DIR, "out")),
         "mode": setting("MODE", "app-merge"),
         "backport": setting("BACKPORT", "1") != "0",
         "sdk": setting("BACKPORT_TARGET_SDK", "auto"),
@@ -1597,7 +1739,7 @@ def config():
         "chunk_count": "",
         "backport_libs_dir": usable_path(setting("PS5BACKPORT_LIBS")),
         "backport_out_dir": usable_path(setting("PKG_DIR") or setting("OUT_DIR"),
-                                        os.path.join(ROOTS[0], "out")),
+                                        os.path.join(BASE_DIR, "out")),
         "backport_tier": "7xx",
     }
     tools = {name: os.path.exists(path) for name, path in
@@ -1605,8 +1747,8 @@ def config():
               ("backport-ps5", BACKPORT_PS5), ("psn-entitlements", PSN_ENTITLEMENTS),
               ("prospero-pub-cmd", PROSPERO_PUB_CMD))}
     tools["wine"] = os.name == "nt" or shutil.which("wine") is not None
-    return {"defaults": defaults, "roots": ROOTS, "tools": tools,
-            "log_dir": LOG_DIR}
+    return {"defaults": defaults, "roots": ROOTS, "native_picker": not ROOTS,
+            "tools": tools, "log_dir": LOG_DIR}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1753,7 +1895,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(HTTPStatus.BAD_REQUEST, "invalid JSON")
         url = urlparse(self.path)
         try:
-            if url.path == "/api/jobs":
+            if url.path == "/api/native-picker":
+                if not isinstance(body, dict):
+                    raise BadRequest("native picker options must be an object")
+                path = native_pick(body.get("path", ""), body.get("files", ""))
+                self._send(HTTPStatus.OK, {"path": path})
+            elif url.path == "/api/jobs":
                 job = build_job(body.get("kind"), body.get("params"))
                 submit(job)
                 self._send(HTTPStatus.CREATED, job.summary_dict())
@@ -1791,7 +1938,8 @@ def main():
     server = ThreadingHTTPServer((bind, port), Handler)
     server.daemon_threads = True
     print(f">> fpkger web UI on http://{bind}:{port}/", file=sys.stderr)
-    print(f">> folders: {', '.join(ROOTS)}; logs: {LOG_DIR}", file=sys.stderr)
+    folders = ", ".join(ROOTS) if ROOTS else "native OS picker (unrestricted local paths)"
+    print(f">> folders: {folders}; logs: {LOG_DIR}", file=sys.stderr)
     if not PASSWORD:
         print(">> warning: WEB_PASSWORD is unset, so anyone who can reach this "
               "port can run dumps and builds", file=sys.stderr)
