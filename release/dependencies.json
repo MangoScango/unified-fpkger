@@ -1,0 +1,18 @@
+{
+  "ps_pkg_info": {
+    "repository": "MangoScango/ps-pkg-info",
+    "ref": "b7db8ff3fa67056f141779855a7470df494c6f96",
+    "archive_sha256": "8d6a50efb9b42840d00ba0d2986ef88d0a4c84fbc8b3889037c297b440731f8c"
+  },
+  "pkgtools": {
+    "repository": "CyB1K/PS4-Fake-PKG-Tools-3.87",
+    "ref": "c08d922e8998cb413f44fdb005c7d6d7eb1b1f13",
+    "archive_sha256": "9739e1a32f8234546e6ba42724ea6f87fb4e4372ca7b41c62e45c5b62bbafd11",
+    "orbis_original_sha256": "9d136a27a0739555329e46b61208b7105d4c5aea5644cbf8052bfed4250d0e1b",
+    "orbis_patched_sha256": "3a9ca285927fa3b8175ac57fc4e956c85ea476d0931cc5b05928218b5d376e8a"
+  },
+  "entitlements": {
+    "url": "https://github.com/MangoScango/ps5-entitlement-dumper/releases/download/v2/entitlements.elf",
+    "sha256": "f4fa8f241e067155034a8afb5b4cb61ecf3f19a14010a97523b9bb673f1c68d4"
+  }
+}

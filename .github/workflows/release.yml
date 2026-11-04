@@ -1,0 +1,86 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version used in the test artifact name"
+        required: true
+        default: dev
+
+permissions:
+  contents: write
+
+env:
+  VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build release ZIP
+        run: python release/build.py --version "$VERSION" --output dist
+
+      - name: Verify packaged release
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import subprocess
+          import sys
+          import tempfile
+          import zipfile
+
+          version = os.environ["VERSION"]
+          archive_path = Path("dist") / f"unified-fpkger-{version}.zip"
+          with zipfile.ZipFile(archive_path) as archive:
+              assert archive.testzip() is None
+              run_info = archive.getinfo(f"unified-fpkger-{version}/RUN.sh")
+              assert (run_info.external_attr >> 16) & 0o111
+              with tempfile.TemporaryDirectory() as temp:
+                  archive.extractall(temp)
+                  root = Path(temp) / f"unified-fpkger-{version}"
+                  orbis = root / "PS4_Fake_PKG_Tools_3" / "orbis-pub-cmd.exe"
+                  with orbis.open("rb") as handle:
+                      handle.seek(0x3681B)
+                      assert handle.read(2) == b"\xEB\x07"
+                  subprocess.run(
+                      [sys.executable, str(root / "tools" / "sfo.py"), "--version"],
+                      check=True,
+                  )
+                  sys.path.insert(0, str(root))
+                  from ps_pkg_info import pkg  # noqa: F401
+          PY
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: unified-fpkger-${{ env.VERSION }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/*.zip dist/*.sha256 --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/*.zip dist/*.sha256 \
+              --title "$GITHUB_REF_NAME" --generate-notes
+          fi

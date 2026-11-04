@@ -1,0 +1,2 @@
+# Used when downloaded or dumped icons need conversion to RGB PNG.
+Pillow>=10

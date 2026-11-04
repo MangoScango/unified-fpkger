@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Fetch and verify the external runtime dependencies shared by Docker/releases."""
+
+import argparse
+import hashlib
+import json
+import shutil
+import tarfile
+import tempfile
+import urllib.request
+from pathlib import Path
+
+
+CONFIG_PATH = Path(__file__).with_name("dependencies.json")
+PKGTOOLS_PATCH_OFFSET = 0x3681B
+
+
+def file_hash(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def download(url, destination, expected_sha256):
+    request = urllib.request.Request(url, headers={"User-Agent": "unified-fpkger-release"})
+    with urllib.request.urlopen(request, timeout=120) as response:
+        with destination.open("wb") as output:
+            shutil.copyfileobj(response, output)
+    actual = file_hash(destination)
+    if actual != expected_sha256:
+        raise RuntimeError(
+            f"SHA-256 mismatch for {url}: expected {expected_sha256}, got {actual}"
+        )
+
+
+def extract_archive(archive, destination):
+    """Extract a pinned GitHub archive without allowing paths outside destination."""
+    base = destination.resolve()
+    with tarfile.open(archive, "r:gz") as package:
+        for member in package.getmembers():
+            target = (base / member.name).resolve()
+            try:
+                target.relative_to(base)
+            except ValueError:
+                raise RuntimeError(f"unsafe archive path: {member.name}") from None
+        package.extractall(destination)
+    roots = [path for path in destination.iterdir() if path.is_dir()]
+    if len(roots) != 1:
+        raise RuntimeError(f"unexpected GitHub archive layout in {archive}")
+    return roots[0]
+
+
+def fetch_github(spec, work):
+    work.mkdir(parents=True, exist_ok=True)
+    archive = work / "source.tar.gz"
+    url = f"https://github.com/{spec['repository']}/archive/{spec['ref']}.tar.gz"
+    download(url, archive, spec["archive_sha256"])
+    source_dir = work / "source"
+    source_dir.mkdir()
+    return extract_archive(archive, source_dir)
+
+
+def copy_tree(source, destination):
+    shutil.copytree(
+        source,
+        destination,
+        ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
+        dirs_exist_ok=True,
+    )
+
+
+def copy_upstream_licenses(source, destination, name):
+    license_dir = destination / "licenses" / name
+    for pattern in ("LICENSE*", "COPYING*"):
+        for path in source.glob(pattern):
+            if path.is_file():
+                license_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, license_dir / path.name)
+
+
+def patch_orbis(pkgtools_dir, spec):
+    """Apply Docker's APP_VER guard patch, verifying input and output hashes."""
+    path = pkgtools_dir / "orbis-pub-cmd.exe"
+    original = path.read_bytes()
+    digest = hashlib.sha256(original).hexdigest()
+
+    if digest == spec["orbis_patched_sha256"]:
+        patched = original
+    elif digest == spec["orbis_original_sha256"]:
+        if original[PKGTOOLS_PATCH_OFFSET:PKGTOOLS_PATCH_OFFSET + 2] != b"\x74\x07":
+            raise RuntimeError("orbis-pub-cmd.exe patch guard bytes are not 74 07")
+        patched = original[:PKGTOOLS_PATCH_OFFSET] + b"\xEB" + original[
+            PKGTOOLS_PATCH_OFFSET + 1:
+        ]
+    else:
+        raise RuntimeError(f"unexpected orbis-pub-cmd.exe SHA-256: {digest}")
+
+    if patched[PKGTOOLS_PATCH_OFFSET:PKGTOOLS_PATCH_OFFSET + 2] != b"\xEB\x07":
+        raise RuntimeError("orbis-pub-cmd.exe patch did not produce EB 07")
+    actual = hashlib.sha256(patched).hexdigest()
+    if actual != spec["orbis_patched_sha256"]:
+        raise RuntimeError(f"patched orbis-pub-cmd.exe SHA-256 mismatch: {actual}")
+    if patched != original:
+        path.write_bytes(patched)
+
+
+def fetch_all(destination):
+    """Populate destination with PS4 tools, ps_pkg_info, and entitlements.elf."""
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / "licenses").mkdir(exist_ok=True)
+    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+
+    with tempfile.TemporaryDirectory(prefix="fpkger-dependencies-") as temp:
+        work = Path(temp)
+
+        pkgtools = fetch_github(config["pkgtools"], work / "pkgtools")
+        # The dependency archive contains the tools at its root, whereas the
+        # runtime expects them beneath PS4_Fake_PKG_Tools_3.
+        target = destination / "PS4_Fake_PKG_Tools_3"
+        # Materialize first so hashing and patching operate on the final copy.
+        copy_tree(pkgtools, target)
+        patch_orbis(target, config["pkgtools"])
+        copy_upstream_licenses(pkgtools, destination, "PS4-Fake-PKG-Tools")
+        print(f"PS4 tools: {config['pkgtools']['ref']} (patched)")
+
+        ps_pkg_info = fetch_github(config["ps_pkg_info"], work / "ps-pkg-info")
+        copy_tree(ps_pkg_info / "ps_pkg_info", destination / "ps_pkg_info")
+        copy_upstream_licenses(ps_pkg_info, destination, "ps-pkg-info")
+        print(f"ps-pkg-info: {config['ps_pkg_info']['ref']}")
+
+        download(
+            config["entitlements"]["url"],
+            destination / "entitlements.elf",
+            config["entitlements"]["sha256"],
+        )
+        print("entitlements.elf: verified")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("destination", type=Path)
+    args = parser.parse_args()
+    fetch_all(args.destination)
+
+
+if __name__ == "__main__":
+    main()

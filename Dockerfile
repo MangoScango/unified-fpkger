@@ -9,19 +9,11 @@
 FROM debian:trixie-slim AS deps
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git ca-certificates \
+        python3 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-ARG PKGTOOLS_REPO=https://github.com/CyB1K/PS4-Fake-PKG-Tools-3.87
-ARG PKGTOOLS_REF=main
-RUN git clone --depth 1 --branch "$PKGTOOLS_REF" "$PKGTOOLS_REPO" /out-pkgtools \
-    && rm -rf /out-pkgtools/.git
-
-ARG PS_PKG_INFO_REPO=https://github.com/MangoScango/ps-pkg-info
-ARG PS_PKG_INFO_REF=main
-RUN git init -q /src/ps-pkg-info \
-    && git -C /src/ps-pkg-info fetch -q --depth 1 "$PS_PKG_INFO_REPO" "$PS_PKG_INFO_REF" \
-    && git -C /src/ps-pkg-info checkout -q FETCH_HEAD
+COPY release/dependencies.json release/fetch_dependencies.py /src/release/
+RUN python3 /src/release/fetch_dependencies.py /out-deps
 
 FROM debian:trixie-slim
 
@@ -84,8 +76,9 @@ ENV SDK_DIR=/opt/fpkger/PS4_Fake_PKG_Tools_3 \
     WINEDEBUG=-all \
     WINEDLLOVERRIDES="wineps.drv,localspl.dll,spoolss.dll=d"
 
-COPY --from=deps /out-pkgtools   /opt/fpkger/PS4_Fake_PKG_Tools_3
-COPY --from=deps /src/ps-pkg-info/ps_pkg_info /opt/fpkger/ps_pkg_info
+COPY --from=deps /out-deps/PS4_Fake_PKG_Tools_3 /opt/fpkger/PS4_Fake_PKG_Tools_3
+COPY --from=deps /out-deps/ps_pkg_info /opt/fpkger/ps_pkg_info
+COPY --from=deps /out-deps/licenses /opt/fpkger/licenses
 # another-backporter is a git submodule: backport-ps5.py drives the web UI's
 # Backport tab, and its fwdb/ CSVs are backport-sdk.py's export tables. The
 # PS5 firmware dumps fakelibs are built from are not shipped; the Backport
@@ -96,21 +89,11 @@ COPY *.py \
 COPY tools /opt/fpkger/tools
 # pfsdump sends this to the console's payload loader to read PS5 add-on
 # entitlement keys from the running game.
-ARG ENTITLEMENT_INJECTOR_URL=https://github.com/MangoScango/ps5-entitlement-dumper/releases/latest/download/entitlements.elf
-ADD --chmod=644 "$ENTITLEMENT_INJECTOR_URL" /opt/fpkger/entitlements.elf
+COPY --from=deps /out-deps/entitlements.elf /opt/fpkger/entitlements.elf
 ENV ENTITLEMENT_INJECTOR=/opt/fpkger/entitlements.elf
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY drakmor /opt/fpkger/drakmor
 COPY web /opt/fpkger/web
-
-# 0x3681B is the JZ guarding orbis-pub-cmd's "app volume must carry
-# APP_VER == 01.00" test (VA 0x43741B). EB makes it unconditional, letting a
-# merged app+update package advertise the game's real version.
-RUN off=$((0x3681B)) \
-    && [ "$(dd if="$ORBIS_PUB_CMD" bs=1 skip=$off count=2 status=none \
-            | od -An -tx1 | tr -d ' \n')" = 7407 ] \
-    && printf '\353' \
-       | dd of="$ORBIS_PUB_CMD" bs=1 seek=$off conv=notrunc status=none
 
 RUN chmod +x /opt/fpkger/build-pkg.py \
         /opt/fpkger/tools/pkg_set_appver.py \

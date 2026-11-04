@@ -3,6 +3,8 @@ PPSA*/
 PS4_Fake_PKG_Tools_3/
 wrk_temp/
 *.pkg
+dist/
+.venv/
 *.gp4
 *.log
 **/*.log
