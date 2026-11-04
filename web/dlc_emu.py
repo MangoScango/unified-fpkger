@@ -8,7 +8,7 @@ an entitlement_key), serving a license with no files at all.
 
 A rebuild undoes that layout: each PSAC mount folder becomes its own add-on
 tree <content-id>-ac under the sibling <title>-dlc folder pfsdump also writes,
-with its sce_sys restored from the DLC's retail SC package (sc-overlay.py).
+with its sce_sys restored from the DLC's retail SC package (sc_overlay.py).
 Each PSAL section becomes a metadata-only <content-id>-al tree, its metadata
 taken from the first source that works: a supplied SC package, the SC package
 the base param.json's version.xml points to (an AL listing whose content is
@@ -23,14 +23,11 @@ base plus add-ons.
 import os
 import re
 import shutil
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import psn_entitlements  # noqa: E402
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-SC_OVERLAY = os.path.join(os.path.dirname(HERE), "sc-overlay.py")
+import sc_overlay  # noqa: E402
 
 INI_NAME = "dlc_emu.ini"
 INI_MAX_BYTES = 64 << 10  # the modules read at most 32 KiB; allow for edits
@@ -127,9 +124,10 @@ def read_entries(tree):
 
 
 def overlay_default(sc_pkg, ac_dir):
-    proc = subprocess.run([sys.executable, SC_OVERLAY, sc_pkg, ac_dir])
-    if proc.returncode != 0:
-        raise SplitError(f"sc-overlay failed for {sc_pkg} (exit {proc.returncode})")
+    try:
+        sc_overlay.restore(sc_pkg, ac_dir)
+    except (OSError, sc_overlay.OverlayError) as error:
+        raise SplitError(f"SC overlay failed for {sc_pkg}: {error}") from error
 
 
 def clean_base(tree, dlc_root, log):
@@ -220,8 +218,8 @@ def split(tree, title_id, entries, overlay=None, log=print):
     entries move their mount folder into <content-id>-ac; PSAL entries create
     a metadata-only <content-id>-al (see al_metadata). Either way "sc_pkg"
     (path or URL) is overlaid when given, with overlay(sc_pkg, dir) defaulting
-    to running sc-overlay.py; the web server passes one that streams into the
-    job log. Returns the new add-on trees.
+    to sc_overlay.restore(); the web server passes one that uses a subprocess
+    to stream into the job log. Returns the new add-on trees.
     """
     overlay = overlay or overlay_default
     parent = os.path.dirname(tree.rstrip(os.sep))

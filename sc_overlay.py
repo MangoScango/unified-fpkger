@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Overlay a retail SC package's metadata onto a PS5 dump's sce_sys.
 
-  sc-overlay.py SC_PKG DUMP_DIR
-  sc-overlay.py URL DUMP_DIR
-  sc-overlay.py --resolve DUMP_DIR
+  sc_overlay.py SC_PKG DUMP_DIR
+  sc_overlay.py URL DUMP_DIR
+  sc_overlay.py --resolve DUMP_DIR
 
 An SC package is the small metadata-only container retail content ships
 besides the game image. Its named entries are the sce_sys files (param.json,
@@ -36,6 +36,10 @@ from ps_pkg_info import pkg as pkgmod  # noqa: E402
 
 EXCLUDED_BASENAMES = {"npbind.dat", "license.dat", "license.info"}
 EXCLUDED_SUFFIX = ".ucp"
+
+
+class OverlayError(Exception):
+    """An SC package could not be resolved or restored safely."""
 
 
 def die(message):
@@ -131,7 +135,7 @@ def entry_names(pkg):
     return table
 
 
-def check_title(pkg, sce_sys):
+def check_title(pkg, sce_sys, log=print):
     """Warn when the SC package is for a different title than the dump."""
     try:
         with open(os.path.join(sce_sys, "param.json"), encoding="utf-8-sig") as fh:
@@ -140,11 +144,11 @@ def check_title(pkg, sce_sys):
         return
     dump_title = pkgmod.title_id_from_content_id(dump_id)
     if dump_title and pkg.title_id and dump_title != pkg.title_id:
-        print(f"warning: SC package is for {pkg.title_id} but the dump is "
-              f"{dump_title}; overlaying anyway")
+        log(f"warning: SC package is for {pkg.title_id} but the dump is "
+            f"{dump_title}; overlaying anyway")
 
 
-def overlay(pkg, sce_sys):
+def overlay(pkg, sce_sys, log=print):
     names = entry_names(pkg)
     written = skipped = 0
     for entry_id, entry in sorted(pkg.entries.items(), key=lambda kv: kv[1].index):
@@ -153,13 +157,13 @@ def overlay(pkg, sce_sys):
             continue  # digests, keys and other unnamed housekeeping entries
         parts = name.split("/")
         if name.startswith("/") or ".." in parts or any(not p for p in parts):
-            die(f"refusing unsafe entry name: {name!r}")
+            raise OverlayError(f"refusing unsafe entry name: {name!r}")
         base = parts[-1]
         if base in EXCLUDED_BASENAMES or base.lower().endswith(EXCLUDED_SUFFIX):
             skipped += 1
             continue
         if entry.encrypted:
-            print(f"warning: skipping encrypted entry: {name}")
+            log(f"warning: skipping encrypted entry: {name}")
             skipped += 1
             continue
         dest = os.path.join(sce_sys, *parts)
@@ -168,8 +172,40 @@ def overlay(pkg, sce_sys):
         verb = "overwrote" if os.path.exists(dest) else "wrote"
         with open(dest, "wb") as fh:
             fh.write(data)
-        print(f"{verb} sce_sys/{name} ({len(data)} bytes)")
+        log(f"{verb} sce_sys/{name} ({len(data)} bytes)")
         written += 1
+    return written, skipped
+
+
+def restore(source, dump_dir, log=print):
+    """Restore an SC path or URL into a dump, returning (written, skipped)."""
+    sce_sys = os.path.join(dump_dir, "sce_sys")
+    if not os.path.isdir(sce_sys):
+        raise OverlayError(f"not a dump tree, no sce_sys: {dump_dir}")
+    try:
+        path, is_temp = materialize(source)
+    except OSError as err:
+        raise OverlayError(f"could not fetch {source}: {err}") from err
+
+    try:
+        try:
+            pkg = pkgmod.Pkg.open(path)
+        except pkgmod.PkgError as err:
+            raise OverlayError(f"could not parse {source}: {err}") from err
+        with pkg:
+            if pkg.container != "CNT":
+                log(f"warning: {os.path.basename(source)} is a full "
+                    f"{pkg.container} image, not an SC package; only its "
+                    "unencrypted named entries can be restored")
+            check_title(pkg, sce_sys, log)
+            written, skipped = overlay(pkg, sce_sys, log)
+    finally:
+        if is_temp:
+            os.unlink(path)
+
+    if not written:
+        raise OverlayError("the SC package had nothing usable to restore")
+    log(f"restored {written} file(s) into {sce_sys} ({skipped} excluded)")
     return written, skipped
 
 
@@ -184,32 +220,10 @@ def main():
     if len(sys.argv) != 3:
         die(f"usage: {os.path.basename(sys.argv[0])} SC_PKG_OR_URL DUMP_DIR\n"
             f"       {os.path.basename(sys.argv[0])} --resolve DUMP_DIR")
-    source, dump_dir = sys.argv[1], sys.argv[2]
-    sce_sys = os.path.join(dump_dir, "sce_sys")
-    if not os.path.isdir(sce_sys):
-        die(f"not a dump tree, no sce_sys: {dump_dir}")
     try:
-        path, is_temp = materialize(source)
-    except OSError as err:
-        die(f"could not fetch {source}: {err}")
-    try:
-        try:
-            pkg = pkgmod.Pkg.open(path)
-        except pkgmod.PkgError as err:
-            die(f"could not parse {source}: {err}")
-        with pkg:
-            if pkg.container != "CNT":
-                print(f"warning: {os.path.basename(source)} is a full {pkg.container} "
-                      "image, not an SC package; only its unencrypted named "
-                      "entries can be restored")
-            check_title(pkg, sce_sys)
-            written, skipped = overlay(pkg, sce_sys)
-    finally:
-        if is_temp:
-            os.unlink(path)
-    if not written:
-        die("the SC package had nothing usable to restore")
-    print(f"restored {written} file(s) into {sce_sys} ({skipped} excluded)")
+        restore(sys.argv[1], sys.argv[2])
+    except (OSError, OverlayError) as err:
+        die(str(err))
 
 
 if __name__ == "__main__":

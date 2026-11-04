@@ -23,7 +23,6 @@ import base64
 import codecs
 import collections
 import hmac
-import importlib.util
 import itertools
 import json
 import os
@@ -53,6 +52,7 @@ sys.path.insert(0, TOOLS)
 import pfsdump  # noqa: E402
 import playgo_state  # noqa: E402
 import psn_entitlements  # noqa: E402
+import sc_overlay  # noqa: E402
 from ps_pkg_info import pkg as pkgmod  # noqa: E402
 
 sys.path.insert(0, HERE)
@@ -65,11 +65,7 @@ BACKPORT_PS5 = (os.environ.get("BACKPORT_PS5")
                 or os.path.join(TOOLS, "another-backporter", "backport-ps5.py"))
 MAKE_FSELF = os.path.join(TOOLS, "make_fself.py")
 PSN_ENTITLEMENTS = os.path.join(TOOLS, "psn_entitlements.py")
-SC_OVERLAY = os.environ.get("SC_OVERLAY") or os.path.join(TOOLS, "sc-overlay.py")
-# sc-overlay.py's name is not importable; load it by path for resolve_param.
-_spec = importlib.util.spec_from_file_location("sc_overlay", SC_OVERLAY)
-sc_overlay = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(sc_overlay)
+SC_OVERLAY = os.path.join(TOOLS, "sc_overlay.py")
 PROSPERO_PUB_CMD = os.path.join(TOOLS, "drakmor", "toolchain", "prospero-pub-cmd.exe")
 # another-backporter's SOURCE_FW: the firmware whose modules the fakelibs are
 # built from, so the libraries folder must hold its dump.

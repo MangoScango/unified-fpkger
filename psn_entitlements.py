@@ -47,7 +47,7 @@ def _open(request, timeout=30):
     """urlopen that skips certificate verification on playstation.net hosts.
 
     Sony's package servers present a chain some hosts cannot verify;
-    sc-overlay.py's materialize() does the same.
+    sc_overlay.py's materialize() does the same.
     """
     url = request.full_url if isinstance(request, urllib.request.Request) \
         else request

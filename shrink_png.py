@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Shrink oversized sce_sys icon PNGs in place without changing their pixels.
 
-usage: shrink-png.py SCE_SYS_DIR [--limit BYTES]
+usage: shrink_png.py SCE_SYS_DIR [--limit BYTES]
 
 Publishing Tools rejects icon0*.png larger than 1 MiB. Dumps sometimes carry
 icons padded with editor metadata (multi-MB iTXt/XMP chunks), so this drops
@@ -74,26 +74,39 @@ def shrink(path, limit):
     return len(data), len(result)
 
 
+def shrink_icons(sce_sys, limit=DEFAULT_LIMIT, log=None):
+    """Shrink every eligible icon, reporting all failures after processing them."""
+    failures = []
+    for path in sorted(Path(sce_sys).iterdir()):
+        if not path.is_file() or not ICON.fullmatch(path.name):
+            continue
+        try:
+            done = shrink(path, limit)
+        except ValueError as error:
+            failures.append(str(error))
+            continue
+        if done and log:
+            log(f"{path.name}: {done[0]} -> {done[1]} bytes "
+                "(metadata stripped, pixels unchanged)")
+    if failures:
+        raise ValueError("; ".join(failures))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("sce_sys", type=Path)
     ap.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     args = ap.parse_args()
-    failed = False
-    for path in sorted(args.sce_sys.iterdir()):
-        if not path.is_file() or not ICON.fullmatch(path.name):
-            continue
-        try:
-            done = shrink(path, args.limit)
-        except ValueError as error:
-            print(f"error: {error}", file=sys.stderr)
-            failed = True
-            continue
-        if done:
-            print(f">> {path.name}: {done[0]} -> {done[1]} bytes (metadata stripped, pixels unchanged)",
-                  file=sys.stderr)
-    sys.exit(1 if failed else 0)
+    try:
+        shrink_icons(
+            args.sce_sys, args.limit,
+            log=lambda message: print(f">> {message}", file=sys.stderr),
+        )
+    except (OSError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -106,6 +106,7 @@ import threading
 import time
 import uuid
 
+import shrink_png
 from sfo import Command, SFOError, load_sfo
 
 SELF_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -151,8 +152,6 @@ ORBIS_PUB_CMD = env("ORBIS_PUB_CMD", os.path.join(SDK_DIR, "orbis-pub-cmd.exe"))
 MAKE_FSELF = env("MAKE_FSELF", os.path.join(SELF_DIR, "make_fself.py"))
 BACKPORT_SDK = env("BACKPORT_SDK", os.path.join(SELF_DIR, "backport-sdk.py"))
 PKG_SET_APPVER = env("PKG_SET_APPVER", os.path.join(SELF_DIR, "pkg-set-appver.py"))
-SHRINK_PNG = env("SHRINK_PNG", os.path.join(SELF_DIR, "shrink-png.py"))
-SC_OVERLAY = env("SC_OVERLAY", os.path.join(SELF_DIR, "sc-overlay.py"))
 FAKE_PASSCODE = "00000000000000000000000000000000"
 DLC_ENT_KEY = "00000000000000000000000000000000"   # zero entitlement key (kstuff fakes the check)
 WINE_OVERRIDES = "wineps.drv,localspl.dll,spoolss.dll=d"
@@ -287,8 +286,10 @@ def sfo_edit(path, *commands, force=False):
 
 # Publishing Tools rejects icon0*.png over 1 MiB; some dumps pad them with metadata.
 def fix_icons(sce_sys):
-    if subprocess.run([sys.executable, SHRINK_PNG, sce_sys]).returncode:
-        die(f"icon0 in {sce_sys} is too large for Publishing Tools")
+    try:
+        shrink_png.shrink_icons(sce_sys, log=log)
+    except (OSError, ValueError) as error:
+        die(f"icon0 in {sce_sys} is too large for Publishing Tools: {error}")
 
 
 # ent_key_of <dir>: the add-on dump's entitlement_key.dat as 32 hex digits
@@ -1760,6 +1761,9 @@ def free_space_line(directory):
 
 
 def cmd_ps5(args):
+    # SC support needs ps_pkg_info, which PS4-only installations need not load.
+    import sc_overlay
+
     if not re.fullmatch(r"[0-9A-Fa-f]{32}", args.passcode):
         die("The passcode must be 32 hex digits")
     if not ON_WINDOWS and not shutil.which("wine"):
@@ -1785,20 +1789,19 @@ def cmd_ps5(args):
         die("--no-sc conflicts with --sc-pkg")
     sc_pkg = args.sc_pkg
     if not sc_pkg and not args.no_sc:
-        probe = subprocess.run([args.python, SC_OVERLAY, "--resolve", source],
-                               capture_output=True, text=True)
-        sc_pkg = probe.stdout.strip()
+        sc_pkg, reason = sc_overlay.resolve(
+            os.path.join(source, "sce_sys", "param.json"))
         if sc_pkg:
             log(f"SC package matched via version.xml: {sc_pkg}")
-        elif probe.returncode:
-            log(f"no SC package auto-match ({probe.stderr.strip().removeprefix('error: ')}); "
+        else:
+            log(f"no SC package auto-match ({reason}); "
                 "pass --sc-pkg to restore sce_sys anyway")
     if sc_pkg:
         log(f"Restoring sce_sys metadata from SC package: {sc_pkg}")
-        rc = subprocess.run([args.python, SC_OVERLAY, sc_pkg,
-                             source], stdout=sys.stderr).returncode
-        if rc:
-            die(f"sc-overlay.py failed (exit {rc})")
+        try:
+            sc_overlay.restore(sc_pkg, source, log=log)
+        except (OSError, sc_overlay.OverlayError) as error:
+            die(f"SC overlay failed: {error}")
 
     # Add-ons carry no keystone; the custom-keystone requirement is the app's.
     entitlement_key = ""
