@@ -2051,9 +2051,11 @@ class Handler(BaseHTTPRequestHandler):
                     titles = mounted_titles(host, port)
                     found = [{"title": t, "platform": image_platform(host, port, t)}
                              for t in titles]
+                    ps5_console = pfsdump.is_ps5_console(host, port)
                 except (OSError, EOFError, pfsdump.ftplib.Error) as err:
                     raise BadRequest(f"could not reach {host}:{port}: {err}") from None
-                self._send(HTTPStatus.OK, {"titles": found})
+                self._send(HTTPStatus.OK, {
+                    "titles": found, "ps5_console": ps5_console})
             elif url.path == "/api/playgo":
                 host, port = parse_host(arg("host"))
                 title = checked({"title": arg("title")}, "title", TITLE_RE, "title")

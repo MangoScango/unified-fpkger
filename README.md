@@ -17,12 +17,15 @@ Dockerized ftp dumper, fpkg builder, and backport creator for PS4 & PS5 games. S
 - Supports unrolling combined PS5 dlc_emu dumps into individual fpkgs.
 - Rebuild existing PS5 fpkgs.
 
+## psn_entitlements.py
+- Searches the PSN API for all available AL DLC of a given title and automatically generates stub dumps for fpkg generation.
+
 ## another-backporter
 - Experimental automatic backport creator. See [another-backporter](https://github.com/MangoScango/another-backporter) for more information.
 
 ## Requirements
 
-See docker-compose.yaml for docker deployment. This is the intended deployment method, but the project can run on bare metal in Windows, or any other environment where Wine is available.
+See [docker/docker-compose.yml](docker/docker-compose.yml) for Docker deployment. This is the intended deployment method, but the project can run on bare metal in Windows, or any other environment where Wine is available.
 
 ## Special Thanks
 

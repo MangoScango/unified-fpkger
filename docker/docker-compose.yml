@@ -1,10 +1,11 @@
 # Web UI, left running:
 #
-#   docker compose up -d        then open http://<server>:8080/
+#   docker compose -f docker/docker-compose.yml up -d
+#   then open http://<server>:8080/
 #
 # One-off terminal jobs still work, with build-pkg.py args after the service:
 #
-#   docker compose run --rm fpkger --out /work/out /work/CUSA28863-app
+#   docker compose -f docker/docker-compose.yml run --rm fpkger --out /work/out /work/CUSA28863-app
 services:
   fpkger:
     image: ghcr.io/mangoscango/unified-fpkger:latest
@@ -16,7 +17,7 @@ services:
     # SSD is preferable if you can afford it
     working_dir: /work
     env_file:
-      - path: .env
+      - path: ../.env
         required: false
     environment:
       # For Unraid. 99:100 = nobody:users

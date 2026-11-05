@@ -15,6 +15,7 @@ drakmor/prospero-dds2png.exe
 **/.git
 .gitignore
 .gitattributes
-docker-compose.yml
-Dockerfile
+docker/docker-compose.yml
+docker/Dockerfile
+docker/Dockerfile.dockerignore
 README*

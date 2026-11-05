@@ -1620,6 +1620,20 @@ ENTITLEMENT_DBS = (
 )
 
 
+def is_ps5_console(host, port):
+    """Identify the console independently of the running title's format."""
+    probe = None
+    try:
+        probe = FtpFile(host, port, ENTITLEMENT_DBS[0])
+        probe.read(0, 1)
+        return True
+    except ftplib.all_errors:
+        return False
+    finally:
+        if probe is not None:
+            probe.close()
+
+
 def write_ps4_al_param(path, content_id, title_id, title):
     """Write the minimal SFO shared by console- and PSN-derived unlockers."""
     param = SFO()
@@ -2283,7 +2297,7 @@ def main():
                         help="alias for --addon-mode skip")
     parser.add_argument("--no-entitlements", action="store_true",
                         help="do not read add-on entitlement keys from "
-                             "the running game")
+                             "the running game (PS5 consoles only)")
     parser.add_argument("--injector", default=default_injector(),
                         help="ps5-entitlement-dumper's entitlements.elf "
                              "(default: $ENTITLEMENT_INJECTOR, else beside this "
@@ -2415,16 +2429,21 @@ def main():
 
         entitlement_keys = None
         if not args.no_entitlements and (dump_game or dump_ac or dump_al):
-            entitlement_keys = running_game_entitlements(
-                host, title, candidates, args.injector)
-            if entitlement_keys:
-                os.makedirs(dest, exist_ok=True)
-                write_entitlements(dest, entitlement_keys)
-            if dump_ac:
-                ac_mounts, added = relist_dlc_mounts(host, port, title, ac_mounts)
-                if added:
-                    print(f"  the injector mounted {len(added)} more add-on(s): "
-                          f"{', '.join(added)}")
+            if is_ps5_console(host, port):
+                entitlement_keys = running_game_entitlements(
+                    host, title, candidates, args.injector)
+                if entitlement_keys:
+                    os.makedirs(dest, exist_ok=True)
+                    write_entitlements(dest, entitlement_keys)
+                if dump_ac:
+                    ac_mounts, added = relist_dlc_mounts(
+                        host, port, title, ac_mounts)
+                    if added:
+                        print(f"  the injector mounted {len(added)} more add-on(s): "
+                              f"{', '.join(added)}")
+            else:
+                print("  skipping entitlement injection: payload requires a "
+                      "PS5 console")
 
         rest_bug = None
         if dump_game:

@@ -38,6 +38,7 @@
   button.primary { background: #2c4f86; border-color: #3f6db3; }
   button.danger { background: #5a2a30; border-color: #874049; }
   button:disabled { opacity: .5; cursor: default; }
+  label.check:has(> input:disabled) { opacity: .5; cursor: default; }
   label:has(> select:disabled) { opacity: .5; }
   select:disabled { cursor: not-allowed; }
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
@@ -1103,6 +1104,11 @@ function syncConsolePlatform(form) {
   if (hint) hint.hidden = Boolean(platform) || !buildToggle.checked;
   const patch = form.elements.patch_mode;
   if (patch) patch.disabled = platform === "ps5" || !form.elements.dump_game.checked;
+  const noEntitlements = form.elements.no_entitlements;
+  const unsupported = form.ps5Console === false;
+  noEntitlements.disabled = unsupported;
+  noEntitlements.closest("label").title = unsupported
+    ? "Not supported on PS4" : "";
   // A dump-build builds the dumped add-ons too, unless they are skipped.
   const buildsAddons = buildToggle.checked && form.elements.addon_mode.value !== "skip";
   for (const node of $$("[data-addon-only]", form)) node.hidden = !buildsAddons;
@@ -1210,7 +1216,8 @@ document.addEventListener("click", async e => {
   out.className = "hint";
   out.textContent = "Asking the console...";
   try {
-    const {titles} = await api("/api/titles?host=" + encodeURIComponent(form.elements.host.value.trim()));
+    const {titles, ps5_console} = await api("/api/titles?host=" + encodeURIComponent(form.elements.host.value.trim()));
+    form.ps5Console = ps5_console;
     select.replaceChildren(new Option("Whatever game is running", ""));
     select.platforms = new Map(titles.map(t => [t.title, t.platform]));
     for (const t of titles) select.add(new Option(`${t.title} (${t.platform.toUpperCase()})`, t.title));
@@ -1219,6 +1226,7 @@ document.addEventListener("click", async e => {
     out.textContent = titles.length ? `${titles.length} title(s) mounted.` : "No game is mounted.";
     showPlaygo(form);
   } catch (err) {
+    form.ps5Console = null;
     select.platforms = null;
     syncConsolePlatform(form);
     showPlaygo(form);
