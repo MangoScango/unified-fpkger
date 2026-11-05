@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a self-contained, non-Docker release ZIP from this checkout."""
+"""Stage a self-contained, non-Docker release directory from this checkout."""
 
 import argparse
 import ast
@@ -7,12 +7,10 @@ import json
 import os
 import re
 import shutil
-import stat
 import tempfile
-import zipfile
 from pathlib import Path
 
-from fetch_dependencies import CONFIG_PATH, fetch_all, file_hash
+from fetch_dependencies import CONFIG_PATH, fetch_all
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,7 +26,6 @@ RUNTIME_FILES = (
     "psn_entitlements.py",
 )
 RUNTIME_DIRECTORIES = ("tools", "web", "another-backporter", "drakmor")
-ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
 
 def copy_runtime(staging):
@@ -80,44 +77,29 @@ def write_manifest(staging, version):
     )
 
 
-def zip_tree(staging, output):
-    """Write a deterministic ZIP while preserving executable permission bits."""
-    with zipfile.ZipFile(output, "w") as archive:
-        files = sorted(path for path in staging.rglob("*") if path.is_file())
-        for path in files:
-            name = path.relative_to(staging.parent).as_posix()
-            info = zipfile.ZipInfo(name, ZIP_TIMESTAMP)
-            info.create_system = 3
-            info.external_attr = stat.S_IMODE(path.stat().st_mode) << 16
-            info.compress_type = zipfile.ZIP_DEFLATED
-            archive.writestr(
-                info, path.read_bytes(), compress_type=zipfile.ZIP_DEFLATED,
-                compresslevel=9,
-            )
-
-
 def build(version, output_dir):
+    """Return the staged release directory named unified-fpkger-<version>."""
     if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._-]*", version):
         raise ValueError(f"invalid release version: {version!r}")
     output_dir.mkdir(parents=True, exist_ok=True)
+    name = f"unified-fpkger-{version}"
+    target = output_dir / name
 
-    with tempfile.TemporaryDirectory(prefix="fpkger-release-") as temp:
-        staging = Path(temp) / f"unified-fpkger-{version}"
+    # Build beside the final location so a failed build never replaces a good one.
+    with tempfile.TemporaryDirectory(prefix=f".{name}-", dir=output_dir) as temp:
+        staging = Path(temp) / name
         staging.mkdir()
         copy_runtime(staging)
         fetch_all(staging)
         write_manifest(staging, version)
         validate_runtime(staging)
 
-        output = output_dir / f"unified-fpkger-{version}.zip"
-        zip_tree(staging, output)
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.move(str(staging), str(target))
 
-    checksum = file_hash(output)
-    checksum_path = output.with_suffix(output.suffix + ".sha256")
-    checksum_path.write_text(f"{checksum}  {output.name}\n", encoding="ascii")
-    print(f"Release: {output}")
-    print(f"SHA-256: {checksum}")
-    return output
+    print(f"Release directory: {target}")
+    return target
 
 
 def main():

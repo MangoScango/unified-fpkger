@@ -6,12 +6,16 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version used in the test artifact name"
+        description: "Version used in the artifact name"
         required: true
         default: dev
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
@@ -19,19 +23,20 @@ env:
 jobs:
   package:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.15"
 
-      - name: Build release ZIP
+      - name: Stage release
         run: python release/build.py --version "$VERSION" --output dist
 
-      - name: Verify packaged release
+      - name: Verify staged release
         shell: bash
         run: |
           python - <<'PY'
@@ -39,37 +44,32 @@ jobs:
           import os
           import subprocess
           import sys
-          import tempfile
-          import zipfile
 
-          version = os.environ["VERSION"]
-          archive_path = Path("dist") / f"unified-fpkger-{version}.zip"
-          with zipfile.ZipFile(archive_path) as archive:
-              assert archive.testzip() is None
-              run_info = archive.getinfo(f"unified-fpkger-{version}/RUN.sh")
-              assert (run_info.external_attr >> 16) & 0o111
-              with tempfile.TemporaryDirectory() as temp:
-                  archive.extractall(temp)
-                  root = Path(temp) / f"unified-fpkger-{version}"
-                  orbis = root / "PS4_Fake_PKG_Tools_3" / "orbis-pub-cmd.exe"
-                  with orbis.open("rb") as handle:
-                      handle.seek(0x3681B)
-                      assert handle.read(2) == b"\xEB\x07"
-                  subprocess.run(
-                      [sys.executable, str(root / "tools" / "sfo.py"), "--version"],
-                      check=True,
-                  )
-                  sys.path.insert(0, str(root))
-                  from ps_pkg_info import pkg  # noqa: F401
+          root = Path("dist") / f"unified-fpkger-{os.environ['VERSION']}"
+          assert root.is_dir()
+          assert os.access(root / "RUN.sh", os.X_OK)
+
+          orbis = root / "PS4_Fake_PKG_Tools_3" / "orbis-pub-cmd.exe"
+          with orbis.open("rb") as handle:
+              handle.seek(0x3681B)
+              assert handle.read(2) == b"\xEB\x07"
+
+          subprocess.run(
+              [sys.executable, str(root / "tools" / "sfo.py"), "--version"],
+              check=True,
+          )
+          sys.path.insert(0, str(root))
+          from ps_pkg_info import pkg  # noqa: F401
           PY
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: unified-fpkger-${{ env.VERSION }}
-          path: |
-            dist/*.zip
-            dist/*.sha256
+          path: dist/unified-fpkger-${{ env.VERSION }}
+          include-hidden-files: true
+          overwrite: true
+          retention-days: 30
           if-no-files-found: error
 
       - name: Publish tagged release
@@ -77,10 +77,14 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: dist
         run: |
+          # GitHub artifacts cannot be attached to a release directly, so the
+          # staged directory is zipped here as the release asset.
+          zip -qr "unified-fpkger-$VERSION.zip" "unified-fpkger-$VERSION"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/*.zip dist/*.sha256 --clobber
+            gh release upload "$GITHUB_REF_NAME" "unified-fpkger-$VERSION.zip" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/*.zip dist/*.sha256 \
+            gh release create "$GITHUB_REF_NAME" "unified-fpkger-$VERSION.zip" \
               --title "$GITHUB_REF_NAME" --generate-notes
           fi
