@@ -14,5 +14,9 @@
   "entitlements": {
     "url": "https://github.com/MangoScango/ps5-entitlement-dumper/releases/download/v2/entitlements.elf",
     "sha256": "f4fa8f241e067155034a8afb5b4cb61ecf3f19a14010a97523b9bb673f1c68d4"
+  },
+  "drakmor": {
+    "url": "https://github.com/MangoScango/unified-fpkger/releases/download/drakmor-sdk-15/sdk-fpkg279-fix15.7z",
+    "sha256": "7d0223c99bea6cd2511e465b989b16e88064bb272d194295a11e57d4ae8167b9"
   }
 }

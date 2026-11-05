@@ -9,6 +9,8 @@ dist/
 *.log
 **/*.log
 **/__pycache__/
+drakmor/toolchain/
+drakmor/prospero-dds2png.exe
 .git/
 **/.git
 .gitignore

@@ -4,15 +4,29 @@
 import argparse
 import hashlib
 import json
+import os
 import shutil
+import subprocess
 import tarfile
 import tempfile
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 
 CONFIG_PATH = Path(__file__).with_name("dependencies.json")
 PKGTOOLS_PATCH_OFFSET = 0x3681B
+
+
+class _DropAuthOnRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None:
+            old = urllib.parse.urlsplit(req.full_url)
+            new = urllib.parse.urlsplit(newurl)
+            if (old.scheme, old.netloc) != (new.scheme, new.netloc):
+                redirected.remove_header("Authorization")
+        return redirected
 
 
 def file_hash(path):
@@ -24,8 +38,13 @@ def file_hash(path):
 
 
 def download(url, destination, expected_sha256):
-    request = urllib.request.Request(url, headers={"User-Agent": "unified-fpkger-release"})
-    with urllib.request.urlopen(request, timeout=120) as response:
+    headers = {"User-Agent": "unified-fpkger-release"}
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token and urllib.parse.urlsplit(url).hostname in {"github.com", "api.github.com"}:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
+    opener = urllib.request.build_opener(_DropAuthOnRedirect)
+    with opener.open(request, timeout=120) as response:
         with destination.open("wb") as output:
             shutil.copyfileobj(response, output)
     actual = file_hash(destination)
@@ -52,6 +71,22 @@ def extract_archive(archive, destination):
     return roots[0]
 
 
+def extract_7z(archive, destination):
+    """Extract with the 7-Zip CLI, which handles the archive's BCJ2 filter."""
+    executable = next(
+        (found for name in ("7zz", "7z", "7za") if (found := shutil.which(name))),
+        None,
+    )
+    if executable is None:
+        raise RuntimeError("7-Zip is required to extract the Drakmor toolchain")
+    destination.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [executable, "x", "-y", f"-o{destination}", str(archive)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+
 def fetch_github(spec, work):
     work.mkdir(parents=True, exist_ok=True)
     archive = work / "source.tar.gz"
@@ -60,6 +95,13 @@ def fetch_github(spec, work):
     source_dir = work / "source"
     source_dir.mkdir()
     return extract_archive(archive, source_dir)
+
+
+def fetch_drakmor(spec, destination, work):
+    archive = work / "drakmor-toolchain.7z"
+    download(spec["url"], archive, spec["sha256"])
+    extract_7z(archive, destination / "drakmor")
+    print(f"drakmor toolchain: {spec['sha256'][:12]}")
 
 
 def copy_tree(source, destination):
@@ -107,7 +149,7 @@ def patch_orbis(pkgtools_dir, spec):
 
 
 def fetch_all(destination):
-    """Populate destination with PS4 tools, ps_pkg_info, and entitlements.elf."""
+    """Populate destination with the pinned runtime dependencies."""
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     (destination / "licenses").mkdir(exist_ok=True)
@@ -137,6 +179,8 @@ def fetch_all(destination):
             config["entitlements"]["sha256"],
         )
         print("entitlements.elf: verified")
+
+        fetch_drakmor(config["drakmor"], destination, work)
 
 
 def main():

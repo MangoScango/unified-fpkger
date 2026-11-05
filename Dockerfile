@@ -9,11 +9,16 @@
 FROM debian:trixie-slim AS deps
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 ca-certificates \
+        python3 ca-certificates 7zip \
     && rm -rf /var/lib/apt/lists/*
 
 COPY release/dependencies.json release/fetch_dependencies.py /src/release/
-RUN python3 /src/release/fetch_dependencies.py /out-deps
+# Optional token for release assets hosted in a private repository.
+RUN --mount=type=secret,id=github_token \
+    if [ -f /run/secrets/github_token ]; then \
+        export GITHUB_TOKEN="$(cat /run/secrets/github_token)"; \
+    fi; \
+    python3 /src/release/fetch_dependencies.py /out-deps
 
 FROM debian:trixie-slim
 
@@ -92,7 +97,10 @@ COPY tools /opt/fpkger/tools
 COPY --from=deps /out-deps/entitlements.elf /opt/fpkger/entitlements.elf
 ENV ENTITLEMENT_INJECTOR=/opt/fpkger/entitlements.elf
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY drakmor /opt/fpkger/drakmor
+# The toolchain archive ships its own GP5 script; the source overlay below
+# keeps the repository version authoritative.
+COPY --from=deps /out-deps/drakmor /opt/fpkger/drakmor
+COPY drakmor/scripts /opt/fpkger/drakmor/scripts
 COPY web /opt/fpkger/web
 
 RUN chmod +x /opt/fpkger/build-pkg.py \

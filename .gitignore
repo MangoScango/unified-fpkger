@@ -15,3 +15,5 @@
 /.env
 *.gp5
 *.pyc
+/drakmor/toolchain/
+/drakmor/prospero-dds2png.exe

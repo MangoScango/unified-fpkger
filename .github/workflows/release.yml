@@ -19,6 +19,7 @@ concurrency:
 
 env:
   VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+  PYTHONDONTWRITEBYTECODE: "1"
 
 jobs:
   package:
@@ -33,7 +34,12 @@ jobs:
         with:
           python-version: "3.15"
 
+      - name: Install 7-Zip
+        run: sudo apt-get update && sudo apt-get install -y 7zip
+
       - name: Stage release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python release/build.py --version "$VERSION" --output dist
 
       - name: Verify staged release
@@ -45,6 +51,8 @@ jobs:
           import subprocess
           import sys
 
+          sys.dont_write_bytecode = True
+
           root = Path("dist") / f"unified-fpkger-{os.environ['VERSION']}"
           assert root.is_dir()
           assert os.access(root / "RUN.sh", os.X_OK)
@@ -55,11 +63,14 @@ jobs:
               assert handle.read(2) == b"\xEB\x07"
 
           subprocess.run(
-              [sys.executable, str(root / "tools" / "sfo.py"), "--version"],
+              [sys.executable, "-B", str(root / "tools" / "sfo.py"), "--version"],
               check=True,
           )
           sys.path.insert(0, str(root))
           from ps_pkg_info import pkg  # noqa: F401
+
+          assert not list(root.rglob("__pycache__"))
+          assert not list(root.rglob("*.pyc"))
           PY
 
       - name: Upload workflow artifact

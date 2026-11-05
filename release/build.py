@@ -3,14 +3,12 @@
 
 import argparse
 import ast
-import json
-import os
 import re
 import shutil
 import tempfile
 from pathlib import Path
 
-from fetch_dependencies import CONFIG_PATH, fetch_all
+from fetch_dependencies import fetch_all
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,7 +23,8 @@ RUNTIME_FILES = (
     "pfsdump.py",
     "psn_entitlements.py",
 )
-RUNTIME_DIRECTORIES = ("tools", "web", "another-backporter", "drakmor")
+RUNTIME_DIRECTORIES = ("tools", "web", "another-backporter")
+DRAKMOR_SOURCE_FILES = ("scripts/create-gp5-from-folder.py",)
 
 
 def copy_runtime(staging):
@@ -39,6 +38,13 @@ def copy_runtime(staging):
         )
 
 
+def copy_drakmor_sources(staging):
+    for name in DRAKMOR_SOURCE_FILES:
+        target = staging / "drakmor" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / "drakmor" / name, target)
+
+
 def validate_runtime(staging):
     required = [
         *RUNTIME_FILES,
@@ -48,6 +54,7 @@ def validate_runtime(staging):
         "ps_pkg_info/pkg.py",
         "PS4_Fake_PKG_Tools_3/orbis-pub-cmd.exe",
         "drakmor/scripts/create-gp5-from-folder.py",
+        "drakmor/prospero-dds2png.exe",
         "drakmor/toolchain/prospero-pub-cmd.exe",
         "entitlements.elf",
     ]
@@ -66,17 +73,6 @@ def validate_runtime(staging):
         raise RuntimeError(f"release contains cache files: {forbidden[0]}")
 
 
-def write_manifest(staging, version):
-    manifest = {
-        "version": version,
-        "source_revision": os.environ.get("GITHUB_SHA", "unknown"),
-        "dependencies": json.loads(CONFIG_PATH.read_text(encoding="utf-8")),
-    }
-    (staging / "RELEASE.json").write_text(
-        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
-    )
-
-
 def build(version, output_dir):
     """Return the staged release directory named unified-fpkger-<version>."""
     if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._-]*", version):
@@ -91,7 +87,8 @@ def build(version, output_dir):
         staging.mkdir()
         copy_runtime(staging)
         fetch_all(staging)
-        write_manifest(staging, version)
+        # The toolchain archive ships its own GP5 script; the repository copy wins.
+        copy_drakmor_sources(staging)
         validate_runtime(staging)
 
         if target.exists():
