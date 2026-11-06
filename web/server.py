@@ -820,8 +820,8 @@ def dump_step(job, spec, title):
         if not os.path.isdir(app_dir):
             raise JobError(f"the dump finished but {app_dir} is missing")
         job.outputs.append(app_dir)
-        if patch_mode == "separate" and os.path.isdir(patch_dir):
-            job.outputs.append(patch_dir)
+    if patch_mode == "separate" and os.path.isdir(patch_dir):
+        job.outputs.append(patch_dir)
     if addon_mode != "skip" and os.path.isdir(dlc_dir):
         job.outputs.append(dlc_dir)
     return app_dir if dump_game else None
@@ -1299,7 +1299,9 @@ def console_spec(params, spec):
 def dump_spec(params, spec):
     spec["dump_dir"] = resolve_path(params.get("dump_dir"), "dump directory", create=True)
     spec["dump_game"] = bool(params.get("dump_game", True))
-    patch_mode = params.get("patch_mode") or "combined"
+    patch_mode = params.get("patch_mode")
+    if not patch_mode:
+        patch_mode = "combined" if spec["dump_game"] else "skip"
     addon_mode = params.get("addon_mode") or "all"
     if patch_mode not in ("combined", "separate", "skip"):
         raise BadRequest(f"unknown patch dump mode: {patch_mode}")
@@ -1309,8 +1311,10 @@ def dump_spec(params, spec):
         patch_mode = "skip"
     if params.get("no_dlc"):
         addon_mode = "skip"
-    if not spec["dump_game"] and addon_mode == "skip":
-        raise BadRequest("nothing to dump: enable the game or an add-on mode")
+    if not spec["dump_game"] and patch_mode == "combined":
+        raise BadRequest("combined patch dumping requires the game")
+    if not spec["dump_game"] and patch_mode == "skip" and addon_mode == "skip":
+        raise BadRequest("nothing to dump: enable the game, a separate patch, or an add-on mode")
     spec["psn_al"] = bool(params.get("psn_al"))
     if spec["psn_al"] and addon_mode == "skip":
         raise BadRequest("grabbing AL content from PSN needs an add-on dump "

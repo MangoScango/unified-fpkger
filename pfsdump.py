@@ -2272,11 +2272,11 @@ def main():
                         help="root directory for dump output (default: .)")
     parser.add_argument("-p", "--port", type=int, default=2121)
     parser.add_argument("--no-game", action="store_true",
-                        help="dump only the selected add-on content")
+                        help="omit the base app; --patch-mode separate dumps the PS4 patch")
     parser.add_argument("--patch-mode",
-                        choices=("combined", "separate", "skip"), default="combined",
+                        choices=("combined", "separate", "skip"),
                         help="combine the PS4 patch into the app, dump it separately, "
-                             "or skip it (default: combined)")
+                             "or skip it (default: combined with the app, skip without it)")
     parser.add_argument("--no-patch", action="store_true",
                         help="alias for --patch-mode skip")
     parser.add_argument("--addon-mode", choices=("all", "ac", "al", "skip"),
@@ -2328,8 +2328,12 @@ def main():
     addon_mode = "skip" if args.no_dlc else args.addon_mode
     dump_ac = addon_mode in ("all", "ac")
     dump_al = addon_mode in ("all", "al")
-    if not dump_game and addon_mode == "skip":
-        parser.error("--no-game requires an add-on mode other than skip")
+    if patch_mode is None:
+        patch_mode = "combined" if dump_game else "skip"
+    if not dump_game and patch_mode == "combined":
+        parser.error("--no-game cannot use --patch-mode combined")
+    if not dump_game and patch_mode == "skip" and addon_mode == "skip":
+        parser.error("--no-game requires a separate patch or an add-on mode other than skip")
     if not dump_game and args.manifest:
         parser.error("--manifest requires game dumping")
 
@@ -2365,7 +2369,7 @@ def main():
             ps5 = app_image.version == 2
             if ps5:
                 print(f"  PS5 image: superblock at {app_image.superblock_offset:,}")
-        elif dump_ac:
+        elif dump_ac or patch_mode == "separate":
             app = FtpFile(host, port, nest_path(title, "app0"))
             header = app.read(0, 16)
             version, magic = struct.unpack("<qq", header)
@@ -2373,7 +2377,8 @@ def main():
             app.close()
             app = None
 
-        separate = dump_game and patch_mode == "separate" and not ps5
+        separate = patch_mode == "separate" and not ps5
+        patch_only = separate and not dump_game
         if dump_game:
             if patch_mode != "skip" and not ps5:
                 try:
@@ -2421,6 +2426,33 @@ def main():
             os.makedirs(dest, exist_ok=True)
             if separate and patch_manifest:
                 os.makedirs(patch_dest, exist_ok=True)
+        elif patch_only:
+            try:
+                patch = FtpFile(host, port, nest_path(title, "patch0"))
+                patch_manifest = PfsImage(patch).manifest()
+            except ftplib.all_errors:
+                print(f"No patch image for {title}.", file=sys.stderr)
+                if patch is not None:
+                    patch.close()
+                    patch = None
+            patch_plan, app_plan = patch_manifest, []
+            known_missing = set()
+            dest = os.path.join(args.output_dir, f"{title}-dlc")
+            patch_dest = os.path.join(args.output_dir, f"{title}-patch")
+            if patch_manifest:
+                if not args.no_install_check:
+                    known_missing = predict_missing(
+                        host, port, title, [], plan=[], patch_plan=patch_plan)
+                total = sum(size for _d, _o, size in patch_plan)
+                print(f"Dumping {title} patch data ({total // 1000000} MB):")
+                print(f"  {len(patch_plan)} file(s), {total:,} bytes; metadata cost "
+                      f"{patch.metadata_bytes / 1048576:.1f} MiB")
+                os.makedirs(patch_dest, exist_ok=True)
+            elif addon_mode == "skip":
+                return 1
+        elif not dump_game and patch_mode == "separate" and addon_mode == "skip":
+            print("PS5 titles do not have a separate patch image.", file=sys.stderr)
+            return 1
         else:
             patch_plan = app_plan = []
             known_missing = set()
@@ -2446,11 +2478,11 @@ def main():
                       "PS5 console")
 
         rest_bug = None
-        if dump_game:
+        if dump_game or (patch_only and patch_manifest):
             # Probe whichever image reaches furthest into its PFS. A small patch
             # is not evidence either way because the failing 2 GiB offset lies
             # outside it. One conclusive probe covers all layers.
-            probes = [(nest_path(title, "app0"), app_manifest)]
+            probes = [(nest_path(title, "app0"), app_manifest)] if dump_game else []
             if patch_manifest:
                 probes.append((nest_path(title, "patch0"), patch_manifest))
             probe_path, probe_manifest = max(
@@ -2469,10 +2501,15 @@ def main():
         skip_count = 0
         skipped_paths = set()
         layer_results = []
-        layers = (
-            ("patch", patch, patch_plan, patch_dest, f"{title}-patch0"),
-            ("app", app, app_plan, dest, f"{title}-app0"),
-        ) if dump_game else ()
+        if dump_game:
+            layers = (
+                ("patch", patch, patch_plan, patch_dest, f"{title}-patch0"),
+                ("app", app, app_plan, dest, f"{title}-app0"),
+            )
+        elif patch_only:
+            layers = (("patch", patch, patch_plan, patch_dest, f"{title}-patch0"),)
+        else:
+            layers = ()
         for label, remote, layer_plan, layer_dest, mount_name in layers:
             if not layer_plan:
                 continue
@@ -2525,7 +2562,7 @@ def main():
             print(f"  warning: {len(stream_unresolved)} file(s) omitted after "
                   f"both image and loose extraction failed", file=sys.stderr)
 
-        mount = FtpMount(host, port) if dump_game or dump_ac else None
+        mount = FtpMount(host, port) if dump_game or patch_only or dump_ac else None
         try:
             if mount is not None:
                 if args.no_decrypt:
@@ -2549,9 +2586,9 @@ def main():
                             problems += [
                                 (rel, "decrypted executable is truncated")
                                 for rel in damaged]
-                    if dump_game:
+                    if dump_game or patch_only:
                         print(f"  decrypted {replaced_total} executable(s) via the PFS mounts")
-                        if replaced_total:
+                        if dump_game and replaced_total:
                             keystone = os.path.join(dest, "sce_sys", "keystone")
                             if keystone_is_generated(keystone):
                                 print("  warning: keystone is not the retail one",
@@ -2572,6 +2609,10 @@ def main():
                         problems += dump_ps4_metadata(
                             host, port, mount, title, dest, bool(patch_manifest),
                             args.verbose)
+                elif patch_only and patch_manifest:
+                    problems += dump_ps4_metadata(
+                        host, port, mount, title, patch_dest, True,
+                        args.verbose, patch_only=True)
 
                 if dump_ac:
                     if ac_mounts:
