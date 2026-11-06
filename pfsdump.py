@@ -2461,21 +2461,17 @@ def main():
 
         entitlement_keys = None
         if not args.no_entitlements and (dump_game or dump_ac or dump_al):
-            if is_ps5_console(host, port):
-                entitlement_keys = running_game_entitlements(
-                    host, title, candidates, args.injector)
-                if entitlement_keys:
-                    os.makedirs(dest, exist_ok=True)
-                    write_entitlements(dest, entitlement_keys)
-                if dump_ac:
-                    ac_mounts, added = relist_dlc_mounts(
-                        host, port, title, ac_mounts)
-                    if added:
-                        print(f"  the injector mounted {len(added)} more add-on(s): "
-                              f"{', '.join(added)}")
-            else:
-                print("  skipping entitlement injection: payload requires a "
-                      "PS5 console")
+            entitlement_keys = running_game_entitlements(
+                host, title, candidates, args.injector)
+            if entitlement_keys:
+                os.makedirs(dest, exist_ok=True)
+                write_entitlements(dest, entitlement_keys)
+            if dump_ac:
+                ac_mounts, added = relist_dlc_mounts(
+                    host, port, title, ac_mounts)
+                if added:
+                    print(f"  the injector mounted {len(added)} more add-on(s): "
+                          f"{', '.join(added)}")
 
         rest_bug = None
         if dump_game or (patch_only and patch_manifest):

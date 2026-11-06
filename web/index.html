@@ -1097,10 +1097,7 @@ function syncConsolePlatform(form) {
     if (!dumpGame && patch.value === "combined") patch.value = "separate";
   }
   const noEntitlements = form.elements.no_entitlements;
-  const unsupported = form.ps5Console === false;
-  noEntitlements.disabled = unsupported;
-  noEntitlements.closest("label").title = unsupported
-    ? "Not supported on PS4" : "";
+  if (form.ps5Console === false) noEntitlements.checked = true;
   // A dump-build builds the dumped add-ons too, unless they are skipped.
   const buildsAddons = buildToggle.checked && form.elements.addon_mode.value !== "skip";
   for (const node of $$("[data-addon-only]", form)) node.hidden = !buildsAddons;
