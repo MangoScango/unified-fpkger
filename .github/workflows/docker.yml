@@ -1,4 +1,4 @@
-name: build-image
+name: build
 
 on:
   push:
@@ -7,13 +7,18 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version used in the ZIP name for manual builds"
+        default: dev
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || inputs.version || 'dev' }}
 
 concurrency:
-  group: build-image-${{ github.ref }}
+  group: build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -21,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - uses: actions/checkout@v7
@@ -44,19 +49,104 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_tag}}
             type=ref,event=branch
             type=semver,pattern={{version}}
             type=sha,format=short
 
-      - name: Build and push
+      - name: Build image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          load: true
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            fpkger-build:local
           labels: ${{ steps.meta.outputs.labels }}
           secrets: github_token=${{ secrets.GITHUB_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Export release files
+        shell: bash
+        run: |
+          case "$VERSION" in
+            ""|[!0-9A-Za-z]*|*[!0-9A-Za-z._-]*)
+              echo "Invalid release version: $VERSION" >&2
+              exit 1 ;;
+          esac
+          root="dist/unified-fpkger-$VERSION"
+          mkdir -p "$root"
+          container=$(docker create fpkger-build:local)
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          docker cp "${container}:/opt/fpkger/." "$root/"
+          docker rm "$container"
+          trap - EXIT
+          cp -p RUN.sh RUN.bat README.md LICENSE requirements.txt .env.example "$root/"
+
+      - name: Verify staged release
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import subprocess
+          import sys
+
+          sys.dont_write_bytecode = True
+          sys.path.insert(0, "release")
+          from build import validate_runtime
+
+          root = Path("dist") / f"unified-fpkger-{os.environ['VERSION']}"
+          validate_runtime(root)
+          assert os.access(root / "RUN.sh", os.X_OK)
+
+          orbis = root / "PS4_Fake_PKG_Tools_3" / "orbis-pub-cmd.exe"
+          with orbis.open("rb") as handle:
+              handle.seek(0x3681B)
+              assert handle.read(2) == b"\xEB\x07"
+
+          subprocess.run(
+              [sys.executable, "-B", str(root / "tools" / "sfo.py"), "--version"],
+              check=True,
+          )
+          sys.path.insert(0, str(root))
+          from ps_pkg_info import pkg  # noqa: F401
+          PY
+
+      - name: Package release ZIP
+        working-directory: dist
+        run: zip -qr "unified-fpkger-$VERSION.zip" "unified-fpkger-$VERSION"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: unified-fpkger-${{ env.VERSION }}
+          path: dist/unified-fpkger-${{ env.VERSION }}.zip
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Push image
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          while IFS= read -r tag; do
+            if [ -n "$tag" ]; then docker push "$tag"; fi
+          done <<< "$TAGS"
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: dist
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "unified-fpkger-$VERSION.zip" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "unified-fpkger-$VERSION.zip" \
+              --title "$GITHUB_REF_NAME" --generate-notes
+          fi
