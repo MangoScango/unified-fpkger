@@ -108,6 +108,7 @@
   label.check.addon { margin: 2px 0; font-size: 13px; align-items: flex-start; }
   label.check.addon input { margin-top: 3px; }
   @media (max-width: 520px) { .layers, .dlc-split { padding-left: 10px; } }
+  form[data-kind=dump] label:has(> input[name=sc_restore]) { display: none; }
   form[data-kind=build].multi [data-single] { opacity: .6; }
   form[data-kind=build].multi [data-single]::after { content: "One dump only"; display: block;
     font-size: 11.5px; color: var(--warn); }
@@ -351,9 +352,9 @@
     <div class="grid2">
       <label>Mode
         <select name="mode">
-          <option value="app-merge">Merged app + backport patch</option>
-          <option value="remaster">Remaster, backport baked in</option>
-          <option value="separate">App + update + backport patch</option>
+          <option value="app-merge">Merged app + update</option>
+          <option value="remaster">Remaster</option>
+          <option value="separate">Separate app + update</option>
         </select></label>
       <label>Keystone
         <select name="keystone">
