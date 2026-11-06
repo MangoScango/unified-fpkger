@@ -208,7 +208,6 @@ def fetch_all(destination):
     """Populate destination with the pinned runtime dependencies."""
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    (destination / "licenses").mkdir(exist_ok=True)
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 
     with tempfile.TemporaryDirectory(prefix="fpkger-dependencies-") as temp:

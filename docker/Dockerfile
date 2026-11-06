@@ -81,9 +81,7 @@ ENV SDK_DIR=/opt/fpkger/PS4_Fake_PKG_Tools_3 \
     WINEDEBUG=-all \
     WINEDLLOVERRIDES="wineps.drv,localspl.dll,spoolss.dll=d"
 
-COPY --from=deps /out-deps/PS4_Fake_PKG_Tools_3 /opt/fpkger/PS4_Fake_PKG_Tools_3
-COPY --from=deps /out-deps/ps_pkg_info /opt/fpkger/ps_pkg_info
-COPY --from=deps /out-deps/licenses /opt/fpkger/licenses
+COPY --from=deps /out-deps/ /opt/fpkger/
 # another-backporter is a git submodule: backport-ps5.py drives the web UI's
 # Backport tab, and its fwdb/ CSVs are backport-sdk.py's export tables. The
 # PS5 firmware dumps fakelibs are built from are not shipped; the Backport
@@ -94,10 +92,8 @@ COPY *.py \
 COPY tools /opt/fpkger/tools
 # pfsdump sends this to the console's payload loader to read PS5 add-on
 # entitlement keys from the running game.
-COPY --from=deps /out-deps/entitlements.elf /opt/fpkger/entitlements.elf
 ENV ENTITLEMENT_INJECTOR=/opt/fpkger/entitlements.elf
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY --from=deps /out-deps/drakmor /opt/fpkger/drakmor
 COPY web /opt/fpkger/web
 
 RUN chmod +x /opt/fpkger/build-pkg.py \
