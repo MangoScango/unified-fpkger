@@ -97,10 +97,7 @@ COPY tools /opt/fpkger/tools
 COPY --from=deps /out-deps/entitlements.elf /opt/fpkger/entitlements.elf
 ENV ENTITLEMENT_INJECTOR=/opt/fpkger/entitlements.elf
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-# The toolchain archive ships its own GP5 script; the source overlay below
-# keeps the repository version authoritative.
 COPY --from=deps /out-deps/drakmor /opt/fpkger/drakmor
-COPY drakmor/scripts /opt/fpkger/drakmor/scripts
 COPY web /opt/fpkger/web
 
 RUN chmod +x /opt/fpkger/build-pkg.py \

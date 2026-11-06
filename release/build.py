@@ -24,7 +24,6 @@ RUNTIME_FILES = (
     "psn_entitlements.py",
 )
 RUNTIME_DIRECTORIES = ("tools", "web", "another-backporter")
-DRAKMOR_SOURCE_FILES = ("scripts/create-gp5-from-folder.py",)
 
 
 def copy_runtime(staging):
@@ -36,13 +35,6 @@ def copy_runtime(staging):
             staging / name,
             ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
         )
-
-
-def copy_drakmor_sources(staging):
-    for name in DRAKMOR_SOURCE_FILES:
-        target = staging / "drakmor" / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT / "drakmor" / name, target)
 
 
 def validate_runtime(staging):
@@ -87,8 +79,6 @@ def build(version, output_dir):
         staging.mkdir()
         copy_runtime(staging)
         fetch_all(staging)
-        # The toolchain archive ships its own GP5 script; the repository copy wins.
-        copy_drakmor_sources(staging)
         validate_runtime(staging)
 
         if target.exists():

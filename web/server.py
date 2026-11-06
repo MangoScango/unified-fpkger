@@ -988,8 +988,6 @@ def build_ps5(job, spec, src, out_dir):
             "--volume", "ac" if addon else "app",
             "--passcode", opts["passcode"],
             "--compression-level", str(opts["compression_level"])]
-    if opts.get("exclude_non_retail"):
-        argv.append("--exclude-non-retail")
     # An SC package restores sce_sys for apps and add-ons alike; an empty
     # --sc-pkg leaves build-pkg to match one from the dump's version.xml.
     if not opts.get("sc_restore"):
@@ -1409,7 +1407,6 @@ def ps5_spec(params):
                                      create=True) if params.get("extract_dir") else None),
         "entitlement_key": entitlement_key.upper(),
         "keep_intermediate": bool(params.get("keep_intermediate")),
-        "exclude_non_retail": bool(params.get("exclude_non_retail")),
         "force": bool(params.get("force")),
     }
 
