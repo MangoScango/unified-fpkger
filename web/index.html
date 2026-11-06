@@ -1090,7 +1090,12 @@ function syncConsolePlatform(form) {
   const hint = $("[data-detect-hint]", form);
   if (hint) hint.hidden = Boolean(platform) || !buildToggle.checked;
   const patch = form.elements.patch_mode;
-  if (patch) patch.disabled = platform === "ps5" || !form.elements.dump_game.checked;
+  if (patch) {
+    const dumpGame = form.elements.dump_game.checked;
+    patch.disabled = platform === "ps5";
+    patch.querySelector('option[value="combined"]').disabled = !dumpGame;
+    if (!dumpGame && patch.value === "combined") patch.value = "separate";
+  }
   const noEntitlements = form.elements.no_entitlements;
   const unsupported = form.ps5Console === false;
   noEntitlements.disabled = unsupported;
