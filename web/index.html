@@ -215,7 +215,6 @@
         <p class="hint" id="backport-scan-status" role="status" aria-live="polite"></p>
         <ul id="backport-dumps" aria-label="Dumps and packages found" hidden></ul>
         <p class="hint" id="backport-scan-selected" aria-live="polite"></p>
-        <p class="hint">Only PS5 app dumps and app packages can be selected.</p>
       </fieldset>
       <fieldset>
         <legend>PS5 backport (another-backporter)</legend>
@@ -233,13 +232,7 @@
         <label>Title IDs (space or comma separated)
           <input type="text" name="titles" required autocomplete="off" spellcheck="false"
                  placeholder="PPSA01289 CUSA07211"></label>
-        <p class="hint">Any title IDs work — no console or dump needed. The title's
-          add-on entitlements are built into a <code>&lt;title&gt;-dlc</code> folder.
-          PSN has no entitlement keys or concept IDs, so the packages build with
-          zeroed keys.</p>
         <label class="check"><input type="checkbox" name="siblings"> Also build the other platform's sibling title (PS4↔PS5)</label>
-        <p class="hint">A store page can carry the sibling's entitlements too — and a
-          delisted sibling's own page may be gone, making this the only way to get them.</p>
         <label>Write the DLC folders into
           <span class="row"><input type="text" name="out_dir" required>
           <button type="button" data-browse="out_dir">Browse</button></span></label>
@@ -336,14 +329,9 @@
   <label>Firmware libraries (a 13.60 dump)
     <span class="row"><input type="text" name="backport_libs_dir" required>
     <button type="button" data-browse="backport_libs_dir">Browse</button></span></label>
-  <p class="hint">The folder holding <code>13.60/system/common/lib</code>, from a clean PS5
-    firmware dump. Fakelibs are built from these modules.</p>
   <label>Write the backport folder into
     <span class="row"><input type="text" name="backport_out_dir" required>
     <button type="button" data-browse="backport_out_dir">Browse</button></span></label>
-  <p class="hint">Creates <code>&lt;title&gt;-backport</code> inside it: loose files only
-    (fakelibs and patched executables), no package. Merge them into a dump and use the
-    Build tab to pack.</p>
   <div class="grid2">
     <label data-single>Title ID (default: from the source)
       <input type="text" name="backport_title" autocomplete="off" placeholder="PPSA01234"></label>

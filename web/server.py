@@ -37,6 +37,7 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -2138,6 +2139,10 @@ def main():
     server = ThreadingHTTPServer((bind, port), Handler)
     server.daemon_threads = True
     print(f">> fpkger web UI on http://{bind}:{port}/", file=sys.stderr)
+    if "--open-browser" in sys.argv[1:]:
+        host = "127.0.0.1" if bind == "0.0.0.0" else bind
+        url = f"http://{host}:{port}/"
+        threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
     folders = ", ".join(ROOTS) if ROOTS else "native OS picker (unrestricted local paths)"
     print(f">> folders: {folders}; logs: {LOG_DIR}", file=sys.stderr)
     if not PASSWORD:

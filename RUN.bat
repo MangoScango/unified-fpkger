@@ -33,7 +33,7 @@ if errorlevel 1 goto install_failed
 goto run_server
 
 :run_server
-"%VENV_PYTHON%" web\server.py %*
+"%VENV_PYTHON%" web\server.py --open-browser %*
 exit /b %errorlevel%
 
 :venv_failed

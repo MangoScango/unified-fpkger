@@ -32,4 +32,4 @@ if ! "$VENV_PYTHON" -c 'import PIL' >/dev/null 2>&1; then
     fi
 fi
 
-exec "$VENV_PYTHON" web/server.py "$@"
+exec "$VENV_PYTHON" web/server.py --open-browser "$@"
