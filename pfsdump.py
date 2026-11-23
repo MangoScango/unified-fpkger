@@ -223,6 +223,20 @@ def close_session(ftp):
     ftp.close()
 
 
+def restore_binary_mode(owner):
+    """Put a listing's connection back into binary mode before any RETR.
+
+    ftplib implements mlsd() and nlst() with retrlines(), which sends TYPE A
+    and leaves it active. A later RETR on that session would have the server
+    translate every LF in a binary file to CRLF. Reconnect when TYPE I is not
+    acknowledged, since _connect() always starts in binary mode.
+    """
+    try:
+        owner.ftp.voidcmd("TYPE I")
+    except ftplib.all_errors:
+        owner._connect()
+
+
 class FtpFile:
     """Random and sequential reads of one remote file.
 
@@ -273,6 +287,8 @@ class FtpFile:
                     return int(facts["size"])
         except ftplib.all_errors:
             return None
+        finally:
+            restore_binary_mode(self)
         return None
 
     def finish(self, conn):
@@ -344,6 +360,8 @@ class FtpMount:
             names = self._retry(lambda: self.ftp.nlst(path))
         except ftplib.all_errors:
             return []
+        finally:
+            restore_binary_mode(self)
         return sorted(name.rsplit("/", 1)[-1].rstrip("/")
                       for name in names if name.rstrip("/"))
 
@@ -356,6 +374,8 @@ class FtpMount:
             entries = self._retry(lambda: list(self.ftp.mlsd(path)))
         except ftplib.all_errors:
             return
+        finally:
+            restore_binary_mode(self)
         for name, facts in sorted(entries):
             kind = facts.get("type")
             if kind == "dir":
@@ -1844,9 +1864,9 @@ def dump_dlc_entitlements(host, port, out_dir, filter_title=None,
     count = len(licenses)
     if count == 0:
         if filter_title:
-            print(f"No DLC entitlements found for {filter_title}.")
+            print(f"No additional-content license (AL) records found for {filter_title}.")
         else:
-            print("No DLC entitlements found in entitlement.db.")
+            print("No additional-content license (AL) records found in entitlement.db.")
     else:
         print(f"Created {count} DLC unlocker template(s) under "
               f"\"{out_dir}/<title_id>-dlc/\".")
